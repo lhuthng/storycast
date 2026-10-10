@@ -449,6 +449,21 @@ fn stripped_and_kept_scripts_plan_the_same_runs() {
 }
 
 #[test]
+fn empty_text_segments_are_silently_skipped() {
+    let segs = vec![
+        json!({"speaker": "Narrator", "text": "Phụt!"}),
+        json!({"music": "quiet", "scene": "tavern night", "speaker": "Narrator", "text": ""}),
+        json!({"speaker": "Narrator", "text": "Rồi nàng cất sách đi."}),
+    ];
+    let p = planned(&segs);
+    assert_eq!(p.speech.len(), 2, "{:?}", p.speech);
+    assert!(p
+        .speech
+        .iter()
+        .all(|segment| crate::util::has_speakable_content(seg_text(segment))));
+}
+
+#[test]
 fn segments_complete_is_false_until_every_wav_exists() {
     let d = tmpdir("complete");
     let l = crate::Layout::new(&d);

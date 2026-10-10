@@ -427,7 +427,13 @@ pub fn assemble(
     let inj_takes = crate::ambience::plan_inject_takes(&slots, &inj_pool, chapter);
     let inj_durs = crate::ambience::probe_inject_durs(&inj_takes, assets);
     if on.effects {
-        crate::ambience::plan_inject_holds(&mut slots, &inj_takes, &inj_durs, speed);
+        crate::ambience::plan_inject_holds(
+            &mut slots,
+            &inj_takes,
+            &inj_durs,
+            speed,
+            map.layers.inject.default_hold_s,
+        );
     }
 
     let mut out_path = scratch.join("mix.wav");
@@ -622,7 +628,7 @@ mod tests {
         slots[1].end = 2.2;
 
         let takes = plan_inject_takes(&slots, &pool, 1);
-        plan_inject_holds(&mut slots, &takes, &durs, 1.0);
+        plan_inject_holds(&mut slots, &takes, &durs, 1.0, 2.0);
         assert_eq!(
             slots[1].inject_ms, 500,
             "the hit's 0.5 s is the last slot's"
@@ -686,7 +692,7 @@ mod tests {
         let mut slots = crate::ambience::timeline(&turns, 300, &BTreeMap::new()).unwrap();
         let durs = BTreeMap::from([("injects/sword-1.mp3".to_string(), 0.5)]);
         let takes = plan_inject_takes(&slots, &pool, 7);
-        plan_inject_holds(&mut slots, &takes, &durs, 1.0);
+        plan_inject_holds(&mut slots, &takes, &durs, 1.0, 2.0);
 
         let o = d.join("mix.wav");
         concat_slots(&slots, &o).unwrap();

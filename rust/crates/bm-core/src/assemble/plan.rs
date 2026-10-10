@@ -42,7 +42,10 @@ impl Planned {
                 continue;
             }
             let text = seg_text(seg).trim();
-            if !text.is_empty() && !crate::util::has_speakable_content(text) {
+            if text.is_empty() {
+                continue;
+            }
+            if !crate::util::has_speakable_content(text) {
                 if let Some(previous) = out.speech.last_mut() {
                     let previous_text = seg_text(previous).trim_end();
                     if crate::util::has_speakable_content(previous_text)
@@ -478,6 +481,28 @@ pub fn segment_miss(layout: &Layout, character: &str, voice: &str, exact: bool) 
     }
 }
 
+/// One recorded take, deserialized by field: an audition parses every take in
+/// the book on each press, and a `Value` tree is the slowest way to do that.
+#[derive(serde::Deserialize)]
+struct PlanTake {
+    #[serde(default)]
+    take_key: String,
+    #[serde(default)]
+    speaker: String,
+    #[serde(default)]
+    voice: String,
+    #[serde(default)]
+    voice_key: String,
+    #[serde(default)]
+    text: String,
+}
+
+#[derive(serde::Deserialize)]
+struct PlanTakes {
+    #[serde(default)]
+    takes: Vec<PlanTake>,
+}
+
 /// Every rendered segment wav for `voice` in the local cache.
 pub fn rendered_segments(layout: &Layout, engine: &str, voice: &str) -> Vec<RenderedSegment> {
     let voice = voice.trim();
@@ -491,71 +516,61 @@ pub fn rendered_segments(layout: &Layout, engine: &str, voice: &str) -> Vec<Rend
         .iter()
         .map(|s| norm_voice(s))
         .collect::<Vec<_>>();
+    // Formatted once: the loop below otherwise builds one string per file per
+    // storage tier.
+    let suffixes: Vec<String> = super::renderplan::TAKE_EXTENSIONS
+        .iter()
+        .map(|e| format!(".{e}"))
+        .collect();
 
     // Chapters present as scripts, in order. A missing script or seg dir is
     let chapters = layout.script_chapters();
 
     let mut out: Vec<RenderedSegment> = Vec::new();
     for n in chapters {
-        let text = match std::fs::read_to_string(layout.script(n)) {
-            Ok(t) => t,
-            Err(_) => continue,
-        };
-        let doc: Value = match serde_json::from_str(&text) {
-            Ok(d) => d,
-            Err(_) => continue,
-        };
-        let all: Vec<Value> = doc
-            .get("segments")
-            .and_then(|s| s.as_array())
-            .cloned()
-            .unwrap_or_default();
-        // The same plan the render and the merge used, cuts and all: a tag has
-        let planned = Planned::plan(&all);
-        let eff = &planned.speech;
         let rd = match std::fs::read_dir(layout.seg_dir(engine, n)) {
             Ok(r) => r,
             Err(_) => continue,
         };
+        let files: Vec<std::path::PathBuf> = rd.flatten().map(|e| e.path()).collect();
         // The recorded takes for this chapter, if the cluster renderer wrote
-        let takes: Vec<Value> = std::fs::read_to_string(layout.plan(n))
+        let takes: Vec<PlanTake> = std::fs::read_to_string(layout.plan(n))
             .ok()
-            .and_then(|t| serde_json::from_str::<Value>(&t).ok())
-            .and_then(|d| d.get("takes").and_then(|t| t.as_array()).cloned())
+            .and_then(|t| serde_json::from_str::<PlanTakes>(&t).ok())
+            .map(|p| p.takes)
             .unwrap_or_default();
-        for e in rd.flatten() {
-            let fname = e.file_name().to_string_lossy().to_string();
+        // By key, first take wins: a file is one take, and matching them to
+        // files by scanning the whole plan per file is quadratic.
+        let mut by_key: std::collections::HashMap<&str, &PlanTake> =
+            std::collections::HashMap::new();
+        for t in &takes {
+            by_key.entry(t.take_key.as_str()).or_insert(t);
+        }
+        // A content-addressed take carries its own speaker and text, so only
+        // the legacy `tag_voice` names below ever need the chapter's script.
+        let mut legacy: Vec<(Vec<usize>, std::path::PathBuf)> = Vec::new();
+        for path in &files {
+            let fname = path
+                .file_name()
+                .map(|f| f.to_string_lossy().to_string())
+                .unwrap_or_default();
             // Whatever the storage tier stores: the take name's extension is
-            let stem = match super::renderplan::TAKE_EXTENSIONS
-                .iter()
-                .find_map(|ext| fname.strip_suffix(&format!(".{ext}")))
-            {
+            let stem = match suffixes.iter().find_map(|ext| fname.strip_suffix(ext)) {
                 Some(s) => s,
                 None => continue,
             };
             // What the renderer writes now: content-addressed takes. The take
             if let Some(key) = stem.strip_prefix("t-") {
-                if let Some(take) = takes
-                    .iter()
-                    .find(|t| t.get("take_key").and_then(|k| k.as_str()) == Some(key))
-                {
-                    let v = take.get("voice").and_then(|v| v.as_str()).unwrap_or("");
-                    let vk = take.get("voice_key").and_then(|v| v.as_str()).unwrap_or("");
-                    if !want.contains(&norm_voice(v)) && !want.contains(&norm_voice(vk)) {
+                if let Some(take) = by_key.get(key) {
+                    if !want.contains(&norm_voice(&take.voice))
+                        && !want.contains(&norm_voice(&take.voice_key))
+                    {
                         continue;
                     }
                     out.push(RenderedSegment {
-                        speaker: take
-                            .get("speaker")
-                            .and_then(|s| s.as_str())
-                            .unwrap_or("")
-                            .to_string(),
-                        text: take
-                            .get("text")
-                            .and_then(|t| t.as_str())
-                            .unwrap_or("")
-                            .to_string(),
-                        path: e.path(),
+                        speaker: take.speaker.clone(),
+                        text: take.text.clone(),
+                        path: path.clone(),
                         chapter: n,
                     });
                 }
@@ -583,6 +598,25 @@ pub fn rendered_segments(layout: &Layout, engine: &str, voice: &str) -> Vec<Rend
             if !ok || idxs.is_empty() {
                 continue;
             }
+            legacy.push((idxs, path.clone()));
+        }
+        if legacy.is_empty() {
+            continue;
+        }
+        let Ok(text) = std::fs::read_to_string(layout.script(n)) else {
+            continue;
+        };
+        let Ok(doc) = serde_json::from_str::<Value>(&text) else {
+            continue;
+        };
+        let all: Vec<Value> = doc
+            .get("segments")
+            .and_then(|s| s.as_array())
+            .cloned()
+            .unwrap_or_default();
+        // The same plan the render and the merge used, cuts and all: a tag has
+        let eff = Planned::plan(&all).speech;
+        for (idxs, path) in legacy {
             // `.get` everywhere: a script edited since the render must cost
             let first = match eff.get(*idxs.first().unwrap()) {
                 Some(s) => s,
@@ -594,6 +628,7 @@ pub fn rendered_segments(layout: &Layout, engine: &str, voice: &str) -> Vec<Rend
                 .unwrap_or("")
                 .to_string();
             let mut text = String::new();
+            let mut ok = true;
             for i in idxs {
                 let Some(s) = eff.get(i) else {
                     ok = false;
@@ -610,7 +645,7 @@ pub fn rendered_segments(layout: &Layout, engine: &str, voice: &str) -> Vec<Rend
             out.push(RenderedSegment {
                 speaker,
                 text,
-                path: e.path(),
+                path,
                 chapter: n,
             });
         }
