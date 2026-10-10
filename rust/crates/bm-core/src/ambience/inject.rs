@@ -40,9 +40,33 @@ pub enum Inject {
         hold_s: f64,
         level: f64,
     },
+    /// A start the script left to the pool: the pooled clip answering the most
+    /// of `tags` plays. Which clip that is — and so how it behaves — is known
+    /// only when the take is drawn, so behaviour arrives with the take.
+    StartTags {
+        tags: Vec<String>,
+    },
     Stop {
         sound: String,
     },
+    /// A stop by tags: every running sound whose own tags answer `tags` fades.
+    StopTags {
+        tags: Vec<String>,
+    },
+}
+
+/// The tags of a `{"sound_tags": [...]}` / `{"stop_tags": [...]}` item, or
+/// `None` when the key is absent, is not a list, or names nothing.
+fn tag_list(v: Option<&Value>) -> Option<Vec<String>> {
+    let tags: Vec<String> = v?
+        .as_array()?
+        .iter()
+        .filter_map(|t| t.as_str())
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+        .map(str::to_string)
+        .collect();
+    (!tags.is_empty()).then_some(tags)
 }
 
 /// The directives that fire at one place on the timeline, in listed order.
@@ -55,6 +79,20 @@ pub fn injects_of(directives: &[Value], pool: &ClipPool, default_hold: f64) -> V
                 out.push(Inject::Stop {
                     sound: stop.to_string(),
                 });
+            }
+            continue;
+        }
+        // A query is silence when no pooled clip answers it, the same way an
+        // unregistered name is: neither is the mixer's to guess at.
+        if let Some(tags) = tag_list(obj.get("stop_tags")) {
+            if !audio_pool::candidates(pool, &tags).is_empty() {
+                out.push(Inject::StopTags { tags });
+            }
+            continue;
+        }
+        if let Some(tags) = tag_list(obj.get("sound_tags")) {
+            if !audio_pool::candidates(pool, &tags).is_empty() {
+                out.push(Inject::StartTags { tags });
             }
             continue;
         }
@@ -129,12 +167,33 @@ pub fn inject_take(
     }
     let seed = audio_pool::seed(chapter, slot, &[sound.to_string()]);
     let file = entry.files[(seed % entry.files.len() as u64) as usize].clone();
-    Some(audio_pool::Picked {
-        sound: sound.to_string(),
+    Some(picked(sound.to_string(), file, entry))
+}
+
+/// The take a tag query draws at one slot: the pooled clip answering the most
+/// of `tags`, rolled by the chapter and the slot so two chapters need not land
+/// on the same take of the same family.
+pub fn inject_take_tags(
+    pool: &ClipPool,
+    chapter: u32,
+    slot: usize,
+    tags: &[String],
+) -> Option<audio_pool::Picked> {
+    audio_pool::pick(pool, tags, audio_pool::seed(chapter, slot, tags))
+}
+
+/// A pooled entry as one resolution of it: the caller has already decided which
+/// sound answered, and the entry is what says how it plays.
+fn picked(sound: String, file: String, entry: &audio_pool::Sound) -> audio_pool::Picked {
+    audio_pool::Picked {
+        sound,
         file,
         looped: entry.looped,
         level: audio_pool::sound_level(entry),
-    })
+        tags: entry.tags.clone(),
+        mode: entry.mode.clone(),
+        hold: entry.hold,
+    }
 }
 
 /// The take each slot's directives resolve to, slot for slot. Computed once
@@ -151,12 +210,21 @@ pub fn plan_inject_takes(
             slot.injects
                 .iter()
                 .map(|inj| match inj {
-                    Inject::Stop { .. } => None,
+                    Inject::Stop { .. } | Inject::StopTags { .. } => None,
                     Inject::Start { sound, .. } => {
                         let take = inject_take(pool, chapter, i, sound);
                         if take.is_none() && !warned.contains(sound) {
                             warned.push(sound.clone());
                             eprintln!("inject: sound {sound:?} not in the pool -> skipped");
+                        }
+                        take
+                    }
+                    Inject::StartTags { tags } => {
+                        let take = inject_take_tags(pool, chapter, i, tags);
+                        let key = tags.join(", ");
+                        if take.is_none() && !warned.contains(&key) {
+                            warned.push(key.clone());
+                            eprintln!("inject: no pooled clip answers [{key}] -> skipped");
                         }
                         take
                     }
@@ -231,19 +299,16 @@ pub fn plan_inject_holds(
     takes: &[Vec<Option<audio_pool::Picked>>],
     durs: &BTreeMap<String, f64>,
     speed: f64,
+    default_hold: f64,
 ) {
     for (slot, slot_takes) in slots.iter_mut().zip(takes.iter()) {
         let mut solo = 0.0f64;
         for (inj, take) in slot.injects.iter().zip(slot_takes.iter()) {
-            let (mode, hold_s) = match inj {
-                Inject::Start { mode, hold_s, .. } => (*mode, *hold_s),
-                Inject::Stop { .. } => continue,
+            let Some(take) = take.as_ref() else { continue };
+            let Some((mode, hold_s, _)) = behaviour(inj, take, default_hold) else {
+                continue;
             };
-            let dur = take
-                .as_ref()
-                .and_then(|t| durs.get(&t.file))
-                .copied()
-                .unwrap_or(0.0);
+            let dur = durs.get(&take.file).copied().unwrap_or(0.0);
             solo += match mode {
                 InjectMode::Hit => dur,
                 InjectMode::Trail => hold_s.min(dur),
@@ -288,7 +353,10 @@ pub struct InjectEvent {
 
 /// A running overlap/trail tail (and, transiently, a hit): what is sounding,
 struct InjectActive {
+    /// The resolved sound's name — what a stop written as a name matches.
     sound: String,
+    /// The resolved entry's tags — what a stop written as a query matches.
+    tags: Vec<String>,
     file: String,
     start: f64,
     end: f64,
@@ -331,7 +399,26 @@ pub fn loop_filter_with_tail(copies: usize, xfade: f64, tail: &str) -> String {
 
 /// End every still-sounding instance of `sound` at `at + fade`, eased rather
 fn stop_actives(actives: &mut [InjectActive], sound: &str, at: f64, fade: f64) {
-    for a in actives.iter_mut().filter(|a| a.sound == sound) {
+    stop_where(actives, at, fade, |a| a.sound == sound);
+}
+
+/// The same for a stop written as a tag query: every running sound whose own
+/// entry answers the query, which is how a bed the pool chose gets closed.
+fn stop_tags(actives: &mut [InjectActive], tags: &[String], at: f64, fade: f64) {
+    stop_where(actives, at, fade, |a| {
+        a.tags.iter().any(|t| tags.contains(t))
+    });
+}
+
+/// End every still-sounding instance `hit` picks, from `at`, eased over `fade`
+/// rather than chopped.
+fn stop_where(
+    actives: &mut [InjectActive],
+    at: f64,
+    fade: f64,
+    hit: impl Fn(&InjectActive) -> bool,
+) {
+    for a in actives.iter_mut().filter(|a| hit(a)) {
         if at >= a.end {
             continue;
         }
@@ -340,6 +427,30 @@ fn stop_actives(actives: &mut [InjectActive], sound: &str, at: f64, fade: f64) {
         a.fade_out = (end - at).max(0.0);
     }
 }
+/// How one directive plays, and the level the mode gives it. `None` is a stop,
+/// or a start with no take to draw. A named start carries these from the pool
+/// read in `injects_of`; a tag start only learns them from the clip it draws.
+fn behaviour(
+    inj: &Inject,
+    take: &audio_pool::Picked,
+    default_hold: f64,
+) -> Option<(InjectMode, f64, f64)> {
+    match inj {
+        Inject::Start {
+            mode,
+            hold_s,
+            level,
+            ..
+        } => Some((*mode, *hold_s, *level)),
+        Inject::StartTags { .. } => {
+            let mode = inject_mode(take.mode.as_deref().unwrap_or("hit"))?;
+            let hold_s = take.hold.filter(|h| *h > 0.0).unwrap_or(default_hold);
+            Some((mode, hold_s, take.level * mode.gain()))
+        }
+        Inject::Stop { .. } | Inject::StopTags { .. } => None,
+    }
+}
+
 /// Lay a chapter's injects on the delivered clock.
 pub fn plan_injects(
     slots: &[Slot],
@@ -355,13 +466,15 @@ pub fn plan_injects(
                 Inject::Stop { sound } => {
                     stop_actives(&mut actives, sound, cursor, cfg.stop_fade_s);
                 }
-                Inject::Start {
-                    sound,
-                    mode,
-                    hold_s,
-                    level,
-                } => {
-                    let Some(take) = take else { continue };
+                Inject::StopTags { tags } => {
+                    stop_tags(&mut actives, tags, cursor, cfg.stop_fade_s);
+                }
+                Inject::Start { .. } | Inject::StartTags { .. } => {
+                    let Some(take) = take.as_ref() else { continue };
+                    let Some((mode, hold_s, level)) = behaviour(inj, take, cfg.default_hold_s)
+                    else {
+                        continue;
+                    };
                     let dur = durs.get(&take.file).copied().unwrap_or(0.0);
                     if dur <= 0.0 {
                         continue;
@@ -369,54 +482,29 @@ pub fn plan_injects(
                     // The queue is serial: every directive anchors at the
                     let anchor = cursor;
                     // Retrigger: the old instance gets out of the way before
-                    stop_actives(&mut actives, sound, anchor, cfg.fade_s);
+                    stop_actives(&mut actives, &take.sound, anchor, cfg.fade_s);
                     // A looped bed has no natural end: the clip is a length of
                     let open_end = if take.looped {
                         f64::INFINITY
                     } else {
                         anchor + dur
                     };
-                    match mode {
-                        InjectMode::Hit => {
-                            actives.push(InjectActive {
-                                sound: sound.clone(),
-                                file: take.file.clone(),
-                                start: anchor,
-                                end: open_end,
-                                level: *level,
-                                mode: *mode,
-                                fade_out: cfg.tail_fade_s,
-                                looped: take.looped,
-                            });
-                            cursor += dur;
-                        }
-                        InjectMode::Overlap => {
-                            actives.push(InjectActive {
-                                sound: sound.clone(),
-                                file: take.file.clone(),
-                                start: anchor,
-                                end: open_end,
-                                level: *level,
-                                mode: *mode,
-                                fade_out: cfg.tail_fade_s,
-                                looped: take.looped,
-                            });
-                        }
-                        InjectMode::Trail => {
-                            let solo = hold_s.min(dur);
-                            actives.push(InjectActive {
-                                sound: sound.clone(),
-                                file: take.file.clone(),
-                                start: anchor,
-                                end: open_end,
-                                level: *level,
-                                mode: *mode,
-                                fade_out: cfg.tail_fade_s,
-                                looped: take.looped,
-                            });
-                            cursor += solo;
-                        }
-                    }
+                    actives.push(InjectActive {
+                        sound: take.sound.clone(),
+                        tags: take.tags.clone(),
+                        file: take.file.clone(),
+                        start: anchor,
+                        end: open_end,
+                        level,
+                        mode,
+                        fade_out: cfg.tail_fade_s,
+                        looped: take.looped,
+                    });
+                    cursor += match mode {
+                        InjectMode::Hit => dur,
+                        InjectMode::Overlap => 0.0,
+                        InjectMode::Trail => hold_s.min(dur),
+                    };
                 }
             }
         }

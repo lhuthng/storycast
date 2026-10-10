@@ -2,9 +2,11 @@ use super::*;
 /// One reason a pooled sound cannot be removed: a thing that names it.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct UseOf {
-    /// The scene map's rule or palette value, or `ch09` for a script.
+    /// The scene map's rule or palette value, or `ch09` for a script — `ch09
+    /// query` when it is the query rather than the name that reaches the sound.
     pub by: String,
-    /// The tags that reach the sound. Empty for a script, which names the sound
+    /// The tags that reach the sound. Empty when a name does, as a script's
+    /// `sound_after` does; a `tags:` query's tags otherwise.
     pub tags: Vec<String>,
 }
 
@@ -66,9 +68,12 @@ pub fn music_usage(map: &SceneMap, pool: &ClipPool) -> Usage {
     )
 }
 
-/// Sound -> the chapters whose script places it.
-pub fn inject_usage(scripts: &[(u32, Value)]) -> BTreeMap<String, Vec<u32>> {
-    let mut out: BTreeMap<String, Vec<u32>> = BTreeMap::new();
+/// Sound -> the chapters whose script reaches it, and how. A script that names
+/// the sound places it; a tag query reaches every clip the pool could draw for
+/// it — the query is what reaches it, so the use carries the query's tags, and
+/// a clip can be in use by a chapter that never wrote its name.
+pub fn inject_usage(scripts: &[(u32, Value)], pool: &ClipPool) -> Usage {
+    let mut out: Usage = BTreeMap::new();
     for (chapter, doc) in scripts {
         let Some(items) = doc.get("segments").and_then(|s| s.as_array()) else {
             continue;
@@ -84,17 +89,43 @@ pub fn inject_usage(scripts: &[(u32, Value)]) -> BTreeMap<String, Vec<u32>> {
                 if name.is_empty() {
                     continue;
                 }
-                let chapters = out.entry(name.to_string()).or_default();
-                if !chapters.contains(chapter) {
-                    chapters.push(*chapter);
+                place(&mut out, name, *chapter, Vec::new());
+            }
+            for key in ["sound_tags", "stop_tags"] {
+                let Some(query) = item.get(key).and_then(Value::as_array) else {
+                    continue;
+                };
+                let tags: Vec<String> = query
+                    .iter()
+                    .filter_map(|t| t.as_str())
+                    .map(str::to_string)
+                    .collect();
+                for (name, _) in crate::audio_pool::candidates(pool, &tags) {
+                    place(&mut out, name, *chapter, tags.clone());
                 }
             }
         }
     }
-    for chapters in out.values_mut() {
-        chapters.sort_unstable();
+    for uses in out.values_mut() {
+        uses.sort();
+        uses.dedup();
     }
     out
+}
+
+/// Record one sound as reached by one chapter, once: named when `tags` is empty,
+/// drawn by a query otherwise.
+fn place(out: &mut Usage, name: &str, chapter: u32, tags: Vec<String>) {
+    let by = if tags.is_empty() {
+        format!("ch{chapter:02}")
+    } else {
+        format!("ch{chapter:02} query")
+    };
+    let use_of = UseOf { by, tags };
+    let uses = out.entry(name.to_string()).or_default();
+    if !uses.contains(&use_of) {
+        uses.push(use_of);
+    }
 }
 
 /// Sound -> every reason it is still in use, per layer.

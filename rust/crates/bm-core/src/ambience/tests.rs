@@ -257,12 +257,55 @@ fn inject_usage_reads_the_scripts_and_counts_a_stop() {
         ),
         // A malformed item is skipped, never counted.
         (11u32, json!({"segments": [{"sound": "  "}, {"sound": 7}]})),
+        // A query puts every clip it can draw in use.
+        (12u32, json!({"segments": [{"sound_tags": ["sword"]}]})),
+        // A `stop_tags` is a query too, and reaches the same way.
+        (13u32, json!({"segments": [{"stop_tags": ["kitchen"]}]})),
     ];
-    let usage = inject_usage(&scripts);
-    assert_eq!(usage["coin"], vec![9, 10]);
-    assert_eq!(usage["cooking"], vec![9]);
-    assert_eq!(usage["sword-slash"], vec![10]);
-    assert_eq!(usage.len(), 3, "{usage:?}");
+    let pool: ClipPool = serde_json::from_value(json!({
+        "coin": {"tags": ["coin"], "files": ["injects/coin-1.mp3"]},
+        "cooking": {"tags": ["kitchen", "food"], "files": ["injects/cooking-1.mp3"]},
+        "sword-slash": {"tags": ["sword", "slash"], "files": ["injects/slash-1.mp3"]},
+        "unreached": {"tags": ["nobody"], "files": ["injects/unreached-1.mp3"]},
+    }))
+    .unwrap();
+    let usage = inject_usage(&scripts, &pool);
+    let named = |n: u32| UseOf {
+        by: format!("ch{n:02}"),
+        tags: vec![],
+    };
+    assert_eq!(usage["coin"], vec![named(9), named(10)]);
+    assert_eq!(
+        usage["cooking"],
+        vec![
+            named(9),
+            UseOf {
+                by: "ch13 query".into(),
+                tags: vec!["kitchen".into()]
+            }
+        ],
+        "named by a chapter, and faded by another's `stop_tags` query"
+    );
+    assert_eq!(
+        usage["sword-slash"],
+        vec![
+            named(10),
+            UseOf {
+                by: "ch12 query".into(),
+                tags: vec!["sword".into()]
+            }
+        ],
+        "named by one chapter, drawn by another's query, and the use says which"
+    );
+    assert_eq!(usage.len(), 3, "a clip nothing reaches is reported nowhere: {usage:?}");
+    assert!(
+        !usage.contains_key("unreached"),
+        "no query draws `unreached`: {usage:?}"
+    );
+    assert!(
+        usage.values().all(|uses| !uses.iter().any(|u| u.by.contains("ch11"))),
+        "a malformed item is nobody's use"
+    );
 }
 
 /// The two guards a removal can hit, side by side: one sound is named by
@@ -404,9 +447,9 @@ fn run_scenes_takes_the_majority_tag() {
         json!({"scene": "courtyard-evening"}),
     ];
     let runs = crate::assemble::Planned::plan(&[
-        json!({"speaker": "A"}),
-        json!({"speaker": "A"}),
-        json!({"speaker": "A"}),
+        json!({"speaker": "A", "text": "one"}),
+        json!({"speaker": "A", "text": "two"}),
+        json!({"speaker": "A", "text": "three"}),
     ])
     .runs();
     // One scene per turn, and every segment is its own turn.
@@ -419,8 +462,11 @@ fn run_scenes_takes_the_majority_tag() {
 #[test]
 fn run_scenes_ignores_blank_tags() {
     let segments = vec![json!({"scene": ""}), json!({"scene": "  "})];
-    let runs =
-        crate::assemble::Planned::plan(&[json!({"speaker": "A"}), json!({"speaker": "A"})]).runs();
+    let runs = crate::assemble::Planned::plan(&[
+        json!({"speaker": "A", "text": "one"}),
+        json!({"speaker": "A", "text": "two"}),
+    ])
+    .runs();
     assert_eq!(run_scenes(&segments, &runs), vec!["", ""]);
 }
 
@@ -1022,11 +1068,11 @@ fn the_declared_mood_wins_and_the_legacy_shim_covers_scripts_without_one() {
     let build = |scenes: &[(&str, &str)]| -> Vec<Value> {
         scenes
             .iter()
-            .map(|(s, m)| json!({"speaker": "A", "scene": s, "music": m}))
+            .map(|(s, m)| json!({"speaker": "A", "scene": s, "music": m, "text": "line"}))
             .collect()
     };
     let runs_of =
-        |n: usize| crate::assemble::Planned::plan(&vec![json!({"speaker": "A"}); n]).runs();
+        |n: usize| crate::assemble::Planned::plan(&vec![json!({"speaker": "A", "text": "line"}); n]).runs();
 
     // Declared values are used as-is.
     let segs = build(&[("street-morning", "battle"), ("street-morning", "battle")]);
@@ -1423,6 +1469,94 @@ fn injects_of_takes_the_sounds_behaviour_from_the_pool_not_the_script() {
     );
 }
 
+/// A `tags:` item is a query, not a name: the pool answers it with the clip
+/// matching the most of the tags, and a query no clip answers is silence the
+/// same way an unregistered name is.
+#[test]
+fn injects_of_reads_a_tag_query_and_refuses_one_nothing_answers() {
+    let pool = inject_pool();
+    assert_eq!(
+        injects_of(&[json!({"sound_tags": ["water", "boiling"]})], &pool, 2.0),
+        vec![Inject::StartTags {
+            tags: vec!["water".into(), "boiling".into()]
+        }]
+    );
+    assert_eq!(
+        injects_of(&[json!({"stop_tags": ["deep"]})], &pool, 2.0),
+        vec![Inject::StopTags {
+            tags: vec!["deep".into()]
+        }]
+    );
+    // Nothing answers it, the list is empty, or it is not a list at all.
+    assert!(injects_of(
+        &[
+            json!({"sound_tags": ["nothing"]}),
+            json!({"stop_tags": ["nothing"]}),
+            json!({"sound_tags": []}),
+            json!({"sound_tags": ["  "]}),
+            json!({"sound_tags": "water"}),
+        ],
+        &pool,
+        2.0
+    )
+    .is_empty());
+}
+
+/// A query plays the clip it draws, with that clip's own mode, hold and level:
+/// nothing in the script said which clip that would be.
+#[test]
+fn a_tag_query_draws_a_clip_and_its_own_behaviour() {
+    let pool = inject_pool();
+    let cfg = InjectLayer::default();
+    let slots = vec![islot(0.0, 10.0, &[json!({"sound_tags": ["water"]})])];
+    let takes = plan_inject_takes(&slots, &pool, 1);
+    assert_eq!(takes[0][0].as_ref().map(|t| t.sound.as_str()), Some("boil"));
+    let ev = plan_injects(&slots, &takes, &durs(), &cfg);
+    assert_eq!(ev.len(), 1, "{ev:?}");
+    assert_eq!(ev[0].sound, "boil");
+    assert_eq!(ev[0].mode, InjectMode::Overlap);
+    assert_eq!(ev[0].level, 0.1, "the entry's trim at the mode's gain");
+    assert!((ev[0].start - 10.0).abs() < 1e-9, "{ev:?}");
+}
+
+/// A stop written as tags fades the bed the pool drew, and a stop written as a
+/// name closes a bed a query opened: the identity is the entry either way.
+#[test]
+fn a_tag_stop_fades_the_clip_a_query_drew() {
+    let pool = inject_pool();
+    let cfg = InjectLayer::default();
+    for stop in [json!({"stop_tags": ["deep"]}), json!({"stop": "rumble"})] {
+        let slots = vec![
+            islot(0.0, 10.0, &[json!({"sound_tags": ["deep"]})]),
+            islot(12.0, 20.0, std::slice::from_ref(&stop)),
+        ];
+        let takes = plan_inject_takes(&slots, &pool, 1);
+        let ev = plan_injects(&slots, &takes, &durs(), &cfg);
+        assert_eq!(ev.len(), 1, "{stop}: {ev:?}");
+        assert_eq!(ev[0].sound, "rumble", "{stop}");
+        assert_eq!(ev[0].mode, InjectMode::Trail, "{stop}");
+        assert!(
+            (ev[0].end - (20.0 + cfg.stop_fade_s)).abs() < 1e-9,
+            "the stop lands where slot 1 ends, then fades: {stop}: {ev:?}"
+        );
+        assert_eq!(ev[0].fade_out, cfg.stop_fade_s, "{stop}");
+    }
+    // A query that answers nothing running leaves the bed alone, and a bed that
+    // never meets its stop falls back to one play.
+    let slots = vec![
+        islot(0.0, 10.0, &[json!({"sound_tags": ["deep"]})]),
+        islot(12.0, 20.0, &[json!({"stop_tags": ["water"]})]),
+    ];
+    let takes = plan_inject_takes(&slots, &pool, 1);
+    let ev = plan_injects(&slots, &takes, &durs(), &cfg);
+    assert_eq!(ev.len(), 1, "{ev:?}");
+    assert!(
+        (ev[0].end - 19.0).abs() < 1e-9,
+        "one pass, not a loop: {ev:?}"
+    );
+    assert!(!ev[0].looped);
+}
+
 /// An `overlap` and a `trail` are beds: they run *under* the speech, so they
 #[test]
 fn a_bed_renders_at_a_tenth_of_its_level_and_a_hit_at_all_of_it() {
@@ -1446,7 +1580,7 @@ fn a_bed_renders_at_a_tenth_of_its_level_and_a_hit_at_all_of_it() {
     .iter()
     .map(|i| match i {
         Inject::Start { level, .. } => *level,
-        Inject::Stop { .. } => unreachable!("no stops in this script"),
+        other => unreachable!("no stops or tag queries in this script: {other:?}"),
     })
     .collect();
     assert_eq!(
@@ -1546,7 +1680,7 @@ fn inject_events_hit_queue_overlap_tails_and_stops_fade() {
     let takes = plan_inject_takes(&slots, &pool, 1);
     let holds_before = slots[0].gap_ms;
     let mut held = slots.clone();
-    plan_inject_holds(&mut held, &takes, &durs, 1.0);
+    plan_inject_holds(&mut held, &takes, &durs, 1.0, 2.0);
     let blood_dur = durs[&takes[0][0].as_ref().unwrap().file];
     assert_eq!(held[0].gap_ms, holds_before + (blood_dur * 1000.0) as u32);
     // Slot 1's trail adds its 3 s hold after slot 1 ends at 20.0.
@@ -1608,7 +1742,7 @@ fn holds_are_authored_delivered_and_written_pre_tempo() {
     let slots = vec![islot(0.0, 10.0, &[json!({"sound": "rumble"})])];
     let takes = plan_inject_takes(&slots, &pool, 1);
     let mut held = slots.clone();
-    plan_inject_holds(&mut held, &takes, &durs, 1.25);
+    plan_inject_holds(&mut held, &takes, &durs, 1.25, 2.0);
     assert_eq!(held[0].gap_ms, 300 + 3750, "{held:?}");
 }
 
@@ -1896,7 +2030,7 @@ fn a_hit_hold_moves_every_later_slot_and_the_layers_with_it() {
         islot(1.3, 2.2, &[]),
     ];
     let takes = plan_inject_takes(&slots, &pool, 1);
-    plan_inject_holds(&mut slots, &takes, &durs, 1.0);
+    plan_inject_holds(&mut slots, &takes, &durs, 1.0, 2.0);
     assert_eq!(slots[0].gap_ms, 300 + 1100, "the hit's whole clip");
     assert_eq!(slots[0].inject_ms, 1100);
     // The clock moved with it: slot 1 starts after the silence, not after
@@ -1914,7 +2048,7 @@ fn a_hit_hold_moves_every_later_slot_and_the_layers_with_it() {
         islot(1.3, 2.2, &[]),
     ];
     let takes = plan_inject_takes(&quiet, &pool, 1);
-    plan_inject_holds(&mut quiet, &takes, &durs, 1.0);
+    plan_inject_holds(&mut quiet, &takes, &durs, 1.0, 2.0);
     assert_eq!(quiet[0].gap_ms, 300);
     assert!((quiet[1].start - 1.3).abs() < 1e-9);
 }
