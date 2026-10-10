@@ -360,9 +360,11 @@ pub(crate) fn lift_thought_stingers(data: &mut Value, sound: Option<&str>) {
         let source = segment.get("source_id").and_then(Value::as_str);
         let next = segments.get(i + 1);
         let continues = next.and_then(|n| n.get("source_id").and_then(Value::as_str)) == source;
+        // A query starts a sound at the seam just as a name does, so neither
+        // needs the pack's thought stinger under it.
         let start_already = next
             .filter(|n| crate::util::is_sound_item(n))
-            .map(|n| n.get("sound").is_some())
+            .map(|n| n.get("sound").is_some() || n.get("sound_tags").is_some())
             .unwrap_or(false);
         lifted.push(segment.clone());
         if thought && !continues && !start_already {

@@ -368,8 +368,8 @@ Return ONE strict JSON object containing only `segments` and `fixes`:
     "mood": "one token from the mood palette below",
     "scene": "English place-time label",
     "music": "one token from the music palette in rule 8",
-    "sound_after": "sound name or none",
-    "stop_after": "sound name or none"
+    "sound_after": "a sound name, names comma-separated for one combo, or tags:<tag,tag>; omit when nothing fires",
+    "stop_after": "a sound name to fade out here, or tags:<tag,tag>; omit when nothing fires"
   }],
   "fixes": []
 }

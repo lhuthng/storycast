@@ -356,7 +356,7 @@ pub fn validate_injects(data: &Value, pool: &crate::audio_pool::ClipPool) -> Res
         );
     }
     for (i, s) in segments.iter().enumerate() {
-        let names_a_sound = s.get("sound").is_some() || s.get("stop").is_some();
+        let names_a_sound = crate::util::SOUND_KEYS.iter().any(|k| s.get(k).is_some());
         if s.get("text").is_some() {
             if names_a_sound {
                 anyhow::bail!(
@@ -383,6 +383,26 @@ pub fn validate_injects(data: &Value, pool: &crate::audio_pool::ClipPool) -> Res
                  (needs `sound` or `stop`)"
             );
         }
+        // One directive per item: two would be a seam nobody can order.
+        let carried = crate::util::SOUND_KEYS
+            .iter()
+            .filter(|k| s.get(k).is_some())
+            .count();
+        if carried > 1 {
+            anyhow::bail!(
+                "segment {i}: a sound item carries {carried} directives — write one of `sound`, \
+                 `stop`, `sound_tags` or `stop_tags`"
+            );
+        }
+        // Behaviour belongs to the clip, not to the script.
+        for key in ["mode", "hold", "level"] {
+            if s.get(key).is_some() {
+                anyhow::bail!(
+                    "segment {i}: `{key}` is not the script's to set — a sound's behaviour lives \
+                     with the sound in assets/inject-pool.json. Name the sound and nothing else"
+                );
+            }
+        }
         // A sound fires at the seam it sits in, so there has to be a seam: the
         if i == 0 || !segments[..i].iter().any(|p| p.get("text").is_some()) {
             anyhow::bail!(
@@ -399,15 +419,66 @@ pub fn validate_injects(data: &Value, pool: &crate::audio_pool::ClipPool) -> Res
                 );
             }
             // A stop for a sound nothing started is silence with extra steps:
-            let started = segments[..i]
-                .iter()
-                .any(|p| p.get("sound").and_then(|v| v.as_str()) == Some(stop));
+            // the start names it, or a query that can draw it.
+            let started = segments[..i].iter().any(|p| {
+                p.get("sound").and_then(|v| v.as_str()) == Some(stop) || query_draws(p, stop, pool)
+            });
             if !started {
                 anyhow::bail!(
                     "segment {i}: stop {stop:?} has no earlier {{\"sound\": {stop:?}}} — nothing \
                      is running to fade. A bed needs both: the start where the scene opens and \
                      this stop where it moves on"
                 );
+            }
+            continue;
+        }
+        // A stop written as tags fades whatever is running whose own entry
+        // answers the query, and that is how a bed the pool chose gets closed.
+        if let Some(tags) = s.get("stop_tags") {
+            let tags = tag_names(tags, i)?;
+            if crate::audio_pool::candidates(pool, &tags).is_empty() {
+                anyhow::bail!(
+                    "segment {i}: stop tags [{}] answer no pooled sound ({})",
+                    tags.join(", "),
+                    names()
+                );
+            }
+            if !segments[..i].iter().any(|p| start_answers(p, &tags, pool)) {
+                anyhow::bail!(
+                    "segment {i}: stop tags [{}] have nothing running to fade — no earlier sound \
+                     whose tags answer them. A bed needs both: the start where the scene opens \
+                     and this stop where it moves on",
+                    tags.join(", ")
+                );
+            }
+            continue;
+        }
+        // A start written as tags: the pool plays the clip answering the most
+        // of them, so every clip the query can land on has to be one the ear
+        // can take.
+        if let Some(tags) = s.get("sound_tags") {
+            let tags = tag_names(tags, i)?;
+            let cands = crate::audio_pool::candidates(pool, &tags);
+            if cands.is_empty() {
+                anyhow::bail!(
+                    "segment {i}: tags [{}] answer no pooled sound ({}) — write the tags a clip in \
+                     assets/inject-pool.json carries",
+                    tags.join(", "),
+                    names()
+                );
+            }
+            for (name, entry) in &cands {
+                if entry.mode.as_deref().unwrap_or("hit") != "hit" {
+                    continue;
+                }
+                if let Some(d) = entry.dur_s.filter(|d| *d > HIT_MAX_S) {
+                    anyhow::bail!(
+                        "segment {i}: tags [{}] can land on {name:?}, a {d:.0}s `hit` in the pool \
+                         — that is {d:.0}s of dead air. Give it `\"mode\": \"overlap\"` in \
+                         assets/inject-pool.json",
+                        tags.join(", ")
+                    );
+                }
             }
             continue;
         }
@@ -418,16 +489,6 @@ pub fn validate_injects(data: &Value, pool: &crate::audio_pool::ClipPool) -> Res
                 names()
             );
         };
-        // A sound item names a sound. `mode`/`hold`/`level` belong to the clip
-        for key in ["mode", "hold", "level"] {
-            if s.get(key).is_some() {
-                anyhow::bail!(
-                    "segment {i}: `{key}` is not the script's to set — a sound's behaviour lives \
-                     with the sound in assets/inject-pool.json. Write {{\"sound\": {sound:?}}} and \
-                     nothing else"
-                );
-            }
-        }
         let mode = entry.mode.as_deref().unwrap_or("hit");
         if mode == "hit" {
             if let Some(d) = entry.dur_s {
@@ -441,6 +502,64 @@ pub fn validate_injects(data: &Value, pool: &crate::audio_pool::ClipPool) -> Res
         }
     }
     Ok(())
+}
+
+/// The tags of a `sound_tags`/`stop_tags` item: a list, and at least one tag.
+fn tag_names(v: &Value, i: usize) -> Result<Vec<String>> {
+    let Some(items) = v.as_array() else {
+        anyhow::bail!("segment {i}: tags must be a list, e.g. [\"slash\", \"sword\"]");
+    };
+    let tags: Vec<String> = items
+        .iter()
+        .map(|t| {
+            t.as_str()
+                .map(str::trim)
+                .filter(|t| !t.is_empty())
+                .map(str::to_string)
+                .ok_or_else(|| anyhow::anyhow!("segment {i}: a tag must be a non-empty string"))
+        })
+        .collect::<Result<_>>()?;
+    if tags.is_empty() {
+        anyhow::bail!("segment {i}: tags is empty — name the tags to match");
+    }
+    Ok(tags)
+}
+
+/// Whether an earlier `sound_tags` item can draw the named clip — the same
+/// ranking the mix uses, so a name stop for a bed the pool chose has to find it
+/// the way the pick will.
+fn query_draws(p: &Value, name: &str, pool: &crate::audio_pool::ClipPool) -> bool {
+    let Some(query) = p.get("sound_tags").and_then(|v| v.as_array()) else {
+        return false;
+    };
+    let query: Vec<String> = query
+        .iter()
+        .filter_map(|t| t.as_str())
+        .map(str::to_string)
+        .collect();
+    crate::audio_pool::candidates(pool, &query)
+        .iter()
+        .any(|(n, _)| *n == name)
+}
+
+/// Whether an earlier sound item can be the running sound a tag query stops: it
+/// names a clip whose own tags answer, or a query one of whose clips does.
+fn start_answers(p: &Value, tags: &[String], pool: &crate::audio_pool::ClipPool) -> bool {
+    let answers = |entry: &crate::audio_pool::Sound| entry.tags.iter().any(|t| tags.contains(t));
+    if let Some(name) = p.get("sound").and_then(|v| v.as_str()) {
+        return pool.get(name).is_some_and(answers);
+    }
+    let Some(query) = p.get("sound_tags").and_then(|v| v.as_array()) else {
+        return false;
+    };
+    let query: Vec<String> = query
+        .iter()
+        .filter_map(|t| t.as_str())
+        .map(str::to_string)
+        .collect();
+    crate::audio_pool::candidates(pool, &query)
+        .iter()
+        .any(|(_, entry)| answers(entry))
 }
 
 /// The chapter's name, rewritten out of the machine-translated headline.

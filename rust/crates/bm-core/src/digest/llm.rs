@@ -139,6 +139,7 @@ fn gemini_base(settings: &Settings) -> String {
 
 async fn generate_openrouter(
     prompt: &str,
+    who: &str,
     settings: &Settings,
 ) -> Result<(String, Backend), GenError> {
     let key = std::env::var("OPENROUTER_API_KEY").map_err(|_| missing_key("OPENROUTER_API_KEY"))?;
@@ -153,9 +154,14 @@ async fn generate_openrouter(
         .timeout(Duration::from_secs(600))
         .build()
         .map_err(|e| GenError::Fatal(anyhow!(e)))?;
+    // The name is the provider the operator picked, so a gateway someone named
+    // is the one an error blames — never a vendor that was not called.
+    let who = if who.trim().is_empty() {
+        settings.analyzer.trim()
+    } else {
+        who.trim()
+    };
     // The endpoint is settings, not a constant: the public API by default, a
-    let who = settings.analyzer.trim();
-    let who = if who.is_empty() { "OpenRouter" } else { who };
     let url = format!(
         "{}/chat/completions",
         normalize_base(&settings.openrouter_url)
@@ -438,10 +444,16 @@ pub async fn generate(
             }
         }
     };
+    // What an error blames: the id the offer names, which a worker's own
+    // settings do not hold — they carry the model, the endpoint and the slot.
+    let who = match analyzer.trim() {
+        "" => settings.analyzer.trim(),
+        a => a,
+    };
     match backend.as_str() {
         "gemini" => generate_gemini(prompt, settings).await,
         "ollama" => generate_ollama(prompt, settings).await,
-        "openai" => generate_openrouter(prompt, settings).await,
+        "openai" => generate_openrouter(prompt, who, settings).await,
         other => Err(GenError::Fatal(anyhow!(
             "unknown backend {other:?} — pick a provider with L (:llm) on the inductor"
         ))),
@@ -544,6 +556,7 @@ mod tests {
     /// The repo's rule for reaching a network-only arm (ROADMAP §1: "pin the
     /// request shape against a local fixture server"), and the only way to pin
     fn fixture_server(
+        status: u16,
         response_body: &'static str,
     ) -> (String, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
         use std::io::{BufRead, BufReader, Read, Write};
@@ -577,8 +590,14 @@ mod tests {
                 sink.lock()
                     .unwrap()
                     .push(format!("{head}{}", String::from_utf8_lossy(&body)));
+                let reason = match status {
+                    200 => "OK",
+                    401 => "Unauthorized",
+                    404 => "Not Found",
+                    _ => "Error",
+                };
                 let resp = format!(
-                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n\
+                    "HTTP/1.1 {status} {reason}\r\ncontent-type: application/json\r\n\
                      content-length: {}\r\nconnection: close\r\n\r\n{}",
                     response_body.len(),
                     response_body
@@ -603,8 +622,10 @@ mod tests {
         let _g = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let saved = std::env::var("GEMINI_API_KEY").ok();
         std::env::set_var("GEMINI_API_KEY", "k-secret");
-        let (url, seen) =
-            fixture_server(r#"{"candidates":[{"content":{"parts":[{"text":"{}"}]}}]}"#);
+        let (url, seen) = fixture_server(
+            200,
+            r#"{"candidates":[{"content":{"parts":[{"text":"{}"}]}}]}"#,
+        );
         let settings = Settings {
             gemini_url: url.clone(),
             analyze_models: vec!["gemini-3.5-flash".into()],
@@ -657,7 +678,7 @@ mod tests {
         let _g = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let saved = std::env::var("OPENROUTER_API_KEY").ok();
         std::env::set_var("OPENROUTER_API_KEY", "or-secret");
-        let (url, seen) = fixture_server(r#"{"choices":[{"message":{"content":"{}"}}]}"#);
+        let (url, seen) = fixture_server(200, r#"{"choices":[{"message":{"content":"{}"}}]}"#);
         let settings = Settings {
             openrouter_url: url.clone(),
             openrouter_model: "some/model".into(),
@@ -665,7 +686,7 @@ mod tests {
             ..Settings::default()
         };
         let (text, backend) = runtime()
-            .block_on(generate_openrouter("{}", &settings))
+            .block_on(generate_openrouter("{}", "my-gateway", &settings))
             .expect("the fixture answers");
         assert_eq!(text, "{}");
         assert_eq!(backend, Backend::Openrouter);
@@ -680,6 +701,89 @@ mod tests {
         assert!(!lower.contains("storycast"), "{req}");
         // The model the operator picked is what is asked for, not a default.
         assert!(req.contains("some/model"), "{req}");
+        if let Some(k) = saved {
+            std::env::set_var("OPENROUTER_API_KEY", k);
+        } else {
+            std::env::remove_var("OPENROUTER_API_KEY");
+        }
+    }
+
+    #[test]
+    fn a_provider_the_operator_names_digests_like_a_shipped_one() {
+        // The `L` screen's `n` writes a `kind` + `base_url` entry the code has
+        // never heard of. Everything after that is the shipped path, and this
+        // pins the seam: the offer carries the id, the protocol and the URL,
+        // and the key lands in the slot its kind names.
+        let _g = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let saved = std::env::var("OPENROUTER_API_KEY").ok();
+        std::env::set_var("OPENROUTER_API_KEY", "gw-secret");
+        let (url, seen) = fixture_server(200, r#"{"choices":[{"message":{"content":"{}"}}]}"#);
+        let cfg = crate::config::LlmConfig {
+            active: "my-gateway".into(),
+            providers: [(
+                "my-gateway".to_string(),
+                crate::config::ProviderEntry {
+                    kind: "openai".into(),
+                    base_url: url.clone(),
+                    api_key: "gw-secret".into(),
+                    model: "some/model".into(),
+                },
+            )]
+            .into_iter()
+            .collect(),
+        };
+
+        let (analyzer, block) = cfg.offer_analyzer(&Settings::default());
+        assert_eq!(analyzer, "my-gateway", "the id is what the offer names");
+        assert_eq!(block.backend, "openai");
+        assert_eq!(block.openrouter_url, url, "the entry's own endpoint");
+        // A box with no settings file of its own runs on the offer alone.
+        let settings = Settings::default().with_analyzer_settings(&block);
+        assert_eq!(settings.analyzer_backend, "openai");
+
+        let (text, backend) = runtime()
+            .block_on(generate("{}", &analyzer, &settings))
+            .expect("the fixture answers");
+        assert_eq!(text, "{}");
+        assert_eq!(backend, Backend::Openrouter);
+
+        let seen = seen.lock().unwrap();
+        let req = seen.first().expect("one request arrived");
+        assert!(req.starts_with("POST /chat/completions HTTP/1.1"), "{req}");
+        assert!(
+            req.to_ascii_lowercase()
+                .contains("authorization: bearer gw-secret"),
+            "{req}"
+        );
+        assert!(req.contains("some/model"), "{req}");
+        if let Some(k) = saved {
+            std::env::set_var("OPENROUTER_API_KEY", k);
+        } else {
+            std::env::remove_var("OPENROUTER_API_KEY");
+        }
+    }
+
+    #[test]
+    fn a_failure_blames_the_provider_the_operator_set_up() {
+        // The label is the container's, not a vendor's. A worker holds no
+        // `settings.analyzer` — the offer names the id — so a gateway someone
+        // added has to be named by what the offer carried, not by OpenRouter.
+        let _g = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let saved = std::env::var("OPENROUTER_API_KEY").ok();
+        std::env::set_var("OPENROUTER_API_KEY", "gw-secret");
+        let (url, _seen) = fixture_server(401, r#"{"error":{"message":"Invalid API key"}}"#);
+        let settings = Settings {
+            analyzer_backend: "openai".into(),
+            openrouter_url: url,
+            openrouter_model: "some/model".into(),
+            ..Settings::default()
+        };
+        let err = runtime()
+            .block_on(generate("{}", "gemini-proxy", &settings))
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("gemini-proxy error 401"), "{msg}");
+        assert!(!msg.contains("OpenRouter"), "{msg}");
         if let Some(k) = saved {
             std::env::set_var("OPENROUTER_API_KEY", k);
         } else {

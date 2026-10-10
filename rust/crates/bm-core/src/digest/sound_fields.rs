@@ -1,39 +1,130 @@
 use super::prompts::PreparedChapter;
 use super::*;
+/// The tag-query prefix: `tags:slash,sword` asks the pool for the clip that
+/// answers the most of those tags, rather than naming one.
+const TAGS_PREFIX: &str = "tags:";
+
+/// What one `sound_after`/`stop_after` value asks for at its seam.
+pub(crate) enum Seam {
+    /// Absent, `none`, or an empty list: nothing fires here.
+    Nothing,
+    /// The names to fire, in order. A combo is `"cooking,clang"`: the answer
+    /// schema is the legacy OpenAPI subset, which has no `anyOf`, so a list
+    /// travels as a delimited string. An array is accepted too — a hand-written
+    /// script is not decoder-bounded.
+    Names(Vec<String>),
+    /// Tags the pool answers with its best-matching clip.
+    Tags(Vec<String>),
+}
+
+/// Read one seam field.
+pub(crate) fn seam_value(v: &Value, key: &str) -> Result<Seam> {
+    match v {
+        Value::Null => Ok(Seam::Nothing),
+        Value::String(s) => {
+            let t = s.trim();
+            if t.is_empty() {
+                anyhow::bail!("`{key}` is empty — omit it where nothing fires");
+            }
+            match t.strip_prefix(TAGS_PREFIX) {
+                Some(query) => Ok(Seam::Tags(tag_query(query, key)?)),
+                None => Ok(Seam::Names(names(t.split(','), key)?)),
+            }
+        }
+        Value::Array(items) => {
+            let parts = items
+                .iter()
+                .map(|item| {
+                    item.as_str()
+                        .ok_or_else(|| anyhow::anyhow!("`{key}` must name sounds as strings"))
+                })
+                .collect::<Result<Vec<&str>>>()?;
+            Ok(Seam::Names(names(parts.into_iter(), key)?))
+        }
+        _ => anyhow::bail!("`{key}` must be a string of sound names"),
+    }
+}
+
+/// The names a field lists, in order. An empty one is refused, and a `none`
+/// from an answer written before these fields were optional fires nothing.
+fn names<'a>(parts: impl Iterator<Item = &'a str>, key: &str) -> Result<Vec<String>> {
+    let mut out = Vec::new();
+    for part in parts {
+        let t = part.trim();
+        if t.is_empty() {
+            anyhow::bail!("`{key}` names an empty sound — omit it where nothing fires");
+        }
+        if !t.eq_ignore_ascii_case("none") {
+            out.push(t.to_string());
+        }
+    }
+    Ok(out)
+}
+
+/// The tags of a `tags:` query, at least one.
+fn tag_query(query: &str, key: &str) -> Result<Vec<String>> {
+    let tags: Vec<String> = query
+        .split(',')
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+        .map(str::to_string)
+        .collect();
+    if tags.is_empty() {
+        anyhow::bail!(
+            "`{key}` says `{TAGS_PREFIX}` and names no tags — write `tags:slash,sword`, or omit \
+             the field where nothing fires"
+        );
+    }
+    Ok(tags)
+}
+
 /// Write a chapter's script where every consumer reads it.
 pub(crate) fn expand_sound_fields(segments: &[Value]) -> Result<Vec<Value>> {
     let mut out = Vec::with_capacity(segments.len());
     for (i, s) in segments.iter().enumerate() {
         let mut line = s.clone();
-        let take = |key: &str, line: &mut Value| -> Option<String> {
+        let take = |key: &str, line: &mut Value| -> Option<Value> {
             line.as_object_mut()
                 .and_then(|o| o.remove(key))
-                .map(|v| v.as_str().map(str::trim).unwrap_or("").to_string())
+                .filter(|v| !v.is_null())
         };
         let fields = [
             ("sound_after", take("sound_after", &mut line)),
             ("stop_after", take("stop_after", &mut line)),
         ];
-        for (key, v) in &fields {
-            // An empty string is what a line looks like when nobody decided.
-            if v.as_deref() == Some("") {
-                anyhow::bail!(
-                    "segment {i}: `{key}` is empty — write \"none\" when nothing fires at this \
-                     seam. A blank value is a line nobody decided about"
-                );
-            }
+        // Resolve before the line is pushed: a refused value must not leave a
+        let mut seams: Vec<(&str, Seam)> = Vec::new();
+        for (key, v) in fields {
+            let seam = match v {
+                Some(v) => {
+                    seam_value(&v, key).map_err(|e| anyhow::anyhow!("segment {i}: {e:#}"))?
+                }
+                None => Seam::Nothing,
+            };
+            seams.push((key, seam));
         }
         out.push(line);
         // A sound and then its stop, in that order: the pair brackets the line
-        for (key, v) in &fields {
-            let Some(v) = v.as_deref().filter(|v| !v.eq_ignore_ascii_case("none")) else {
-                continue;
-            };
-            out.push(if *key == "sound_after" {
-                json!({ "sound": v })
-            } else {
-                json!({ "stop": v })
-            });
+        for (key, seam) in seams {
+            let stop = key == "stop_after";
+            match seam {
+                Seam::Nothing => {}
+                Seam::Names(names) => {
+                    for name in names {
+                        out.push(if stop {
+                            json!({"stop": name})
+                        } else {
+                            json!({"sound": name})
+                        });
+                    }
+                }
+                // One item, not one per tag: the pool picks, not the script.
+                Seam::Tags(tags) => out.push(if stop {
+                    json!({"stop_tags": tags})
+                } else {
+                    json!({"sound_tags": tags})
+                }),
+            }
         }
     }
     Ok(out)
@@ -142,13 +233,42 @@ pub(crate) fn open_beds(script: &Value, pool: &crate::audio_pool::ClipPool) -> V
                 open.push(sound);
             }
         }
+        // A query opens every looped clip it can draw: a bed the pool chose is
+        // still a bed, and one nobody stops still stops dead.
+        if let Some(tags) = seam_tags(item, "sound_tags") {
+            for (name, entry) in crate::audio_pool::candidates(pool, &tags) {
+                if entry.looped && !open.contains(&name) {
+                    open.push(name);
+                }
+            }
+        }
         if let Some(stop) = item.get("stop").and_then(|v| v.as_str()) {
             if let Some(i) = open.iter().position(|s| *s == stop) {
                 open.remove(i);
             }
         }
+        // A query closes every open bed whose own tags answer it.
+        if let Some(tags) = seam_tags(item, "stop_tags") {
+            open.retain(|name| {
+                !pool
+                    .get(*name)
+                    .is_some_and(|e| e.tags.iter().any(|t| tags.contains(t)))
+            });
+        }
     }
     open.into_iter().map(str::to_string).collect()
+}
+
+/// The tags of a written `sound_tags`/`stop_tags` item, as a list.
+fn seam_tags(item: &Value, key: &str) -> Option<Vec<String>> {
+    let tags: Vec<String> = item
+        .get(key)?
+        .as_array()?
+        .iter()
+        .filter_map(|t| t.as_str())
+        .map(str::to_string)
+        .collect();
+    (!tags.is_empty()).then_some(tags)
 }
 
 /// Rule 2 alone: the text stages sounds and this script places none. `cues` is

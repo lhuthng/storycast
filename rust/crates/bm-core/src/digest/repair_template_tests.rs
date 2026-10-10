@@ -47,15 +47,22 @@ fn the_repair_pass_renders_from_the_prompt_file_not_a_hardcoded_string() {
             !prompt.contains("{chapter_text}"),
             "an unrendered placeholder"
         );
+        let shown = crate::crawl::sanitize_chapter_text(BROKEN);
         assert!(
-            prompt.contains(BROKEN),
+            prompt.contains(shown.trim()),
             "the whole chapter is proofread, not a window"
         );
-        // What the file cannot be allowed to talk its way out of.
+        // The contract states the shape code reads back, and nothing else: the
+        // words and the marks belong to the model, so no rejection rule may be
+        // claimed that code does not enforce.
         assert!(prompt.contains("---REPAIR OUTPUT CONTRACT---"), "{prompt}");
         assert!(
-            prompt.contains("REJECTED"),
-            "the verifier's rule must be stated"
+            prompt.contains("\"changes\""),
+            "the answer's shape must be stated: {prompt}"
+        );
+        assert!(
+            !prompt.contains("REJECTED"),
+            "a rail code does not enforce must not be claimed: {prompt}"
         );
         std::fs::remove_dir_all(&root).ok();
     }

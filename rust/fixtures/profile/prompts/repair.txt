@@ -1,0 +1,8 @@
+Fixture proofread prompt. Return the chapter's text with its quotation structure put
+right, and nothing else changed.
+
+INPUT 1 — what the scanner found:
+{fault_line}
+
+---CHAPTER---
+{chapter_text}

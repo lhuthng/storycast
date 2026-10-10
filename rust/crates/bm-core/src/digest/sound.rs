@@ -12,6 +12,7 @@ use super::prompts::load_map;
 use super::prompts::PreparedChapter;
 use super::sound_fields::carry_forward_fields;
 use super::sound_fields::expand_sound_fields;
+use super::sound_fields::seam_value;
 use super::sound_fields::silent_design;
 use super::sound_fields::unclosed_beds;
 use super::*;
@@ -129,7 +130,8 @@ const SOUND_RULES_HEAD: &str = "---MUSIC PALETTE---";
 const SOUND_RULES_TAIL: &str = "---SOUND OUTPUT CONTRACT---";
 
 /// Apply one answer entry's sound fields to a cloned line. Absent fields stay
-/// absent (carried later); an empty string on a required field is refused.
+/// absent (carried later) and so does a `null` — a model that says "nothing"
+/// that way is saying what an omission says; an empty string is refused.
 fn apply_sound_fields(line: &mut Value, entry: &Value, id: usize) -> Result<(), String> {
     for key in ["scene", "music"] {
         match entry.get(key).and_then(Value::as_str) {
@@ -138,19 +140,19 @@ fn apply_sound_fields(line: &mut Value, entry: &Value, id: usize) -> Result<(), 
         }
     }
     for key in ["sound_after", "stop_after"] {
-        let Some(v) = entry.get(key) else {
+        let Some(v) = entry.get(key).filter(|v| !v.is_null()) else {
             continue;
         };
-        let Some(s) = v.as_str() else {
-            return Err(format!("sound line {id}: `{key}` must be a string"));
+        // A string travels as written and keeps its delimiters; an array is
+        // normalized to its names, since only a hand-written script sends one.
+        let value = match v {
+            Value::String(s) => json!(s.trim()),
+            other => other.clone(),
         };
-        if s.trim().is_empty() {
-            return Err(format!(
-                "sound line {id}: `{key}` is empty — write \"none\" where nothing fires; a blank \
-                 value is a line nobody decided about"
-            ));
+        if let Err(e) = seam_value(&value, key) {
+            return Err(format!("sound line {id}: {e:#}"));
         }
-        line[key] = json!(s.trim());
+        line[key] = value;
     }
     Ok(())
 }

@@ -85,10 +85,22 @@ other id.
     holds — is a property of the clip and lives with it in the pool. Write the
     name; the pool decides.
 
-    `sound_after` and `stop_after` are REQUIRED on every line. Write the literal
-    `none` on a line where nothing fires — never a blank string, and never by
-    leaving the field out. `none` is a decision; a blank is what a line looks
-    like when nobody made one, and it is refused.
+    A seam may carry MORE THAN ONE sound. Join the names with COMMAS and they
+    fire there in that order: `"sound_after": "cooking,clang"` opens the kitchen
+    bed and lands the clang on the same beat, and `"stop_after":
+    "footstep-stone,cooking"` closes two beds on one line. A bed and the moment
+    that happens under it are the pair this exists for.
+
+    A sound need not be NAMED. Write `tags:` and the tags you want, and the pool
+    plays the clip matching the most of them: `"sound_after": "tags:slash,sword"`
+    is the sword slash where the pack has one, and any slash where it does not —
+    the pool line above lists each sound's own tags. `stop_after` takes the same
+    form and fades every running sound whose tags answer it: `"stop_after":
+    "tags:kitchen"` closes whichever kitchen bed is playing, named by you or not.
+
+    OMIT BOTH FIELDS on a line where nothing fires — most lines are quiet, and an
+    absent field says so. A blank string is not a way to say the same thing; it
+    is refused.
 
     A sound marked **`loop`** is a bed: it repeats for as long as you let it,
     with a short crossfade at each seam, so its length follows the scene and not
@@ -149,8 +161,8 @@ Return ONE strict JSON object:
     "text": "present ONLY on a half of a line you split; omit it otherwise",
     "scene": "English place-time label, or omit to carry the previous one",
     "music": "one token from the palette in rule 8, or omit to carry the previous one",
-    "sound_after": "a sound name from rule 10, or the literal none",
-    "stop_after": "a sound name to fade out here, or the literal none"
+    "sound_after": "a sound name from rule 10, names comma-separated for one combo, or tags:<tag,tag>; omit when nothing fires",
+    "stop_after": "a sound name to fade out here, names comma-separated for several, or tags:<tag,tag>; omit when nothing fires"
   }]
 }
 

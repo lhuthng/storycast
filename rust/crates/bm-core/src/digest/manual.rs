@@ -15,8 +15,14 @@ use super::prepare::prepare_chapter;
 use super::prompts::build_staging_prompt;
 use super::prompts::load_map;
 use super::prompts::PreparedChapter;
+use super::quotes::RepairVerdict;
+use super::quotes::build_repair_prompt;
 use super::quotes::effective_text;
+use super::quotes::judge_repair;
+use super::quotes::keep_repaired;
+use super::quotes::needs_proofread;
 use super::quotes::quote_findings;
+use super::quotes::repair_complaint;
 use super::run::assemble_outcome;
 use super::run::Round;
 use super::*;
@@ -138,6 +144,10 @@ fn manual_inputs(layout: &Layout, n: u32) -> Result<(Value, String)> {
 }
 
 /// Build the prompt for a manual round.
+///
+/// The rounds are the worker's own, in the worker's order: the operator replaces
+/// the model's transport and nothing else. So a chapter that has not had its
+/// proofread is asked for one here, whatever the scan said about it.
 pub fn manual_prompt(
     layout: &Layout,
     engine: &str,
@@ -145,6 +155,32 @@ pub fn manual_prompt(
     cast: Option<&Value>,
 ) -> Result<ManualPrompt> {
     let session = ManualSession::open(layout, n)?;
+    if cast.is_none() && session.parts.len() == 0 && needs_proofread(layout, n, &session.original)
+    {
+        return proofread_step(layout, &session);
+    }
+    round_step(layout, engine, &session, cast)
+}
+
+/// The chapter's proofread prompt: the pass that opens a chapter, and the only
+/// one that may edit the text.
+fn proofread_step(layout: &Layout, session: &ManualSession) -> Result<ManualPrompt> {
+    let findings = quote_findings(&session.text);
+    Ok(ManualPrompt {
+        round: Round::Repair,
+        text: build_repair_prompt(layout, &session.text, &repair_complaint(&findings))?,
+        part: None,
+    })
+}
+
+/// The attribution or staging prompt for the part the session is on.
+fn round_step(
+    layout: &Layout,
+    engine: &str,
+    session: &ManualSession,
+    cast: Option<&Value>,
+) -> Result<ManualPrompt> {
+    let n = session.n;
     let index = session.parts.len();
     let slice = session.slice(index).ok_or_else(|| {
         anyhow::anyhow!(
@@ -185,6 +221,9 @@ pub fn manual_prompt(
 
 /// One chapter as the manual flow needs it: the text, the bible, and the plan —
 struct ManualSession {
+    pub(crate) n: u32,
+    /// The chapter as it is on disk: what a proofread record is keyed by.
+    pub(crate) original: String,
     pub(crate) bible: Value,
     pub(crate) text: String,
     pub(crate) prepared: PreparedChapter,
@@ -196,24 +235,14 @@ struct ManualSession {
 impl ManualSession {
     pub(crate) fn open(layout: &Layout, n: u32) -> Result<ManualSession> {
         let (bible, original) = manual_inputs(layout, n)?;
-        // The same gate the worker's digest runs, and for the same reason: the
         let text = effective_text(layout, n, &original);
-        if let Some(f) = quote_findings(&text).first() {
-            anyhow::bail!(
-                "ch{n} quote structure is broken: {} at paragraph {} ({:?}), so speech and \
-                 narration are mis-split. Run the automatic digest once to proofread it, or \
-                 fix the quote in {} by hand",
-                f.kind,
-                f.paragraph,
-                head_chars(&f.text, 60),
-                layout.chapter_txt(n).display()
-            );
-        }
         let prepared = prepare_chapter(&text);
         let settings = Settings::load(&layout.settings());
         let windows = plan_windows(&prepared, &settings.digest);
         let parts = Parts::open(layout, n, &text, &bible, &windows, &settings);
         Ok(ManualSession {
+            n,
+            original,
             bible,
             text,
             prepared,
@@ -266,6 +295,29 @@ pub fn manual_accept(
     let continuity = session.continuity(index, &summaries);
     match round {
         Round::Sound => unreachable!("the manual flow sounds a chapter in its staging pass"),
+        // The chapter's first prompt. A pasted proofread either lands in the
+        // sidecar or the chapter stops here: nothing downstream edits the text.
+        Round::Repair => {
+            match judge_repair(pasted) {
+                RepairVerdict::Fixed(fixed, changes) => {
+                    keep_repaired(layout, n, &session.text, &fixed, &changes);
+                }
+                RepairVerdict::Reject(why) => anyhow::bail!(
+                    "ch{n} the pasted proofread is not usable ({why}); the chapter is not \
+                     digested — paste a corrected chapter, or fix {} by hand",
+                    layout.chapter_txt(n).display()
+                ),
+            }
+            // The chapter is on disk now, so the next prompt is rendered against
+            // the text the audio will actually speak, and it is the next round:
+            // the proofread is behind this chapter.
+            let session = ManualSession::open(layout, n)?;
+            Ok(ManualAnswer {
+                prompt: Some(round_step(layout, engine, &session, None)?),
+                cast: None,
+                outcome: None,
+            })
+        }
         Round::Attribution => Ok(ManualAnswer {
             // Round 2's prompt is **not** built here: it carries the engine's
             prompt: None,

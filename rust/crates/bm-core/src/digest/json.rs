@@ -13,10 +13,25 @@ pub(crate) fn strip_fences(raw: &str) -> &str {
 /// boundary again. Alternating the repairs until neither changes anything is
 /// the only order that converges on such input.
 pub(crate) fn parse_json_repaired(input: &str) -> Result<Value> {
-    if let Ok(value) = serde_json::from_str(input) {
+    // The two shapes a model produces for one object: the object itself with a
+    // few raw marks in it, and the object escaped a level too deep (its own
+    // closing quote escaped with it, so the last string never ends).
+    if let Some(value) = repair_once(input) {
         return Ok(value);
     }
+    let unescaped = unescape_json_string(input);
+    if unescaped != input {
+        if let Some(value) = repair_once(&unescaped) {
+            return Ok(value);
+        }
+    }
+    let error = serde_json::from_str::<Value>(input).expect_err("the fast path above rejected it");
+    Err(json_failure(&error))
+}
 
+/// The repair ladder for one candidate: quotes and control characters, each
+/// fixing what the other needs to see, until serde is satisfied.
+fn repair_once(input: &str) -> Option<Value> {
     // **Order matters, and it is quotes first, control characters second.**
     //
     // Escaping a control character needs to know which quotes open a string, so
@@ -24,31 +39,66 @@ pub(crate) fn parse_json_repaired(input: &str) -> Result<Value> {
     // each quote repair is worse than useless: an escaped quote reads as "a
     // literal quote inside a string", so the scanner never sees the string
     let mut candidate = input.to_string();
-    for _ in 0..64 {
+    for _ in 0..256 {
         let error = match serde_json::from_str(&candidate) {
-            Ok(value) => return Ok(value),
+            Ok(value) => return Some(value),
             Err(error) => error,
         };
-        // A control character is the other half's job; handing it to the quote
-        if error.to_string().contains("control character") {
-            break;
+        // Each complaint is handed to the repair that owns it, and the loop
+        // re-reads the fresh error the previous repair produced. Breaking on
+        // the first control character is what lost a chapter: its answer also
+        // carried raw marks, and the quote pass never got to see them.
+        let complaint = error.to_string();
+        let repaired = if complaint.contains("control character") {
+            escape_json_control_chars(&candidate)
+        } else if complaint.contains("trailing comma") {
+            remove_json_trailing_commas(&candidate)
+        } else {
+            String::new()
+        };
+        if !repaired.is_empty() {
+            if repaired == candidate {
+                return None;
+            }
+            candidate = repaired;
+            continue;
         }
         // A **fresh** parse every time, because serde's line and column belong
-        let Some(error_offset) = json_error_offset(&candidate, &error) else {
-            return Err(json_failure(&error));
-        };
-        let Some(quote) = nearest_unescaped_quote(&candidate, error_offset) else {
-            return Err(json_failure(&error));
-        };
+        let error_offset = json_error_offset(&candidate, &error)?;
+        let quote = nearest_unescaped_quote(&candidate, error_offset)?;
         candidate.insert(quote, '\\');
     }
 
     // The scanner treats paired literal quotes as balanced, which is also how
-    let candidate = remove_json_trailing_commas(&escape_json_control_chars(&candidate));
-    match serde_json::from_str(&candidate) {
-        Ok(value) => Ok(value),
-        Err(error) => Err(json_failure(&error)),
+    let candidate = remove_json_trailing_commas(&candidate);
+    serde_json::from_str(&candidate).ok()
+}
+
+/// The text a JSON string's own escapes stand for: the object a model returned
+/// escaped one level too deep.
+fn unescape_json_string(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut chars = input.chars();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        match chars.next() {
+            Some('n') => out.push('\n'),
+            Some('t') => out.push('\t'),
+            Some('r') => out.push('\r'),
+            Some('"') => out.push('"'),
+            Some('\\') => out.push('\\'),
+            Some('/') => out.push('/'),
+            Some(other) => {
+                out.push('\\');
+                out.push(other);
+            }
+            None => out.push('\\'),
+        }
     }
+    out
 }
 
 /// The parse error a model can act on.

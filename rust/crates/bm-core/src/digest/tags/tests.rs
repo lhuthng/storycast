@@ -577,6 +577,91 @@ fn validate_injects_accepts_sound_items_and_refuses_bad_names_and_long_hits() {
     assert!(err.to_string().contains("not a top-level array"), "{err}");
 }
 
+/// A tag query is checked against the pool that will answer it: a query no clip
+/// answers is a typo the digest refuses, not silence discovered at mix time.
+#[test]
+fn validate_injects_checks_tag_queries_against_the_pool() {
+    use crate::audio_pool::{ClipPool, Sound};
+    let mk = |tags: &[&str], mode: &str| Sound {
+        tags: tags.iter().map(|t| t.to_string()).collect(),
+        files: vec!["injects/x.mp3".into()],
+        looped: false,
+        dur_s: Some(0.5),
+        mode: Some(mode.into()),
+        hold: None,
+        level: None,
+    };
+    let pool: ClipPool = [
+        ("sword-slash", mk(&["sword", "slash", "blade"], "hit")),
+        ("food-prep", mk(&["kitchen", "prep"], "overlap")),
+    ]
+    .into_iter()
+    .map(|(k, v)| (k.to_string(), v))
+    .collect();
+    let doc = |sounds: Value| {
+        let mut items = vec![json!({"speaker": "Narrator", "text": "Hắn vung kiếm."})];
+        items.extend(sounds.as_array().cloned().unwrap_or_default());
+        items.push(json!({"speaker": "Narrator", "text": "Rồi hắn gục xuống."}));
+        json!({"segments": items, "roster": ["Narrator"]})
+    };
+    // A query the pool answers, closed by a query that answers what it drew.
+    validate_injects(
+        &doc(json!([
+            {"sound_tags": ["slash", "sword"]},
+            {"sound_tags": ["kitchen"]},
+            {"stop_tags": ["prep"]}
+        ])),
+        &pool,
+    )
+    .unwrap();
+    // A name start closed by a query, a query start closed by a name.
+    validate_injects(
+        &doc(json!([
+            {"sound_tags": ["sword"]},
+            {"stop": "sword-slash"},
+            {"sound": "food-prep"},
+            {"stop_tags": ["kitchen"]}
+        ])),
+        &pool,
+    )
+    .unwrap();
+    // Nothing answers the query, in either direction.
+    let err = validate_injects(&doc(json!([{"sound_tags": ["thunder"]}])), &pool).unwrap_err();
+    assert!(err.to_string().contains("thunder"), "{err}");
+    let err = validate_injects(&doc(json!([{"stop_tags": ["thunder"]}])), &pool).unwrap_err();
+    assert!(err.to_string().contains("thunder"), "{err}");
+    // A stop query with nothing running to fade.
+    let err = validate_injects(&doc(json!([{"stop_tags": ["prep"]}])), &pool).unwrap_err();
+    assert!(err.to_string().contains("nothing running"), "{err}");
+    // A name stop for a bed only a query opened, and the query cannot draw it.
+    let err = validate_injects(
+        &doc(json!([{"sound_tags": ["kitchen"]}, {"stop": "sword-slash"}])),
+        &pool,
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("sword-slash"), "{err}");
+    // One directive per item.
+    let err = validate_injects(
+        &doc(json!([{"sound": "food-prep", "sound_tags": ["kitchen"]}])),
+        &pool,
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("directives"), "{err}");
+    // Empty, malformed, and behaviour the script does not own.
+    let err = validate_injects(&doc(json!([{"sound_tags": []}])), &pool).unwrap_err();
+    assert!(err.to_string().contains("empty"), "{err}");
+    let err = validate_injects(&doc(json!([{"sound_tags": ["slash", 3]}])), &pool).unwrap_err();
+    assert!(err.to_string().contains("non-empty string"), "{err}");
+    let err = validate_injects(&doc(json!([{"sound_tags": "slash"}])), &pool).unwrap_err();
+    assert!(err.to_string().contains("must be a list"), "{err}");
+    let err = validate_injects(
+        &doc(json!([{"sound_tags": ["slash"], "mode": "hit"}])),
+        &pool,
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("not the script's to set"), "{err}");
+}
+
 /// The prompt-side sound fields must not survive onto a written script.
 #[test]
 fn validate_injects_refuses_a_prompt_side_sound_field() {

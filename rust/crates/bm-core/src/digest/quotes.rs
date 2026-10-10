@@ -18,6 +18,12 @@ pub struct QuoteFinding {
     pub kind: &'static str,
 }
 
+/// The findings that say speech and narration are mis-split — the two a
+/// proofread is asked for. They are hints for the prompt, never a verdict.
+pub(crate) fn structural(finding: &QuoteFinding) -> bool {
+    finding.kind == "swallowed paragraph" || finding.kind == "welded prose"
+}
+
 /// Scan a chapter for unbalanced quotation structure. Empty means clean.
 pub fn quote_findings(text: &str) -> Vec<QuoteFinding> {
     let prepared = prepare_chapter(text);
@@ -61,8 +67,12 @@ pub fn quote_findings(text: &str) -> Vec<QuoteFinding> {
             continue;
         }
         // Gate 2 — prose runs straight into a LONG quote. A real handover is a
+        // mark that opens **on the same line as the word before it**; a quote
+        // that opens a paragraph stands on its own, whatever the paragraph
+        // above it ended with.
         if event.at > 0 && event.text.chars().count() > 120 {
-            let before = clean[..event.at].trim_end();
+            let line_start = clean[..event.at].rfind('\n').map(|at| at + 1).unwrap_or(0);
+            let before = clean[line_start..event.at].trim_end();
             let before = before
                 .strip_suffix('"')
                 .or_else(|| before.strip_suffix('\u{201c}'))
@@ -85,42 +95,179 @@ pub fn quote_findings(text: &str) -> Vec<QuoteFinding> {
     findings
 }
 
-/// The text a chapter's digest should actually read: the sidecar a previous
+/// The text a chapter's digest reads: the chapter its proofread returned, when
+/// there is one and it was written for this crawl.
 pub(crate) fn effective_text(layout: &Layout, n: u32, original: &str) -> String {
-    let sidecar = repaired_txt(layout, n);
-    std::fs::read_to_string(&sidecar)
-        .ok()
-        .filter(|fixed| quote_findings(fixed).is_empty())
-        .unwrap_or_else(|| original.to_string())
+    proofread(layout, n, original).unwrap_or_else(|| original.to_string())
 }
 
-/// Where a repaired chapter is kept: beside the chapter, never over it.
+/// Whether `n` still needs its proofread. The pass is a chapter's first prompt,
+/// asked once, and the worker and the operator's own paste both go through this
+/// one rule.
+pub(crate) fn needs_proofread(layout: &Layout, n: u32, original: &str) -> bool {
+    proofread(layout, n, original).is_none()
+}
+
+/// The accepted proofread for `n`, if one is on disk for **this** chapter text:
+/// a re-crawled chapter is a new chapter, and an older proofread of it is not
+/// read back over it.
+fn proofread(layout: &Layout, n: u32, original: &str) -> Option<String> {
+    let text = std::fs::read_to_string(repaired_txt(layout, n)).ok()?;
+    if text.trim().is_empty() {
+        return None;
+    }
+    let record: Value =
+        serde_json::from_str(&std::fs::read_to_string(repaired_record(layout, n)).ok()?).ok()?;
+    let hash = record.get("source").and_then(Value::as_str)?;
+    (hash == text_hash(original)).then_some(text)
+}
+
+/// Where a proofread chapter is kept: beside the chapter, never over it.
 pub(crate) fn repaired_txt(layout: &Layout, n: u32) -> PathBuf {
     layout.data().join(format!("ch{n:02}-repaired.txt"))
 }
 
-/// The proofread pass, asked only when the gate tripped.
+/// Where that proofread's own change list is kept, with the hash of the chapter
+/// it was written against.
+pub(crate) fn repaired_record(layout: &Layout, n: u32) -> PathBuf {
+    layout.data().join(format!("ch{n:02}-repaired.json"))
+}
+
+/// The chapter text a proofread record is keyed by: the sanitized form, which is
+/// what the prompt carries, so a chapter written back with different whitespace
+/// still matches its own proofread.
+fn text_hash(text: &str) -> String {
+    let clean = crate::crawl::sanitize_chapter_text(text);
+    let mut h = Sha256::new();
+    h.update(b"bm-proofread-v1");
+    h.update([0]);
+    h.update(clean.as_bytes());
+    format!("{:x}", h.finalize())
+}
+
+/// The proofread prompt for one chapter's text, rendered from the adapter's
+/// template. The chapter goes in **sanitized**, because that is the text the
+/// findings' paragraph numbers count and the text every later pass reads.
 pub(crate) fn build_repair_prompt(layout: &Layout, text: &str, complaint: &str) -> Result<String> {
     let path = layout.repair_prompt();
     let template = std::fs::read_to_string(&path)
         .with_context(|| format!("reading prompt template {}", path.display()))?;
     let mut missed: Vec<String> = Vec::new();
     let mut body = template;
+    let chapter = crate::crawl::sanitize_chapter_text(text);
     replace_or_miss(&mut body, "{fault_line}", complaint, &mut missed);
-    replace_or_miss(&mut body, "{chapter_text}", text, &mut missed);
+    replace_or_miss(&mut body, "{chapter_text}", &chapter, &mut missed);
     warn_missing_sections("repair prompt", &missed);
-    // Appended, never in the file: the answer is checked by code on return, and
+    // Appended, never in the file: this is the shape code reads back, and the
+    // words and the marks in it are the model's to decide.
     body.push_str(
         "\n---REPAIR OUTPUT CONTRACT---\nReturn ONE strict JSON object, never markdown or \
          commentary:\n{\"text\": \"the full corrected chapter text\", \"changes\": [\"one short \
-         line per change\"]}\n\nYour `text` is REJECTED unless every alphanumeric character of it, in \
-         order, is identical to the input's. Punctuation, quote marks and whitespace are the \
-         only things you may move.\n",
+         line per change\"]}\n\n`text` is the whole chapter and nothing but the chapter — no note to \
+         the reader, no summary of what you did. `changes` names what you actually changed in \
+         `text`; leave it empty when the chapter needed nothing. Nothing else is checked by \
+         code: which marks and which words the chapter needs is your reading of it.\n",
     );
     Ok(body)
 }
 
 /// The gated proofread ladder, run once per chapter, only when the scan finds
+/// What one proofread answer is worth. The ladder and the manual round judge by
+/// the same rules, so the two cannot drift apart.
+pub(crate) enum RepairVerdict {
+    /// Accepted text plus the model's own change list, for the sidecar.
+    Fixed(String, Value),
+    /// The answer was not a chapter: no JSON, no `text`, or nothing in it.
+    Reject(String),
+}
+
+/// The one thing code may say about a proofread: whether a chapter came back.
+/// Which words and which marks belong where is semantic work, and a rail that
+/// guessed at it would only ever refuse a correct answer: the prompt and the
+/// model own the proofread, and the operator owns the review.
+pub(crate) fn judge_repair(raw: &str) -> RepairVerdict {
+    let Some(parsed) = parse_json_repaired(raw).ok() else {
+        return RepairVerdict::Reject("no usable JSON".to_string());
+    };
+    let Some(fixed) = parsed
+        .get("text")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+    else {
+        return RepairVerdict::Reject("no text field".to_string());
+    };
+    if fixed.trim().is_empty() {
+        return RepairVerdict::Reject("an empty chapter".to_string());
+    }
+    let changes = parsed.get("changes").cloned().unwrap_or(Value::Null);
+    RepairVerdict::Fixed(fixed, changes)
+}
+
+/// The complaint the repair prompt carries: the scan's findings, or a note that
+/// the scanner is satisfied and the pass must read for what it cannot see.
+pub(crate) fn repair_complaint(findings: &[QuoteFinding]) -> String {
+    if findings.is_empty() {
+        return "the scanner found no mis-split; check the pairing yourself and return the \
+                chapter unchanged if it is right"
+            .to_string();
+    }
+    findings
+        .iter()
+        .map(|f| {
+            format!(
+                "  - {}: paragraph {}: {}",
+                symptom(f.kind),
+                f.paragraph,
+                head_chars(&f.text, 120)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// One finding as the model has to read it: the scan's name for the fault, and
+/// the fault in the words of the rule it broke. A chapter came back untouched
+/// from a complaint that named a symptom the model had no repair for.
+fn symptom(kind: &str) -> &str {
+    match kind {
+        "swallowed paragraph" => {
+            "swallowed paragraph — a speech runs over a paragraph break, and every paragraph of a \
+             speech needs its own pair of marks, or the staging cannot tell the speaker from the \
+             narrator"
+        }
+        "welded prose" => {
+            "welded prose — narration runs straight into a speech with no mark between them"
+        }
+        "unclosed quote" => {
+            "unclosed quote — a quotation mark is still open where the chapter ends"
+        }
+        other => other,
+    }
+}
+
+/// Record an accepted proofread: the chapter that will be spoken, and beside it
+/// the changes the model declared. The file is also how the rest of the pipeline
+/// knows this chapter has had its pass, so it is written even when the model
+/// returned the chapter unchanged.
+///
+/// `shown` is the chapter the prompt carried, whose sanitized form keys the
+/// record: the same text the next call sees on disk.
+pub(crate) fn keep_repaired(
+    layout: &Layout,
+    n: u32,
+    shown: &str,
+    fixed: &str,
+    changes: &Value,
+) -> String {
+    let _ = atomic_write(&repaired_txt(layout, n), fixed);
+    let record = json!({"source": text_hash(shown), "changes": changes});
+    let _ = atomic_write(
+        &repaired_record(layout, n),
+        &serde_json::to_string_pretty(&record).unwrap_or_default(),
+    );
+    fixed.to_string()
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn repair_quotes(
     layout: &Layout,
@@ -131,213 +278,70 @@ pub(crate) async fn repair_quotes(
     settings: &Settings,
     calls: &mut GCalls,
     progress: &mut (dyn FnMut(f32, String) + Send),
-) -> Result<Option<String>> {
-    let list = |fs: &[QuoteFinding]| {
-        fs.iter()
-            .map(|f| {
-                format!(
-                    "  - {}: paragraph {}: {}",
-                    f.kind,
-                    f.paragraph,
-                    head_chars(&f.text, 120)
-                )
-            })
-            .collect::<Vec<_>>()
-            .join("\n")
-    };
+) -> Result<String> {
     let ask = |complaint: String| {
         build_repair_prompt(layout, text, &complaint).map_err(|e| {
             eprintln!("ch{n} repair pass unavailable: {e}");
             e
         })
     };
-    // Spent from the chapter's budget like any other G, so the phrase pass's
+    // Spent from the chapter's budget like any other G, so the phrase pass's own
+    // asks are the whole of it and a rate limit does not buy another one.
     async fn call(
         layout: &Layout,
         n: u32,
         analyzer: &str,
         settings: &Settings,
         prompt: &str,
-    ) -> Option<String> {
+    ) -> Result<String> {
         dump_raw(layout, "digest-repair", prompt);
         match generate(prompt, analyzer, settings).await {
-            Ok((raw, _)) => Some(raw),
+            Ok((raw, _)) => Ok(raw),
             Err(GenError::RateLimited(m)) => {
-                eprintln!("ch{n} proofread rate-limited: {m}; digesting the original");
-                None
+                anyhow::bail!("ch{n} the analyzer is rate-limited ({m})")
             }
-            Err(GenError::Fatal(e)) => {
-                eprintln!("ch{n} proofread failed ({e}); digesting the original");
-                None
-            }
+            Err(GenError::Fatal(e)) => anyhow::bail!("ch{n} the analyzer failed ({e})"),
         }
     }
-    // The verdict on one answer. `Fixed` ends the ladder; anything else says
-    enum Verdict {
-        /// Accepted text plus the model's own change list, for the sidecar.
-        Fixed(String, Value),
-        /// The answer was unusable (no JSON) or a rewrite: stop, fall back.
-        Reject(String),
-        /// Words untouched, but a structural gate still fires: the complaint
-        Gated(String),
-    }
-    // ...and the one place every answer is judged, so the ladder cannot drift
-    let judge = |raw: &str| -> Verdict {
-        let Some(parsed) = parse_json_repaired(raw).ok() else {
-            return Verdict::Reject("no usable JSON".to_string());
-        };
-        let Some(fixed) = parsed
-            .get("text")
-            .and_then(Value::as_str)
-            .map(str::to_string)
-        else {
-            return Verdict::Reject("no text field".to_string());
-        };
-        if strip_punctuation(&fixed) != strip_punctuation(text) {
-            return Verdict::Reject("changed more than punctuation".to_string());
-        }
-        let changes = parsed.get("changes").cloned().unwrap_or(Value::Null);
-        // Gate 1 (spanning) and Gate 2 (welded prose) on the candidate. The
-        let gated = quote_findings(&fixed)
-            .into_iter()
-            .filter(|f| f.kind == "swallowed paragraph" || f.kind == "welded prose")
-            .collect::<Vec<_>>();
-        if let Some(f) = gated.first() {
-            return Verdict::Gated(format!(
-                "{} at paragraph {}: {}",
-                f.kind,
-                f.paragraph,
-                head_chars(&f.text, 120)
-            ));
-        }
-        Verdict::Fixed(fixed, changes)
-    };
-    let keep = |verdict: Verdict,
-                note: &str,
-                progress_at: f32,
-                progress: &mut (dyn FnMut(f32, String) + Send)|
-     -> Option<String> {
-        match verdict {
-            Verdict::Fixed(fixed, changes) => {
-                // The sidecar is the audit trail: the repaired text an
-                let _ = atomic_write(
-                    &repaired_txt(layout, n),
-                    &format!(
-                        "{}\n{}",
-                        serde_json::to_string_pretty(&changes).unwrap_or_default(),
-                        fixed
-                    ),
+
+    // The chapter with every finding named, then "that was not a chapter" twice
+    // more. A proofread's quality is the model's call: the only answer worth
+    // re-asking for is one that is not a chapter at all.
+    let mut unusable = String::new();
+    for attempt in 0..3 {
+        let prompt = ask(if attempt == 0 {
+            format!(
+                "Proofread this chapter's speech quotation marks. What the scan found:\n{}",
+                repair_complaint(findings)
+            )
+        } else {
+            format!(
+                "Your last output could not be used ({unusable}). Return the full corrected \
+                 chapter again, as one strict JSON object."
+            )
+        })?;
+        progress(
+            0.02 + 0.01 * attempt as f32,
+            format!("ch{n} proofreading the chapter's quotation structure"),
+        );
+        calls.spend("phrase")?;
+        let raw = call(layout, n, analyzer, settings, &prompt).await?;
+        match judge_repair(&raw) {
+            RepairVerdict::Fixed(fixed, changes) => {
+                let fixed = keep_repaired(layout, n, text, &fixed, &changes);
+                progress(
+                    0.03 + 0.01 * attempt as f32,
+                    format!("ch{n} proofread accepted"),
                 );
-                progress(progress_at, format!("ch{n} {note}"));
-                Some(fixed)
+                return Ok(fixed);
             }
-            Verdict::Reject(why) | Verdict::Gated(why) => {
-                eprintln!("ch{n} not used: {why}");
-                None
-            }
-        }
-    };
-
-    // 1. LLM FIX — the whole chapter, with every finding named.
-    progress(
-        0.02,
-        format!(
-            "ch{n} quote structure is broken ({} finding(s)); asking for a proofread:\n{}",
-            findings.len(),
-            list(findings)
-        ),
-    );
-    let prompt = ask(format!(
-        "The chapter's speech quotation marks do not pair correctly. Findings:\n{}",
-        list(findings)
-    ))?;
-    if calls.spend("phrase").is_err() {
-        return Ok(None);
-    }
-    let Some(raw) = call(layout, n, analyzer, settings, &prompt).await else {
-        return Ok(None);
-    };
-    // 2. light gate — most answers clear it and the ladder ends here.
-    match judge(&raw) {
-        v @ Verdict::Fixed(..) => Ok(keep(
-            v,
-            "quotes repaired, proofreading it kept punctuation only",
-            0.03,
-            progress,
-        )),
-        Verdict::Reject(why) => {
-            eprintln!("ch{n} proofread {why}; digesting the original");
-            Ok(None)
-        }
-        Verdict::Gated(complaint) => {
-            // 3. LLM + Gate 1 — re-ask, carrying the structural complaint.
-            progress(
-                0.03,
-                format!("ch{n} proofread still fails the gate ({complaint}); re-asking"),
-            );
-            let prompt = ask(format!(
-                "Your last answer was rejected: {complaint}. Fix exactly that and return the \
-                 full corrected text again."
-            ))?;
-            if calls.spend("phrase").is_err() {
-                return Ok(None);
-            }
-            let Some(raw2) = call(layout, n, analyzer, settings, &prompt).await else {
-                return Ok(None);
-            };
-            match judge(&raw2) {
-                v @ Verdict::Fixed(..) => Ok(keep(
-                    v,
-                    "quotes repaired on the second ask, punctuation only",
-                    0.04,
-                    progress,
-                )),
-                Verdict::Reject(why) => {
-                    eprintln!("ch{n} second proofread {why}; digesting the original");
-                    Ok(None)
-                }
-                Verdict::Gated(complaint2) => {
-                    // 4. LLM + Gate 2 — the last ask.
-                    progress(
-                        0.04,
-                        format!(
-                            "ch{n} still failing after the second ask ({complaint2}); last attempt"
-                        ),
-                    );
-                    let prompt = ask(format!(
-                        "Your last answer was rejected: {complaint2}. Fix exactly that and \
-                         return the full corrected text again."
-                    ))?;
-                    if calls.spend("phrase").is_err() {
-                        return Ok(None);
-                    }
-                    let Some(raw3) = call(layout, n, analyzer, settings, &prompt).await else {
-                        return Ok(None);
-                    };
-                    match judge(&raw3) {
-                        v @ Verdict::Fixed(..) => {
-                            Ok(keep(v, "quotes repaired on the third ask", 0.05, progress))
-                        }
-                        Verdict::Reject(why) | Verdict::Gated(why) => {
-                            eprintln!(
-                                "ch{n} proofread still failing after the ladder ({why}); \
-                                 digesting the original — the chapter probably lost a mark \
-                                 the source no longer has: {why}"
-                            );
-                            Ok(None)
-                        }
-                    }
-                }
+            RepairVerdict::Reject(why) => {
+                eprintln!("ch{n} proofread answer unusable ({why}); re-asking");
+                unusable = why;
             }
         }
     }
-}
-
-/// Every alphanumeric character of a text, in order.
-pub(crate) fn strip_punctuation(text: &str) -> String {
-    text.chars()
-        .filter(|c| c.is_alphanumeric())
-        .collect::<String>()
+    anyhow::bail!("the model returned no usable chapter in 3 asks (last: {unusable})")
 }
 
 /// Whether a narration event ends by handing the floor to the speech that

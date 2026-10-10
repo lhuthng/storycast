@@ -3,9 +3,9 @@ use crate::audio_pool::{ClipPool, Sound};
 use crate::digest::TagAliases;
 
 /// A pooled sound, with only the fields the sound pass reads set.
-fn sound(looped: bool) -> Sound {
+fn sound(looped: bool, tags: &[&str]) -> Sound {
     Sound {
-        tags: vec![],
+        tags: tags.iter().map(|t| t.to_string()).collect(),
         files: vec!["injects/x.mp3".into()],
         looped,
         dur_s: Some(0.5),
@@ -17,9 +17,9 @@ fn sound(looped: bool) -> Sound {
 
 fn vocab() -> Vocabulary {
     let injects: ClipPool = [
-        ("page-turn", sound(false)),
-        ("food-prep", sound(true)),
-        ("cooking", sound(true)),
+        ("page-turn", sound(false, &["paper", "book"])),
+        ("food-prep", sound(true, &["kitchen", "prep"])),
+        ("cooking", sound(true, &["kitchen", "food"])),
     ]
     .into_iter()
     .map(|(k, v)| (k.to_string(), v))
@@ -52,8 +52,8 @@ fn a_sound_answer_lands_its_fields_and_lifts_the_seam() {
         staged("e0002", ", như nhặt được báu vật."),
     ];
     let answer = json!({"segments": [
-        {"id": 1, "scene": "study-room-day", "music": "quiet", "sound_after": "page-turn", "stop_after": "none"},
-        {"id": 2, "sound_after": "none", "stop_after": "none"}
+        {"id": 1, "scene": "study-room-day", "music": "quiet", "sound_after": "page-turn"},
+        {"id": 2}
     ]})
     .to_string();
     let got = parse_sound_script(&answer, &segments, CHAPTER, &vocab()).expect("a valid answer");
@@ -73,9 +73,9 @@ fn music_and_scene_carry_until_they_change() {
         staged("e0003", "Ba."),
     ];
     let answer = json!({"segments": [
-        {"id": 1, "scene": "hall-night", "music": "quiet", "sound_after": "none", "stop_after": "none"},
-        {"id": 2, "sound_after": "none", "stop_after": "none"},
-        {"id": 3, "music": "battle", "sound_after": "none", "stop_after": "none"}
+        {"id": 1, "scene": "hall-night", "music": "quiet"},
+        {"id": 2},
+        {"id": 3, "music": "battle"}
     ]})
     .to_string();
     let got = parse_sound_script(&answer, &segments, "Một. Hai. Ba.", &vocab()).expect("valid");
@@ -93,8 +93,8 @@ fn music_and_scene_carry_until_they_change() {
 fn a_split_places_a_sound_inside_the_line() {
     let segments = vec![staged("e0001", "Ta rút kiếm, chém thẳng.")];
     let answer = json!({"segments": [
-        {"id": 1, "text": "Ta rút kiếm,", "music": "battle", "sound_after": "page-turn", "stop_after": "none"},
-        {"id": 1, "text": "chém thẳng.", "sound_after": "none", "stop_after": "none"}
+        {"id": 1, "text": "Ta rút kiếm,", "music": "battle", "sound_after": "page-turn"},
+        {"id": 1, "text": "chém thẳng."}
     ]})
     .to_string();
     let got = parse_sound_script(&answer, &segments, CHAPTER, &vocab()).expect("a valid split");
@@ -113,7 +113,7 @@ fn a_split_places_a_sound_inside_the_line() {
 fn a_music_token_outside_the_palette_is_refused() {
     let segments = vec![staged("e0001", "Một.")];
     let answer = json!({"segments": [
-        {"id": 1, "music": "epic", "sound_after": "none", "stop_after": "none"}
+        {"id": 1, "music": "epic"}
     ]})
     .to_string();
     let err = parse_sound_script(&answer, &segments, "Một.", &vocab()).unwrap_err();
@@ -121,10 +121,122 @@ fn a_music_token_outside_the_palette_is_refused() {
 }
 
 #[test]
+fn a_combo_seam_lifts_every_name_in_order() {
+    let segments = vec![
+        staged("e0001", "Hai người liền đi đến phòng bếp."),
+        staged("e0002", "Rồi họ đi ra."),
+    ];
+    let answer = json!({"segments": [
+        {"id": 1, "sound_after": "food-prep,page-turn"},
+        {"id": 2, "stop_after": "food-prep,page-turn"}
+    ]})
+    .to_string();
+    let got = parse_sound_script(&answer, &segments, CHAPTER, &vocab()).expect("a combo");
+    // Two sounds at the first seam, two stops at the second, all in order.
+    assert_eq!(got.len(), 6, "{got:?}");
+    assert_eq!(got[1], json!({"sound": "food-prep"}));
+    assert_eq!(got[2], json!({"sound": "page-turn"}));
+    assert_eq!(got[3]["text"], json!("Rồi họ đi ra."));
+    assert_eq!(got[4], json!({"stop": "food-prep"}));
+    assert_eq!(got[5], json!({"stop": "page-turn"}));
+}
+
+#[test]
+fn a_combo_seam_accepts_the_array_form() {
+    let segments = vec![
+        staged("e0001", "Hai người liền đi đến phòng bếp."),
+        staged("e0002", "Rồi họ đi ra."),
+    ];
+    let answer = json!({"segments": [
+        {"id": 1, "sound_after": ["food-prep", "page-turn"]},
+        {"id": 2, "stop_after": ["food-prep", "page-turn"]}
+    ]})
+    .to_string();
+    let got = parse_sound_script(&answer, &segments, CHAPTER, &vocab()).expect("a combo");
+    assert_eq!(got.len(), 6, "{got:?}");
+    assert_eq!(got[1], json!({"sound": "food-prep"}));
+    assert_eq!(got[2], json!({"sound": "page-turn"}));
+    assert_eq!(got[4], json!({"stop": "food-prep"}));
+    assert_eq!(got[5], json!({"stop": "page-turn"}));
+}
+
+/// "Nothing fires" written as a `null` is the same decision an omitted field
+/// is, and the field comes off the line either way.
+/// A `tags:` seam leaves the choice to the pool: the item the script carries is
+/// the query, and every clip answering it is one the pool may draw.
+#[test]
+fn a_tag_query_seam_lifts_as_a_query() {
+    let segments = vec![
+        staged("e0001", "Hai người liền đi đến phòng bếp."),
+        staged("e0002", "Rồi họ đi ra ngoài."),
+    ];
+    let answer = json!({"segments": [
+        {"id": 1, "sound_after": "tags:kitchen"},
+        {"id": 2, "stop_after": "tags:kitchen"}
+    ]})
+    .to_string();
+    let got = parse_sound_script(&answer, &segments, CHAPTER, &vocab()).expect("a tag query");
+    assert_eq!(got.len(), 4, "{got:?}");
+    assert_eq!(got[1], json!({"sound_tags": ["kitchen"]}));
+    assert_eq!(got[3], json!({"stop_tags": ["kitchen"]}));
+    // A bed the pool chose is still a bed: one nobody stops is refused, and the
+    // query opens every looped clip it can draw.
+    let answer = json!({"segments": [
+        {"id": 1, "sound_after": "tags:kitchen"},
+        {"id": 2}
+    ]})
+    .to_string();
+    let err = parse_sound_script(&answer, &segments, CHAPTER, &vocab()).unwrap_err();
+    assert!(err.contains("stops dead"), "{err}");
+    // A query no clip in this pool answers is refused before the script is
+    // written, the same way an unknown name is.
+    let answer = json!({"segments": [
+        {"id": 1, "sound_after": "tags:thunder"},
+        {"id": 2}
+    ]})
+    .to_string();
+    let err = parse_sound_script(&answer, &segments, CHAPTER, &vocab()).unwrap_err();
+    assert!(err.contains("thunder"), "{err}");
+}
+
+#[test]
+fn a_null_seam_field_fires_nothing() {
+    let segments = vec![
+        staged("e0001", "Hai người liền đi đến phòng bếp."),
+        staged("e0002", "Rồi họ đi ra ngoài."),
+    ];
+    let answer = json!({"segments": [
+        {"id": 1, "sound_after": "page-turn", "stop_after": null},
+        {"id": 2, "sound_after": null, "stop_after": null}
+    ]})
+    .to_string();
+    let got =
+        parse_sound_script(&answer, &segments, CHAPTER, &vocab()).expect("null is an absence");
+    assert_eq!(got.len(), 3, "{got:?}");
+    assert_eq!(got[1], json!({"sound": "page-turn"}));
+    assert!(
+        got[2].get("sound_after").is_none() && got[2].get("stop_after").is_none(),
+        "{:?}",
+        got[2]
+    );
+}
+
+#[test]
+fn a_blank_sound_field_is_still_refused_by_name() {
+    let segments = vec![staged("e0001", "Một.")];
+    let answer = json!({"segments": [
+        {"id": 1, "sound_after": "  "}
+    ]})
+    .to_string();
+    let err = parse_sound_script(&answer, &segments, "Một.", &vocab()).unwrap_err();
+    assert!(err.contains("sound_after") && err.contains("omit"), "{err}");
+}
+
+#[test]
 fn a_bed_opened_and_never_stopped_is_refused() {
     let segments = vec![staged("e0001", "Hai người đi đến phòng bếp.")];
     let answer = json!({"segments": [
-        {"id": 1, "sound_after": "food-prep", "stop_after": "none"}
+        {"id": 1, "sound_after": "food-prep"}
     ]})
     .to_string();
     let err = parse_sound_script(&answer, &segments, CHAPTER, &vocab()).unwrap_err();
@@ -138,7 +250,7 @@ fn a_bed_opened_and_never_stopped_is_refused() {
 fn a_missing_line_is_refused_by_name() {
     let segments = vec![staged("e0001", "Một."), staged("e0002", "Hai.")];
     let answer = json!({"segments": [
-        {"id": 1, "sound_after": "none", "stop_after": "none"}
+        {"id": 1}
     ]})
     .to_string();
     let err = parse_sound_script(&answer, &segments, "Một. Hai.", &vocab()).unwrap_err();
