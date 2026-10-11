@@ -9,6 +9,9 @@ pub(crate) struct WorkerIdentity {
     pub(crate) alias: String,
     /// This box's worker root. Carried here because a beat has to say which
     pub(crate) root: PathBuf,
+    /// The engine this worker renders with: the beat's voice hash is read off
+    /// this engine's baked store, the same file the inductor hashes.
+    pub(crate) engine: String,
 }
 
 /// The `(stage, adapter)` slots this box's sources bundle covers, from the
@@ -63,6 +66,7 @@ pub(crate) fn heartbeat_now(
         sidecar_gb,
         capabilities: capabilities(),
         sources_stages: bundle_slots(&who.root),
+        voices_hash: bm_core::pool::voices_store_hash(&who.root, &who.engine),
         sidecar_keep: Some(sidecar_keep),
         tts_threads,
         cores: std::thread::available_parallelism()

@@ -24,6 +24,7 @@ pub(crate) async fn worker_loop(
         hostname: hostname.clone(),
         alias: alias.clone(),
         root: layout.root.clone(),
+        engine: settings.engine.clone(),
     };
     let shared: Shared = Arc::new(Mutex::new(Progress {
         activity: "starting".to_string(),

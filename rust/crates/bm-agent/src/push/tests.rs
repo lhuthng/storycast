@@ -13,6 +13,7 @@ fn push_at(token: &str, root: &std::path::Path) -> Arc<Push> {
             hostname: "box".into(),
             alias: "hawk".into(),
             root: root.to_path_buf(),
+            engine: "vieneu".into(),
         },
         token: token.into(),
         shared: Arc::new(Mutex::new(Progress {

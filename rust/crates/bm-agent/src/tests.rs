@@ -17,6 +17,7 @@ fn a_completed_activity_without_a_task_is_reported_as_idle() {
         alias: "owl".into(),
         // No root: no bundle, so the beat says "no opinion" about stages.
         root: PathBuf::new(),
+        engine: "vieneu".into(),
     };
     let mut probe = LoadProbe::new();
     let beat = heartbeat_now(&p, &who, &mut probe, true, None);
@@ -25,6 +26,34 @@ fn a_completed_activity_without_a_task_is_reported_as_idle() {
     assert_eq!(beat.chapter, None);
     assert_eq!(beat.progress, 0.0);
     assert_eq!(beat.activity, "idle");
+}
+
+#[test]
+fn the_beat_carries_the_voice_store_hash() {
+    // The box's baked store, as the inductor hashes it: same bytes, same hash.
+    let dir = std::env::temp_dir().join("bm-beat-voices");
+    let _ = std::fs::remove_dir_all(&dir);
+    let models = dir.join("engines/vieneu/models");
+    std::fs::create_dir_all(&models).unwrap();
+    std::fs::write(models.join("voices.json"), r#"{"presets":{"A":{}}}"#).unwrap();
+    let p = Progress::default();
+    let who = WorkerIdentity {
+        worker_id: "w1".into(),
+        addr: "127.0.0.1".into(),
+        hostname: "box".into(),
+        alias: "owl".into(),
+        root: dir.clone(),
+        engine: "vieneu".into(),
+    };
+    let mut probe = LoadProbe::new();
+    let beat = heartbeat_now(&p, &who, &mut probe, true, None);
+    assert_eq!(
+        beat.voices_hash,
+        bm_core::pool::voices_store_hash(&dir, "vieneu"),
+        "the beat reports the store it renders from"
+    );
+    assert!(beat.voices_hash.is_some(), "a store on disk is never silent");
+    std::fs::remove_dir_all(&dir).ok();
 }
 
 #[test]
