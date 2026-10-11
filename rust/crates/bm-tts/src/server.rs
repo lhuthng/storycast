@@ -7,7 +7,7 @@ use crate::pocket::Pocket;
 use crate::sample::{Rng, Sampling};
 use crate::synth::{gaps_to_silence, join_with_pauses, Synth, SAMPLE_RATE};
 use crate::text::FrontEnd;
-use crate::voice::Roster;
+use crate::voice::ReloadingRoster;
 use axum::{
     extract::State,
     http::{header, StatusCode},
@@ -39,7 +39,7 @@ struct Inner {
 pub enum Backend {
     Vieneu {
         front: FrontEnd,
-        roster: Roster,
+        roster: ReloadingRoster,
         synth: Mutex<Synth>,
     },
     // Absent entirely without the `pocket` feature, so a VieNeu-only build
@@ -101,7 +101,7 @@ impl Inner {
                 roster,
                 synth,
             } => {
-                let voice = roster.resolve(voice)?;
+                let voice = roster.with(|r| r.resolve(voice).cloned())?;
                 let chunks = front.chunks_sentence_level(text);
                 if chunks.chunks.is_empty() {
                     return Ok((Vec::new(), SAMPLE_RATE));
@@ -150,10 +150,13 @@ impl Inner {
     fn labels(&self) -> Vec<(String, String)> {
         match &self.backend {
             Backend::Vieneu { roster, .. } => roster
-                .voices
-                .values()
-                .map(|v| (label(&v.name, &v.description), v.name.clone()))
-                .collect(),
+                .with(|r| {
+                    Ok(r.voices
+                        .values()
+                        .map(|v| (label(&v.name, &v.description), v.name.clone()))
+                        .collect())
+                })
+                .unwrap_or_default(),
             #[cfg(feature = "pocket")]
             Backend::Pocket { engine } => match engine.try_lock() {
                 Ok(engine) => engine
@@ -368,6 +371,7 @@ pub fn router(server: Arc<Server>) -> Router {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::voice::Roster;
 
     fn store(dir: &std::path::Path) -> std::path::PathBuf {
         let p = dir.join("voices.json");

@@ -119,6 +119,58 @@ fn norm(s: &str) -> String {
         .collect()
 }
 
+/// A roster that follows its file: every read first checks whether the store
+/// changed on disk and reloads it when it did, so a pushed voice is speakable
+/// without restarting the sidecar. A torn write (mid-rsync) fails to parse
+/// and the old roster stays: a failed reload is never an empty roster.
+pub struct ReloadingRoster {
+    path: std::path::PathBuf,
+    state: std::sync::Mutex<(Roster, Option<(std::time::SystemTime, u64)>)>,
+}
+
+impl ReloadingRoster {
+    pub fn load(path: &Path) -> Result<ReloadingRoster> {
+        let roster = Roster::load(path)?;
+        let stamp = stamp_of(path);
+        Ok(ReloadingRoster {
+            path: path.into(),
+            state: std::sync::Mutex::new((roster, stamp)),
+        })
+    }
+
+    /// Run `f` against the current roster, reloading first when the file
+    /// changed underneath. The lock is held for `f` only.
+    pub fn with<R>(&self, f: impl FnOnce(&Roster) -> Result<R>) -> Result<R> {
+        self.refresh();
+        let state = self.state.lock().map_err(|e| {
+            anyhow::anyhow!("the roster lock is poisoned: {e}")
+        })?;
+        f(&state.0)
+    }
+
+    fn refresh(&self) {
+        let stamp = stamp_of(&self.path);
+        let Ok(mut state) = self.state.lock() else {
+            return;
+        };
+        // `None` (unreadable metadata) never counts as a change: only a fresh
+        // stamp reloads, and only a parsing store replaces the roster.
+        if stamp.is_some() && stamp != state.1 {
+            if let Ok(roster) = Roster::load(&self.path) {
+                *state = (roster, stamp);
+            }
+        }
+    }
+}
+
+/// What the file looked like: mtime plus length, so a same-second rewrite
+/// with different bytes still counts as a change.
+fn stamp_of(path: &Path) -> Option<(std::time::SystemTime, u64)> {
+    std::fs::metadata(path)
+        .ok()
+        .and_then(|m| m.modified().ok().map(|t| (t, m.len())))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -207,5 +259,34 @@ mod tests {
         let err = Roster::load(&p).unwrap_err().to_string();
         assert!(err.contains("A"), "{err}");
         assert!(err.contains("speaker_emb"), "{err}");
+    }
+
+    #[test]
+    fn a_pushed_voice_is_speakable_without_a_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = write_store(
+            dir.path(),
+            r#"{"presets":{"A":{"speaker_emb":[1.0],"codes":[]}}}"#,
+        );
+        let roster = ReloadingRoster::load(&p).unwrap();
+        assert!(roster.with(|r| r.resolve(Some("B")).map(|_| ())).is_err());
+        // The sync lands: same path, new bytes, and the next read serves it.
+        std::fs::write(
+            &p,
+            r#"{"presets":{"A":{"speaker_emb":[1.0],"codes":[]},"B":{"speaker_emb":[2.0],"codes":[]}}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            roster.with(|r| r.resolve(Some("B")).map(|v| v.name.clone())).unwrap(),
+            "B"
+        );
+        // A torn write mid-rsync parses as nothing: the old roster stays
+        // rather than blanking every voice on the box.
+        std::fs::write(&p, r#"{"presets":{"A":"#).unwrap();
+        assert_eq!(
+            roster.with(|r| r.resolve(Some("B")).map(|v| v.name.clone())).unwrap(),
+            "B",
+            "a failed reload keeps the old roster"
+        );
     }
 }

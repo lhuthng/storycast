@@ -4,7 +4,7 @@ use anyhow::{Context, Result};
 use bm_tts::server::{router, Backend, Server};
 use bm_tts::synth::Synth;
 use bm_tts::text::FrontEnd;
-use bm_tts::voice::Roster;
+use bm_tts::voice::ReloadingRoster;
 use clap::Parser;
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -113,10 +113,12 @@ async fn main() -> Result<()> {
                 anyhow::bail!("--dict does not exist: {}", dict.display());
             }
             let front = FrontEnd::new(dict.to_str().context("--dict must be valid UTF-8")?)?;
-            let roster = Roster::load(&voices_path)?;
+            let roster = ReloadingRoster::load(&voices_path)?;
             let synth = Synth::load(&models, &codec, threads)?;
-            let voices = roster.voices.len();
-            let default = roster.default_voice.clone().unwrap_or_else(|| "?".into());
+            let voices = roster.with(|r| Ok(r.voices.len()))?;
+            let default = roster
+                .with(|r| Ok(r.default_voice.clone()))?
+                .unwrap_or_else(|| "?".into());
             Ok((
                 Backend::Vieneu {
                     front,
