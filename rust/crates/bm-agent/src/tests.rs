@@ -723,6 +723,12 @@ async fn a_digest_runs_on_the_inductors_analyzer_settings_not_the_boxes_own() {
         "bible={bible_json}\ncast={cast_json}\nmusic={music_palette}\neffects={effect_tags}\ninjects={inject_sounds}\nchapter={chapter_text}\n",
     )
     .unwrap();
+    // The proofread is prompt 1 of every digest, so the fixture ships it too.
+    std::fs::write(
+        layout.repair_prompt(),
+        "findings={fault_line}\nchapter={chapter_text}\n",
+    )
+    .unwrap();
     // The digest reads the music palette out of the scene map, it is the
     std::fs::create_dir_all(layout.assets()).unwrap();
     std::fs::write(
