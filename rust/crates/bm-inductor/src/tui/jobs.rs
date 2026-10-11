@@ -248,7 +248,9 @@ pub(crate) async fn run_job(job: Job, tx: tokio::sync::mpsc::UnboundedSender<Ev>
             path,
             name,
             tags,
-        } => job_add_sample(tx, layout, path, name, tags).await,
+            machines,
+            settings_key,
+        } => job_add_sample(tx, layout, path, name, tags, machines, settings_key).await,
         Job::StartBackend {
             layout,
             api,

@@ -130,6 +130,8 @@ pub(crate) fn submit_text(app: &mut App, prompt: &TextPrompt) -> Result<Job, Str
                 path,
                 name: None,
                 tags: None,
+                machines: app.effective_machines(),
+                settings_key: app.ssh_defaults().key,
             })
         }
         TextKind::AddNamed => {
@@ -150,6 +152,8 @@ pub(crate) fn submit_text(app: &mut App, prompt: &TextPrompt) -> Result<Job, Str
                 path,
                 name: Some(name),
                 tags: Some(Vec::new()),
+                machines: app.effective_machines(),
+                settings_key: app.ssh_defaults().key,
             })
         }
         TextKind::Translate => {

@@ -301,9 +301,20 @@ pub(crate) async fn job_add_sample(
     path: String,
     name: Option<String>,
     tags: Option<Vec<String>>,
+    machines: Vec<Machine>,
+    settings_key: Option<String>,
 ) {
     // Off the UI thread: enrollment loads the voice model and takes a
     let for_log = path.clone();
+    // The enrolled name, for the box sync below: an explicit name, else the
+    // clip's own stem, the same rule the enrollment itself uses.
+    let enrolled = name.clone().unwrap_or_else(|| {
+        std::path::Path::new(&path)
+            .file_stem()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_default()
+    });
+    let sync_layout = layout.clone();
     // The blocking call says nothing until it returns, and loading the model is
     // tens of seconds: name the wait rather than look hung.
     let label = name.clone().unwrap_or_else(|| for_log.clone());
@@ -320,6 +331,48 @@ pub(crate) async fn job_add_sample(
         Ok(Ok(lines)) => {
             for l in lines {
                 send(&tx, Level::Ok, l);
+            }
+            // The voice is enrolled locally; push just it to the boxes now so
+            // nobody waits for a full :prov. Stragglers keep the old path.
+            if !enrolled.is_empty() && !machines.is_empty() {
+                send(
+                    &tx,
+                    Level::Info,
+                    format!("syncing {enrolled} to {} box(es)", machines.len()),
+                );
+                // One blocking task per box: syncs run together, and the log
+                // says which box each line came from.
+                let mut joins = Vec::new();
+                for mut m in machines {
+                    let key = bm_core::provision::resolve_key(
+                        m.ssh_key.as_deref(),
+                        settings_key.as_deref(),
+                    )
+                    .0
+                    .map(|p| p.to_string_lossy().to_string());
+                    m.ssh_key = key;
+                    let layout = sync_layout.clone();
+                    let enrolled = enrolled.clone();
+                    joins.push(tokio::task::spawn_blocking(move || {
+                        let ssh = bm_core::provision::Ssh::for_machine(&m);
+                        match ssh.sync_voice(&layout, &enrolled) {
+                            Ok(ls) => ls,
+                            Err(e) => vec![format!("{}: {e:#}", m.addr)],
+                        }
+                    }));
+                }
+                for join in joins {
+                    match join.await {
+                        Ok(ls) => {
+                            for l in ls {
+                                send(&tx, Level::Info, l);
+                            }
+                        }
+                        Err(e) => {
+                            send(&tx, Level::Error, format!("voice sync task failed: {e}"))
+                        }
+                    }
+                }
             }
             // The picker may be showing the pre-sample roster: fetch a
             let _ = tx.send(Ev::Done(DoneKind::ReloadRoster));

@@ -69,6 +69,8 @@ async fn add_sample_success_reloads_the_roster() {
             path: src.display().to_string(),
             name: None,
             tags: None,
+            machines: Vec::new(),
+            settings_key: None,
         },
         tx,
     )
@@ -96,6 +98,8 @@ async fn add_sample_success_reloads_the_roster() {
             path: "/nonexistent/clip.mp3".into(),
             name: None,
             tags: None,
+            machines: Vec::new(),
+            settings_key: None,
         },
         tx,
     )

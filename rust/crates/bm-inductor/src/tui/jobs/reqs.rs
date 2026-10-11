@@ -69,6 +69,11 @@ pub(crate) enum Job {
         path: String,
         name: Option<String>,
         tags: Option<Vec<String>>,
+        /// Boxes to push the baked voice to once enrolled, without a full
+        /// provision. Unreachable ones keep the old path: the next `:prov`
+        /// covers them.
+        machines: Vec<Machine>,
+        settings_key: Option<String>,
     },
     /// Deregister a machine. Idempotent, so it needs no confirmation beyond
     DropMachine {
