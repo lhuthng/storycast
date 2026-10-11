@@ -52,6 +52,8 @@ async fn register(State(st): State<Shared>, Json(r): Json<Register>) -> impl Int
         sidecar_gb: None,
         capabilities: r.capabilities,
         sources_stages: r.sources_stages,
+        // A registration has not read the voice store yet; the next beat does.
+        voices_hash: None,
         // A registration carries no sidecar belief; the next beat does.
         sidecar_keep: None,
         tts_threads: None,

@@ -21,6 +21,21 @@ impl Inner {
             .unwrap_or(&self.settings.profile)
     }
 
+    /// The box speaks what local speaks: its beat's voice-store hash matches
+    /// this checkout's. Unknown either side is "no opinion", as before: a box
+    /// mid-sync waits for render, it is not starved of every other stage.
+    fn voices_in_sync(&self, worker_id: &str) -> bool {
+        let Some(want) =
+            bm_core::pool::voices_store_hash(&self.layout.root, &self.settings.engine)
+        else {
+            return true;
+        };
+        match self.beats.get(worker_id).and_then(|b| b.voices_hash.as_deref()) {
+            None => true,
+            Some(have) => have == want,
+        }
+    }
+
     /// The task this worker should do next.
     pub fn offer(&mut self, worker_id: &str) -> Option<TaskOffer> {
         self.reap();
@@ -92,6 +107,12 @@ impl Inner {
                 {
                     continue;
                 }
+            }
+            // **The voice store this box has not caught up with.** A swap or
+            // an add lands here first and on the box a sync later: render
+            // waits for the box's hash to match, every other stage proceeds.
+            if stage == Stage::Render && !self.voices_in_sync(worker_id) {
+                continue;
             }
             let mut ids: Vec<String> = self
                 .tasks

@@ -128,6 +128,7 @@ fn beat(id: &str, addr: &str, age_secs: u64, alias: &str) -> Heartbeat {
         sidecar_gb: None,
         capabilities: vec![],
         sources_stages: Vec::new(),
+        voices_hash: None,
         sidecar_keep: None,
         tts_threads: None,
         cores: None,

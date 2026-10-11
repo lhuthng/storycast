@@ -773,6 +773,60 @@ fn render_offer_requires_the_upload_capability() {
     assert!(offer.render_units.is_some(), "planned, not legacy");
 }
 
+/// A box whose voice store lags the checkout waits for render: a swap lands
+/// here first and on the box a sync later, and no take may jump the gap.
+#[test]
+fn render_waits_for_a_box_whose_voices_lag() {
+    let (_d, mut inner) = fixture();
+    let layout = inner.layout.clone();
+    std::fs::write(
+        layout.script(5),
+        r#"{"segments":[{"speaker":"A","text":"a full sentence for synthesis here"}]}"#,
+    )
+    .unwrap();
+    std::fs::write(layout.cast("vieneu"), r#"{"A":"Adam"}"#).unwrap();
+    for (stage, state) in [
+        (Stage::Crawl, TaskState::Done),
+        (Stage::Digest, TaskState::Done),
+    ] {
+        let mut t = Task::new(5, stage);
+        t.state = state;
+        inner.tasks.insert(format!("{stage}:5"), t);
+    }
+    let mut t = Task::new(5, Stage::Render);
+    t.state = TaskState::Pending;
+    inner.tasks.insert("render:5".into(), t);
+    inner.workers.insert("w1".into(), "192.168.2.2".into());
+    inner.caps.insert(
+        "w1".into(),
+        vec![
+            "crawl".into(),
+            "digest".into(),
+            "render".into(),
+            "merge".into(),
+            "render-segments".into(),
+        ],
+    );
+    // The checkout's store holds the new voice; the box still reports the old
+    // hash, so render is withheld while every other stage stays offerable.
+    let store = layout.root.join("engines/vieneu/models/voices.json");
+    std::fs::create_dir_all(store.parent().unwrap()).unwrap();
+    std::fs::write(&store, r#"{"presets":{"A":{}}}"#).unwrap();
+    let mut stale = beat_with_load("w1", "192.168.2.2", None);
+    stale.voices_hash = Some("old-hash".into());
+    inner.beats.insert("w1".into(), stale);
+    assert!(
+        inner.offer("w1").is_none(),
+        "a lagging box gets no render, and nothing else is pending"
+    );
+    // The sync lands, the hashes agree, the take flows.
+    let mut synced = beat_with_load("w1", "192.168.2.2", None);
+    synced.voices_hash = bm_core::pool::voices_store_hash(&layout.root, "vieneu");
+    inner.beats.insert("w1".into(), synced);
+    let offer = inner.offer("w1").expect("synced worker renders");
+    assert_eq!(offer.task_id, "render:5");
+}
+
 /// A beat with the load fields this scheduler reads, and nothing else.
 fn beat_with_load(worker: &str, addr: &str, mem_pct: Option<f32>) -> bm_proto::Heartbeat {
     let mut h: bm_proto::Heartbeat = serde_json::from_value(serde_json::json!({
@@ -2632,6 +2686,7 @@ fn busy_inner() -> (tempfile::TempDir, Inner) {
             sidecar_gb: None,
             capabilities: vec![],
             sources_stages: Vec::new(),
+            voices_hash: None,
             sidecar_keep: None,
             tts_threads: None,
             cores: None,
@@ -2890,6 +2945,7 @@ fn beat_on(worker: &str, task_id: &str, chapter: u32) -> bm_proto::Heartbeat {
         sidecar_gb: None,
         capabilities: Vec::new(),
         sources_stages: Vec::new(),
+        voices_hash: None,
         sidecar_keep: None,
         tts_threads: None,
         cores: None,
@@ -3422,6 +3478,7 @@ fn reap_frees_dead_workers_tasks_but_not_after_a_reboot() {
             sidecar_gb: None,
             capabilities: vec![],
             sources_stages: Vec::new(),
+            voices_hash: None,
             sidecar_keep: None,
             tts_threads: None,
             cores: None,
@@ -3611,6 +3668,7 @@ fn requeue_orphans_frees_dead_workers_tasks_only() {
             sidecar_gb: None,
             capabilities: vec![],
             sources_stages: Vec::new(),
+            voices_hash: None,
             sidecar_keep: None,
             tts_threads: None,
             cores: None,
@@ -3652,6 +3710,7 @@ fn live_beat(id: &str) -> bm_proto::Heartbeat {
         sidecar_gb: None,
         capabilities: vec![],
         sources_stages: Vec::new(),
+        voices_hash: None,
         sidecar_keep: None,
         tts_threads: None,
         cores: None,

@@ -141,6 +141,7 @@ fn beat(sidecar_keep: Option<bool>) -> Heartbeat {
         sidecar_gb: None,
         capabilities: vec![],
         sources_stages: Vec::new(),
+        voices_hash: None,
         sidecar_keep,
         tts_threads: None,
         cores: None,
