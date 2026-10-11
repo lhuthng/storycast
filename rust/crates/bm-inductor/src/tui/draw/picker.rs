@@ -340,7 +340,7 @@ pub(crate) fn draw_picker(f: &mut ratatui::Frame, app: &mut App, picker: &Picker
         ],
         PickStage::Voice if !picker.filter_focus => vec![
             Line::from(Span::styled(
-                "t incumbent · T candidate · ^T another line — none of these assign",
+                "t incumbent · T candidate · ^T another line (own voice) — none of these assign",
                 Style::default().fg(Color::DarkGray),
             )),
             Line::from(Span::styled(

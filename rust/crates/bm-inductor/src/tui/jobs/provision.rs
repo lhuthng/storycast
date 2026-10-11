@@ -304,6 +304,14 @@ pub(crate) async fn job_add_sample(
 ) {
     // Off the UI thread: enrollment loads the voice model and takes a
     let for_log = path.clone();
+    // The blocking call says nothing until it returns, and loading the model is
+    // tens of seconds: name the wait rather than look hung.
+    let label = name.clone().unwrap_or_else(|| for_log.clone());
+    send(
+        &tx,
+        Level::Info,
+        format!("enrolling {label} — loading the voice model, the slow part"),
+    );
     let out = tokio::task::spawn_blocking(move || {
         bm_core::pool::add_sample(&layout, std::path::Path::new(&path), tags, name)
     })

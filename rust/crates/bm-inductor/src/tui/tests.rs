@@ -484,6 +484,7 @@ mod digest_manager;
 mod guided_create;
 mod hints;
 mod jobs;
+mod llm;
 mod machines;
 mod panes;
 mod prompts;

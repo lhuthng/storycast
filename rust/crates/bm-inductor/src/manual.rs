@@ -7,11 +7,11 @@ use serde_json::Value;
 /// What to do next for one chapter, after a prompt or an answer.
 #[derive(Debug)]
 pub(crate) enum Next {
-    /// Ask for this round's answer. Round 1 is the cast, round 2 the script.
+    /// Ask for this round's answer: the chapter's proofread, cast, or script.
     Prompt {
         round: bm_core::digest::Round,
         text: String,
-        /// Round 1's validated answer, set on round 2's prompt and nowhere
+        /// The cast round's validated answer, set on the staging prompt and nowhere
         cast: Option<Value>,
         /// The part of the chapter this round is for, when the chapter is
         part: Option<bm_core::digest::ManualPart>,
@@ -37,7 +37,7 @@ impl Next {
         }
     }
 
-    /// Round 1's cast, once round 2 is being asked for.
+    /// The cast, once the staging round is being asked for.
     pub(crate) fn cast(&self) -> Option<&Value> {
         match self {
             Next::Prompt { cast, .. } => cast.as_ref(),
@@ -54,7 +54,7 @@ impl Next {
     }
 }
 
-/// Start a chapter: round 1's prompt, or a refusal.
+/// Start a chapter: its next prompt, or a refusal.
 pub(crate) fn open(
     layout: &Layout,
     engine: &str,
@@ -89,7 +89,7 @@ pub(crate) fn advance(
         .map_err(|e| format!("{e:#}"))?;
 
     if let Some(context) = answer.cast {
-        // Round 1 done. Round 2's prompt is rendered *against this cast*, which
+        // The cast round is done. The staging prompt is rendered *against it*, which
         let step = bm_core::digest::manual_prompt(layout, engine, n, Some(&context))
             .map_err(|e| format!("{e:#}"))?;
         return Ok(Next::Prompt {

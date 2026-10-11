@@ -95,7 +95,7 @@ async fn current_word_tests_the_current_voice_on_the_shown_line() {
 }
 
 #[tokio::test]
-async fn another_word_rerolls_the_pointed_voice_on_another_line() {
+async fn another_word_rerolls_a_new_line_on_the_speakers_own_voice() {
     let http = reqwest::Client::new();
     let (job_tx, mut job_rx) = tokio::sync::mpsc::unbounded_channel::<Job>();
     let mut app = audition_app();
@@ -103,14 +103,20 @@ async fn another_word_rerolls_the_pointed_voice_on_another_line() {
     // Hear the candidate, which also picks and holds the line.
     do_command(&mut app, Command::AuditionTry, &http, &job_tx);
     let candidate = last_op(&mut job_rx).expect("dispatched");
-    assert_eq!(candidate.voice.as_deref(), Some("Adam"));
+    assert_eq!(candidate.voice.as_deref(), Some("Adam"), "the pointed voice");
     finish_audition(&mut app, "Adam");
 
-    // `:another`: the pointed voice again, re-rolled, a render, never a
+    // `:another` / `^T`: a fresh line on the speaker's **own** voice — the
+    // incumbent reading beside the candidate, not the candidate taking a second
+    // line. Narrator is cast to Đức Trí; Adam is only the voice under the cursor.
     do_command(&mut app, Command::AuditionAnother, &http, &job_tx);
     let reroll = last_op(&mut job_rx).expect(":another must dispatch");
     assert_eq!(reroll.op, Op::PreviewVoice);
-    assert_eq!(reroll.voice.as_deref(), Some("Adam"), "the pointed voice");
+    assert_eq!(
+        reroll.voice.as_deref(),
+        Some("Đức Trí"),
+        "the speaker's own voice, never the pointed candidate"
+    );
     assert_eq!(reroll.character.as_deref(), Some("Narrator"));
     let text = reroll.text.clone().expect("a line is always sent");
     assert!(!text.is_empty(), "a reroll still names a line");
@@ -119,6 +125,104 @@ async fn another_word_rerolls_the_pointed_voice_on_another_line() {
         index.contains(&text),
         "rerolled from Narrator's lines: {text:?}"
     );
+}
+
+/// The key itself: `^T` in the picker, where the cursor sits on a candidate.
+#[tokio::test]
+async fn ctrl_t_rerolls_on_the_speakers_own_voice_not_the_pointed_one() {
+    let http = reqwest::Client::new();
+    let (job_tx, mut job_rx) = tokio::sync::mpsc::unbounded_channel::<Job>();
+    // Cursor on Adam (the filter reads "adam"), Narrator cast to Đức Trí.
+    let mut app = audition_app();
+
+    handle_key(
+        &mut app,
+        KeyEvent::new(KeyCode::Char('T'), KeyModifiers::CONTROL),
+        &http,
+        &job_tx,
+    )
+    .await;
+    let req = last_op(&mut job_rx).expect("^T dispatches a render");
+    assert_eq!(req.op, Op::PreviewVoice);
+    assert_eq!(
+        req.voice.as_deref(),
+        Some("Đức Trí"),
+        "the original voice, never the one under the cursor"
+    );
+    assert_eq!(req.character.as_deref(), Some("Narrator"));
+    assert!(
+        req.text.as_deref().is_some_and(|t| !t.is_empty()),
+        "and it picked another line to say it on"
+    );
+}
+
+/// The whole point of the short cache: the same `T` again on the same voice
+/// and sentence replays what came back instead of buying another render.
+#[tokio::test]
+async fn t_replays_a_fresh_render_instead_of_paying_for_another() {
+    let http = reqwest::Client::new();
+    let (job_tx, mut job_rx) = tokio::sync::mpsc::unbounded_channel::<Job>();
+    let mut app = audition_app();
+    let scratch = std::env::temp_dir().join(format!("bmaud-cache-{}-play.wav", std::process::id()));
+    let _ = std::fs::remove_file(&scratch);
+    app.player = Player::silent_for_test(scratch.clone());
+
+    // The first `T` renders on the sidecar, as it always did.
+    handle_key(&mut app, key(KeyCode::Char('T')), &http, &job_tx).await;
+    let req = last_op(&mut job_rx).expect("the first T renders");
+    assert_eq!(req.voice.as_deref(), Some("Adam"), "the pointed voice");
+    let sentence = req.text.clone().expect("a line is sent");
+
+    // Its audio lands and is played, which is what fills the cache.
+    app.apply(Ev::Done(DoneKind::Op {
+        op: Op::PreviewVoice,
+        key: op_key(&OpRequest {
+            op: Op::PreviewVoice,
+            ..Default::default()
+        }),
+        ok: true,
+        voice: Some("Adam".into()),
+        audio_b64: Some(B64.encode(b"RIFF-cached-wav")),
+        line_speaker: None,
+        line_text: None,
+    }));
+    assert_eq!(std::fs::read(&scratch).unwrap(), b"RIFF-cached-wav");
+    assert!(app.audition.is_none(), "the in-flight slot is released");
+
+    // Gone from disk so only a replay can put it back: the same `T` again.
+    std::fs::remove_file(&scratch).unwrap();
+    handle_key(&mut app, key(KeyCode::Char('T')), &http, &job_tx).await;
+    assert!(
+        job_rx.try_recv().is_err(),
+        "the same sentence on the same voice must not buy a second render"
+    );
+    assert!(
+        app.status.text.contains("cached"),
+        "say where the audio came from: {:?}",
+        app.status
+    );
+    assert_eq!(
+        std::fs::read(&scratch).unwrap(),
+        b"RIFF-cached-wav",
+        "the replayed bytes are the ones that came back"
+    );
+    assert!(app.audition.is_none(), "and no marker is left claimed");
+
+    // A minute later the slot is cold: `T` renders again, same sentence.
+    app.audition_cache.at = Some(
+        std::time::Instant::now()
+            .checked_sub(std::time::Duration::from_secs(120))
+            .expect("a monotonic clock reaches back two minutes"),
+    );
+    handle_key(&mut app, key(KeyCode::Char('T')), &http, &job_tx).await;
+    let again = last_op(&mut job_rx).expect("an expired slot renders again");
+    assert_eq!(
+        again.text.as_deref(),
+        Some(sentence.as_str()),
+        "still the held line"
+    );
+
+    let _ = std::fs::remove_file(&scratch);
 }
 
 #[tokio::test]

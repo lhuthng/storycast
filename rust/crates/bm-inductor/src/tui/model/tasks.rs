@@ -1,4 +1,5 @@
 use super::*;
+use std::collections::HashSet;
 
 /// The one thing the ledger is narrowed to, besides the typed text.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -275,32 +276,53 @@ pub(crate) fn threads_label(m: &Machine, beats: &[Heartbeat]) -> String {
     }
 }
 
-/// Per-stage chapter progress in pipeline order: done chapters over the chapters
-pub(crate) fn pipeline_counts(tasks: &[Task]) -> Vec<(Stage, usize, usize)> {
-    fn done_chapters(tasks: &[Task], stage: Stage) -> BTreeSet<u32> {
-        tasks
-            .iter()
-            .filter(|t| t.stage == stage)
-            .map(|t| t.chapter)
-            .collect::<BTreeSet<_>>()
-            .into_iter()
-            .filter(|ch| {
-                tasks
-                    .iter()
-                    .filter(|t| t.stage == stage && t.chapter == *ch)
-                    .all(|t| t.state == TaskState::Done)
-            })
-            .collect()
+/// Per-stage chapter progress in pipeline order: done chapters, the pipeline
+/// denominator, and the stage's failed/shelved rows. Everything the pane draws,
+/// from one pass — it draws this every frame, and a book's render stage alone is
+/// hundreds of chapters by dozens of takes.
+pub(crate) fn pipeline_counts(tasks: &[Task]) -> Vec<(Stage, usize, usize, usize, usize)> {
+    // Hash, not order: a book is tens of thousands of rows against a few
+    // thousand stage/chapter slots.
+    let mut per: HashMap<(Stage, u32), (usize, usize)> = HashMap::new();
+    let mut chapters: HashSet<u32> = HashSet::new();
+    let mut failed: HashMap<Stage, usize> = HashMap::new();
+    let mut shelved: HashMap<Stage, usize> = HashMap::new();
+    for t in tasks {
+        let slot = per.entry((t.stage, t.chapter)).or_insert((0, 0));
+        slot.0 += 1;
+        if t.state == TaskState::Done {
+            slot.1 += 1;
+        }
+        chapters.insert(t.chapter);
+        match t.state {
+            TaskState::Failed => *failed.entry(t.stage).or_default() += 1,
+            TaskState::Shelved => *shelved.entry(t.stage).or_default() += 1,
+            _ => {}
+        }
     }
-    let chapters: BTreeSet<u32> = tasks.iter().map(|t| t.chapter).collect();
-    let crawl = done_chapters(tasks, Stage::Crawl);
-    let digest = done_chapters(tasks, Stage::Digest);
-    let render = done_chapters(tasks, Stage::Render);
-    let merge = done_chapters(tasks, Stage::Merge);
+    fn complete(per: &HashMap<(Stage, u32), (usize, usize)>, stage: Stage) -> usize {
+        per.iter()
+            .filter(|((st, _), (total, done))| *st == stage && done == total)
+            .count()
+    }
+    let row = |stage: Stage, done: usize, denom: usize| {
+        (
+            stage,
+            done,
+            denom,
+            failed.get(&stage).copied().unwrap_or(0),
+            shelved.get(&stage).copied().unwrap_or(0),
+        )
+    };
+    let chapters = chapters.len();
+    let crawl = complete(&per, Stage::Crawl);
+    let digest = complete(&per, Stage::Digest);
+    let render = complete(&per, Stage::Render);
+    let merge = complete(&per, Stage::Merge);
     vec![
-        (Stage::Crawl, crawl.len(), chapters.len()),
-        (Stage::Digest, digest.len(), crawl.len()),
-        (Stage::Render, render.len(), digest.len()),
-        (Stage::Merge, merge.len(), render.len()),
+        row(Stage::Crawl, crawl, chapters),
+        row(Stage::Digest, digest, crawl),
+        row(Stage::Render, render, digest),
+        row(Stage::Merge, merge, render),
     ]
 }

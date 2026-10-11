@@ -46,8 +46,10 @@ fn disk_voices(
 pub(crate) fn local_roster(layout: &bm_core::Layout) -> Roster {
     let settings = bm_core::config::Settings::load(&layout.settings());
     let engine = settings.engine.clone();
-    let mut inner = Inner::new(layout.clone(), settings);
-    inner.load_ledger();
+    // No ledger load: the roster reads the cast file, the bible and the
+    // scripts, and deserializing a whole book's tasks to get at none of them
+    // cost this path most of a second.
+    let inner = Inner::new(layout.clone(), settings);
     let characters = inner.known_characters();
     let cast = inner.cast_snapshot();
     let (effective, _) = bm_core::voices::effective_engine_lenient(&engine);

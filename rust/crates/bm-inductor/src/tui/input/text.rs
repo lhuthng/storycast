@@ -130,19 +130,40 @@ pub(crate) async fn key_text(
                 }
             } else if matches!(
                 p.kind,
-                TextKind::LlmKey(_) | TextKind::LlmUrl(_) | TextKind::LlmModel(_)
+                TextKind::LlmNew
+                    | TextKind::LlmKey(_)
+                    | TextKind::LlmUrl(_)
+                    | TextKind::LlmModel(_)
             ) {
                 // One provider field: validated in one place so a typo keeps
                 let provider = match &p.kind {
                     TextKind::LlmKey(id) | TextKind::LlmUrl(id) | TextKind::LlmModel(id) => {
                         id.clone()
                     }
-                    _ => unreachable!(),
+                    // `LlmNew` names its provider in the line itself.
+                    _ => String::new(),
+                };
+                // The row a `LlmNew` line just made is the one worth showing;
+                // for every other prompt this is empty and the cursor stands.
+                let added = match &p.kind {
+                    TextKind::LlmNew => p
+                        .buf
+                        .split_whitespace()
+                        .next()
+                        .unwrap_or_default()
+                        .to_string(),
+                    _ => String::new(),
                 };
                 match super::llm::save_llm_field(app, &provider, &p.kind, &p.buf) {
                     Ok(msg) => {
+                        let ids = super::super::screen::LlmView::ids(
+                            &bm_core::config::LlmConfig::load(&app.layout.root),
+                        );
                         let mut v = super::super::screen::LlmView::new();
-                        v.cursor = app.llm_cursor;
+                        v.cursor = ids
+                            .iter()
+                            .position(|id| *id == added)
+                            .unwrap_or(app.llm_cursor);
                         app.screen = Screen::Llm(v);
                         app.set_status(Level::Ok, msg);
                     }

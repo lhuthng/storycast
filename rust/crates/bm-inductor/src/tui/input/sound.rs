@@ -203,6 +203,14 @@ pub(crate) fn submit(
         _ => {
             // The layer's own parser, then the filesystem: a name and a shape
             let (name, mut entry) = sound::parse_entry(layer, buf, target)?;
+            // A seam reads `tags:` as a query prefix, so a clip named that
+            // could never be named by a script — only drawn by a query.
+            if target.is_none() && name.starts_with("tags:") {
+                return Err(format!(
+                    "“{name}” starts with the `tags:` query prefix — a script would read it as \
+                     a tag query, never as this sound's name. Rename it"
+                ));
+            }
             let old = target.and_then(|n| data.pools[&layer].get(n));
             sound::check_files(&data.root, layer, &sound::introduced(old, &entry))?;
             if layer == PoolKind::Inject {

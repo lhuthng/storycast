@@ -36,8 +36,10 @@ pub(crate) struct SoundData {
     pub(crate) usage: BTreeMap<PoolKind, BTreeMap<String, Vec<UseOf>>>,
     /// Sound -> files the registry names that are not on disk, by layer. The
     pub(crate) missing: BTreeMap<PoolKind, BTreeMap<String, Vec<String>>>,
-    /// Chapters whose script places each inject sound. Kept so a save can
-    pub(crate) script_uses: BTreeMap<String, Vec<u32>>,
+    /// What each chapter's script reaches in the inject pool, and how: by name,
+    /// or as the clips a tag query can draw. Walked once, so a refresh after a
+    /// save need not re-read every script.
+    pub(crate) script_uses: BTreeMap<String, Vec<UseOf>>,
 }
 
 impl SoundData {
@@ -53,8 +55,8 @@ impl SoundData {
             PoolKind::Music,
             bm_core::ambience::music_usage(&self.map, &self.pools[&PoolKind::Music]),
         );
-        self.usage
-            .insert(PoolKind::Inject, inject_usage_as_uses(&self.script_uses));
+        let inject = self.script_uses.clone();
+        self.usage.insert(PoolKind::Inject, inject);
         self.missing.clear();
         for kind in PoolKind::ALL {
             self.missing
@@ -220,20 +222,26 @@ pub(crate) fn load(layout: &bm_core::Layout) -> Result<SoundData, String> {
         pools.insert(kind, audio_pool::load_pool(&layout.pool(kind)));
     }
 
+    // Walked before the pool is moved into the struct: the inject layer's usage
+    // needs it to answer a script's tag queries.
+    let script_uses = read_script_uses(layout, &pools);
     let mut data = SoundData {
         root: layout.root.clone(),
         pools,
         map,
         usage: BTreeMap::new(),
         missing: BTreeMap::new(),
-        script_uses: read_script_uses(layout),
+        script_uses,
     };
     data.refresh();
     Ok(data)
 }
 
 /// Chapter -> script, for the inject layer's usage. A script that will not
-fn read_script_uses(layout: &bm_core::Layout) -> BTreeMap<String, Vec<u32>> {
+fn read_script_uses(
+    layout: &bm_core::Layout,
+    pools: &BTreeMap<PoolKind, audio_pool::ClipPool>,
+) -> BTreeMap<String, Vec<UseOf>> {
     let mut scripts: Vec<(u32, serde_json::Value)> = Vec::new();
     for path in crate::tui::audition::script_files(layout) {
         let Some(n) = bm_core::paths::chapter_of(&path) else {
@@ -243,24 +251,7 @@ fn read_script_uses(layout: &bm_core::Layout) -> BTreeMap<String, Vec<u32>> {
             scripts.push((n, doc));
         }
     }
-    bm_core::ambience::inject_usage(&scripts)
-}
-
-/// The inject usage in the same shape as the other two layers', so the screen
-fn inject_usage_as_uses(script_uses: &BTreeMap<String, Vec<u32>>) -> BTreeMap<String, Vec<UseOf>> {
-    script_uses
-        .iter()
-        .map(|(sound, chapters)| {
-            let uses = chapters
-                .iter()
-                .map(|n| UseOf {
-                    by: format!("ch{n:02}"),
-                    tags: Vec::new(),
-                })
-                .collect();
-            (sound.clone(), uses)
-        })
-        .collect()
+    bm_core::ambience::inject_usage(&scripts, &pools[&PoolKind::Inject])
 }
 
 fn missing_files(layout: &bm_core::Layout, pool: &ClipPool) -> BTreeMap<String, Vec<String>> {

@@ -62,7 +62,7 @@ pub(crate) fn submit_text(app: &mut App, prompt: &TextPrompt) -> Result<Job, Str
             Err("sound pools save from the prompt, not submit".into())
         }
         // The LLM prompts write `.bm/llm.json` and launch nothing, so
-        TextKind::LlmKey(_) | TextKind::LlmUrl(_) | TextKind::LlmModel(_) => {
+        TextKind::LlmNew | TextKind::LlmKey(_) | TextKind::LlmUrl(_) | TextKind::LlmModel(_) => {
             Err("LLM fields save from the prompt, not submit".into())
         }
         TextKind::AddMachine => {

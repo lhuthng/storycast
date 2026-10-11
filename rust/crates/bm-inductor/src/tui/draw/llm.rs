@@ -14,7 +14,7 @@ pub(crate) fn draw_llm(f: &mut ratatui::Frame, app: &mut App, v: &LlmView) {
 
     let mut lines: Vec<Line> = vec![
         Line::from(Span::styled(
-            "  ↑↓ move · a activate · k key · u URL · m model · f fetch models · Esc close",
+            "  ↑↓ move · n new · a activate · k key · u URL · m model · f fetch models · Esc close",
             dim,
         )),
         Line::from(""),
@@ -107,6 +107,21 @@ pub(crate) fn draw_llm(f: &mut ratatui::Frame, app: &mut App, v: &LlmView) {
     if ids.is_empty() {
         lines.push(Line::from(Span::styled("  no providers configured", dim)));
     }
+    // The row that makes a provider rather than pointing at one. Last, so it is
+    // always in the same place, and selected like any other row.
+    let add = v.cursor == ids.len();
+    lines.push(Line::from(vec![
+        Span::raw(format!(" {} + ", if add { "▸" } else { " " })),
+        Span::styled(
+            "name your own provider",
+            if add {
+                Style::default().add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+            },
+        ),
+        Span::styled(" — a name and a URL, then `k` its key", dim),
+    ]));
     if active.is_none() {
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(

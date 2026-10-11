@@ -17,6 +17,23 @@ pub(crate) fn script_files(layout: &bm_core::Layout) -> Vec<PathBuf> {
     layout.scripts()
 }
 
+/// A script, as far as a line index reads it: every script in the book is
+/// walked whenever the auditioner needs its lines, so the read is typed rather
+/// than a `Value` tree the walk then picks apart.
+#[derive(serde::Deserialize)]
+struct ScriptSegments {
+    #[serde(default)]
+    segments: Vec<ScriptSegment>,
+}
+
+#[derive(serde::Deserialize)]
+struct ScriptSegment {
+    #[serde(default)]
+    speaker: String,
+    #[serde(default)]
+    text: String,
+}
+
 /// `speaker -> every line they speak`, deduplicated, in script order.
 pub(crate) fn index_lines(
     layout: &bm_core::Layout,
@@ -32,24 +49,13 @@ pub(crate) fn index_lines(
     let mut seen: HashMap<String, std::collections::HashSet<String>> = HashMap::new();
     let mut parsed = 0usize;
     for path in &files {
-        let Ok(doc) = bm_core::read_json::<serde_json::Value>(path) else {
+        let Ok(doc) = bm_core::read_json::<ScriptSegments>(path) else {
             continue;
         };
         parsed += 1;
-        let Some(segments) = doc.get("segments").and_then(|s| s.as_array()) else {
-            continue;
-        };
-        for seg in segments {
-            let speaker = seg
-                .get("speaker")
-                .and_then(|s| s.as_str())
-                .unwrap_or("")
-                .trim();
-            let text = seg
-                .get("text")
-                .and_then(|s| s.as_str())
-                .unwrap_or("")
-                .trim();
+        for seg in &doc.segments {
+            let speaker = seg.speaker.trim();
+            let text = seg.text.trim();
             if speaker.is_empty() || text.is_empty() {
                 continue;
             }
@@ -129,6 +135,60 @@ pub(crate) fn pick_index(len: usize, seed: u64) -> usize {
     x = (x ^ (x >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
     x ^= x >> 31;
     (x % len as u64) as usize
+}
+
+/// How long a rendered audition stays replayable. Short on purpose: a render
+/// is stochastic, so a slot that outlived a comparison would make `T` sound
+/// stuck rather than fast.
+const AUDITION_TTL: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// One rendered audition, held briefly so `T` can replay it instead of buying
+/// another sidecar render of the same sentence on the same voice. One slot:
+/// the wav travels as base64 (~a few hundred KB), and the comparison under way
+/// is always one held sentence, voice against voice.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct AuditionCache {
+    /// The voice and sentence the render on the wire was asked for.
+    pub(crate) voice: String,
+    pub(crate) text: String,
+    /// The base64 wav once it landed — `None` while the render is still out.
+    pub(crate) audio: Option<String>,
+    /// When the wav landed; the TTL runs from here.
+    pub(crate) at: Option<std::time::Instant>,
+}
+
+impl AuditionCache {
+    /// Take the slot for a render going out now: nothing is cached about it
+    /// until an answer arrives.
+    pub(crate) fn request(&mut self, voice: &str, text: &str) {
+        self.voice = voice.to_string();
+        self.text = text.to_string();
+        self.audio = None;
+        self.at = None;
+    }
+
+    /// The wav already rendered for exactly this voice and sentence, while it
+    /// is still fresh.
+    pub(crate) fn fresh(&self, voice: &str, text: &str) -> Option<&str> {
+        if self.voice != voice || self.text != text {
+            return None;
+        }
+        let at = self.at?;
+        if at.elapsed() >= AUDITION_TTL {
+            return None;
+        }
+        self.audio.as_deref()
+    }
+
+    /// The answer to the request on the wire: keep it. An answer for any other
+    /// voice is a late reply to a request this slot has already forgotten.
+    pub(crate) fn fill(&mut self, voice: &str, audio: String) {
+        if self.voice != voice {
+            return;
+        }
+        self.audio = Some(audio);
+        self.at = Some(std::time::Instant::now());
+    }
 }
 
 #[cfg(test)]
@@ -227,6 +287,43 @@ mod tests {
         assert_eq!(line_for(None, "Người Mới", Some(&idx), 1), None);
         // No index at all (still loading) is the same answer, not a panic.
         assert_eq!(line_for(None, "Kiên", None, 1), None);
+    }
+
+    #[test]
+    fn the_cache_answers_only_the_pair_it_was_filled_for() {
+        let mut c = AuditionCache::default();
+        c.request("Adam", "một câu thử");
+        assert!(
+            c.fresh("Adam", "một câu thử").is_none(),
+            "a render still in flight is not an answer"
+        );
+        c.fill("Adam", "wav".into());
+        assert_eq!(c.fresh("Adam", "một câu thử"), Some("wav"));
+        // Another voice, another sentence: neither is this slot's pair.
+        assert!(c.fresh("Bắc Kỳ", "một câu thử").is_none());
+        assert!(c.fresh("Adam", "câu khác").is_none());
+
+        // A late answer for a voice the slot never asked for is dropped whole.
+        let mut late = AuditionCache::default();
+        late.request("Adam", "một câu thử");
+        late.fill("Bắc Kỳ", "wrong".into());
+        assert!(late.fresh("Adam", "một câu thử").is_none());
+    }
+
+    #[test]
+    fn the_cache_forgets_after_a_minute() {
+        let mut c = AuditionCache::default();
+        c.request("Adam", "một câu thử");
+        c.fill("Adam", "wav".into());
+        c.at = Some(
+            std::time::Instant::now()
+                .checked_sub(AUDITION_TTL + std::time::Duration::from_secs(1))
+                .expect("a monotonic clock reaches back a minute"),
+        );
+        assert!(
+            c.fresh("Adam", "một câu thử").is_none(),
+            "an expired slot renders again"
+        );
     }
 
     #[test]

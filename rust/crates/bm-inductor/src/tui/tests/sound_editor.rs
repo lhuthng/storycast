@@ -296,6 +296,31 @@ async fn a_rejected_entry_keeps_the_prompt_open_and_writes_nothing() {
 }
 
 #[tokio::test]
+async fn a_name_a_script_would_read_as_a_tag_query_is_refused() {
+    let http = reqwest::Client::new();
+    let (job_tx, _job_rx) = tokio::sync::mpsc::unbounded_channel::<Job>();
+    let (_d, root) = sound_layout("query-name");
+    let registry = bm_core::Layout::new(&root).pool(bm_core::audio_pool::PoolKind::Effect);
+    let before = std::fs::read_to_string(&registry).unwrap();
+    let mut app = sound_app(&root);
+    // `tags:` is how a script asks for a family by tag; a clip cannot take it
+    app.screen = Screen::Text(TextPrompt::new(
+        TextKind::SoundAdd(bm_core::audio_pool::PoolKind::Effect),
+        "t",
+        "h",
+        "name=tags:rain files=effects/rain-1.mp3 tags=rain",
+    ));
+    handle_key(&mut app, key(KeyCode::Enter), &http, &job_tx).await;
+    assert!(
+        matches!(app.screen, Screen::Text(_)),
+        "the prompt closed on a name a script could not write"
+    );
+    assert!(matches!(app.status.level, Level::Error), "{:?}", app.status);
+    assert!(app.status.text.contains("query prefix"), "{:?}", app.status);
+    assert_eq!(std::fs::read_to_string(&registry).unwrap(), before);
+}
+
+#[tokio::test]
 async fn a_level_edit_touches_only_the_level() {
     let http = reqwest::Client::new();
     let (job_tx, mut job_rx) = tokio::sync::mpsc::unbounded_channel::<Job>();

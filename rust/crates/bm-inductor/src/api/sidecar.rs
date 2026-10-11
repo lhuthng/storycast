@@ -100,30 +100,35 @@ pub(crate) async fn op_preview_voice(
         Ok(c) => c,
         Err(e) => return OpResult::fail(format!("preview {voice}: {e:#}")),
     };
-    let resp = match http
-        .post(format!("{SIDECAR}{path}"))
-        .json(&body)
-        .send()
-        .await
-    {
-        Ok(r) => r,
-        Err(e) => {
-            return OpResult::fail(format!(
-                "preview {voice}: TTS sidecar unreachable at {SIDECAR} ({e})"
-            ))
+    // A voice enrolled while the sidecar was running sits on disk and unknown
+    // in its memory, so one refused preview reloads and asks again. Once: a
+    // second refusal is the sidecar's own answer to give.
+    let mut reloaded = false;
+    let resp = loop {
+        let resp = match http
+            .post(format!("{SIDECAR}{path}"))
+            .json(&body)
+            .send()
+            .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                return OpResult::fail(format!(
+                    "preview {voice}: TTS sidecar unreachable at {SIDECAR} ({e})"
+                ))
+            }
+        };
+        if resp.status().is_success() {
+            break resp;
         }
+        let code = resp.status().as_u16();
+        let msg = resp.text().await.unwrap_or_default();
+        if !reloaded && reload_for(layout, voice, &msg).await {
+            reloaded = true;
+            continue;
+        }
+        return OpResult::fail(preview_refusal(layout, voice, code, &msg));
     };
-    if !resp.status().is_success() {
-        let code = resp.status();
-        let body = resp.text().await.unwrap_or_default();
-        if let Some(hint) = stale_roster_hint(layout, voice, &body) {
-            return OpResult::fail(hint);
-        }
-        return OpResult::fail(format!(
-            "preview {voice}: sidecar {code} — {}",
-            bm_core::util::head_chars(body.trim(), 200)
-        ));
-    }
     let bytes = match resp.bytes().await {
         Ok(b) => b,
         Err(e) => return OpResult::fail(format!("preview {voice}: read failed ({e})")),
@@ -135,35 +140,90 @@ pub(crate) async fn op_preview_voice(
     audio_result(voice, what, &bytes)
 }
 
-/// The audition sidecar reads its roster once at startup, so a voice enrolled
-/// after it started is on disk but unknown in memory until it restarts. Name
-/// that instead of passing on the sidecar's `:prov` advice, which pushes to
-/// workers and can never fix the box serving this preview.
-pub(crate) fn stale_roster_hint(
+/// Whether this machine's voice store holds `voice`. True means the sidecar's
+/// own bytes are wrong, not that the voice is missing.
+pub(crate) fn on_disk(layout: &bm_core::Layout, voice: &str) -> bool {
+    let want = folded(voice);
+    bm_core::pool::installed_voices(layout)
+        .is_some_and(|names| names.iter().any(|n| n == voice || folded(n) == want))
+}
+
+/// The same key the sidecar looks up by (`bm_tts::voice::norm`): folded with
+/// separators dropped, so `phong-le-2` still finds `Phong Le 2`.
+fn folded(s: &str) -> String {
+    bm_core::util::fold(s)
+        .chars()
+        .filter(|c| !matches!(c, '-' | '_' | ' '))
+        .collect()
+}
+
+/// Bake the voice into the store the sidecar loads, recycle it, and say whether
+/// the caller should retry. False when the voice is missing everywhere: a
+/// reload would not change the answer. The sidecar loads its roster once at
+/// startup, and `:prov` cannot help — it pushes to workers, not to this box.
+async fn reload_for(layout: &bm_core::Layout, voice: &str, body: &str) -> bool {
+    if !body.contains("unknown voice") || !layout.tts_voices().is_file() {
+        return false;
+    }
+    // A preset enrolled here lives in the python venv store until a bake moves
+    // it into `models/voices.json`, which is the file the sidecar reads.
+    bm_core::pool::bake_missing_voices(layout);
+    if !on_disk(layout, voice) {
+        return false;
+    }
+    recycle_sidecar().await;
+    // A sidecar that never came back reads as unreachable on the retry, which
+    // is what the operator needs to see anyway.
+    let _ = ensure_sidecar(layout).await;
+    true
+}
+
+/// Ask the local sidecar to exit so the next call loads the store on disk.
+/// The agent recycles the model it guards the same way (`POST /shutdown`).
+async fn recycle_sidecar() {
+    let http = sidecar_client(Duration::from_secs(10));
+    let _ = http.post(format!("{SIDECAR}/shutdown")).send().await;
+    // Its port is the single-instance lock: wait it out, or the replacement
+    // loses the bind and this preview fails on a dying process.
+    for _ in 0..20 {
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        let up = http
+            .get(format!("{SIDECAR}/health"))
+            .send()
+            .await
+            .map(|r| r.status().is_success())
+            .unwrap_or(false);
+        if !up {
+            return;
+        }
+    }
+}
+
+/// Why the sidecar refused a preview, in the operator's terms. `unknown voice`
+/// is the one refusal its own message gets wrong: it advises `:prov`, which
+/// enrolls nothing on the machine that just said no.
+pub(crate) fn preview_refusal(
     layout: &bm_core::Layout,
     voice: &str,
+    code: u16,
     body: &str,
-) -> Option<String> {
-    if !body.contains("unknown voice") {
-        return None;
+) -> String {
+    if body.contains("unknown voice") {
+        return if on_disk(layout, voice) {
+            format!(
+                "preview {voice}: the sidecar reloaded and still does not know it — enroll it into {} (`:N`/`:A`), then preview again",
+                layout.tts_voices().display()
+            )
+        } else {
+            format!(
+                "preview {voice}: not enrolled on this machine — `:N`/`:A` enrolls a clip from this book's refs/, then `:prov` pushes it to the workers"
+            )
+        };
     }
-    // Same key as the sidecar's own lookup (`bm_tts::voice::norm`): folded
-    // with separators dropped, so `phong-le-2` still finds `Phong Le 2`.
-    let norm = |s: &str| {
-        bm_core::util::fold(s)
-            .chars()
-            .filter(|c| !matches!(c, '-' | '_' | ' '))
-            .collect::<String>()
-    };
-    let want = norm(voice);
-    let on_disk = bm_core::pool::installed_voices(layout).is_some_and(|names| {
-        names.iter().any(|n| n == voice || norm(n) == want)
-    });
-    on_disk.then(|| {
-        format!(
-            "preview {voice}: the local sidecar is serving a stale roster (it started before {voice} was enrolled) — restart it (`pkill -x bm-tts`, it relaunches on the next preview) and `:prov` the workers so renders speak it too"
-        )
-    })
+    format!(
+        "preview {voice}: sidecar {code} — {}",
+        bm_core::util::head_chars(body.trim(), 200)
+    )
 }
 
 /// Turn a rendered wav into the op's answer.

@@ -392,7 +392,7 @@ pub(crate) async fn cmd_backup(
                     break;
                 }
             };
-            // Round 1's validated cast rides on round 2's prompt; it is what
+            // The cast rides on the staging prompt; it is what
             if let Some(c) = next.cast() {
                 cast = Some(c.clone());
             }

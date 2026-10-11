@@ -1,4 +1,5 @@
-//! `L`: LLM providers — keys, endpoints, models, and which one digests.
+//! `L`: LLM providers — the shipped ones and the ones you name: keys, URLs,
+//! models, and which one digests.
 use crate::tui::input::Flow;
 use crate::tui::{
     app::App,
@@ -16,7 +17,7 @@ pub(crate) fn open_llm(app: &mut App) {
     app.screen = Screen::Llm(v);
     app.set_status(
         Level::Info,
-        "LLM providers — ↑↓ move · a activate · k key · u URL · m model · f fetch models · Esc close",
+        "LLM providers — ↑↓ move · n new · a activate · k key · u URL · m model · f fetch models · Esc close",
     );
 }
 
@@ -29,6 +30,10 @@ pub(crate) fn save_llm_field(
 ) -> Result<String, String> {
     if app.layout.root.as_os_str().is_empty() {
         return Err("no repo root — restart the TUI from a checkout".into());
+    }
+    // A new provider is a whole entry rather than one field of one, so it is
+    if matches!(kind, TextKind::LlmNew) {
+        return add_provider(app, buf);
     }
     let mut cfg = bm_core::config::LlmConfig::load(&app.layout.root);
     let entry = cfg.providers.entry(provider.to_string()).or_default();
@@ -74,6 +79,48 @@ pub(crate) fn save_llm_field(
         .map_err(|e| format!("saving llm.json: {e:#}"))?;
     mirror_settings(app, &cfg);
     Ok(msg)
+}
+
+/// Add the provider an operator names: `<name> <url> [kind]`. The kind is what
+/// routes, so the omitted one is OpenAI-compatible — the path a gateway written
+/// into `llm.json` by hand takes. The key and the model follow with `k`/`m`.
+fn add_provider(app: &App, buf: &str) -> Result<String, String> {
+    let mut words = buf.split_whitespace();
+    let id = words.next().unwrap_or_default();
+    let url = words.next().unwrap_or_default();
+    let kind = words.next().unwrap_or("openai");
+    if id.is_empty() || url.is_empty() {
+        return Err("name it and point it at a URL: `<name> <url> [kind]`".into());
+    }
+    if words.next().is_some() {
+        return Err("`<name> <url> [kind]` — three words at most".into());
+    }
+    if !(url.starts_with("http://") || url.starts_with("https://")) {
+        return Err("a URL starts with http:// or https://".into());
+    }
+    if !matches!(kind, "openai" | "gemini" | "ollama") {
+        return Err(format!("unknown kind {kind:?} — openai, gemini or ollama"));
+    }
+    let mut cfg = bm_core::config::LlmConfig::load(&app.layout.root);
+    if cfg.providers.contains_key(id) {
+        return Err(format!(
+            "{id} is already configured — `u` its URL, or name this one something else"
+        ));
+    }
+    cfg.providers.insert(
+        id.to_string(),
+        bm_core::config::ProviderEntry {
+            kind: kind.to_string(),
+            base_url: url.trim_end_matches('/').to_string(),
+            ..Default::default()
+        },
+    );
+    cfg.save(&app.layout.root)
+        .map_err(|e| format!("saving llm.json: {e:#}"))?;
+    mirror_settings(app, &cfg);
+    Ok(format!(
+        "{id} added ({kind} at {url}) — `k` its key, `f` or `m` its model, `a` to activate"
+    ))
 }
 
 /// Activate one provider: key (except Ollama) and model must be set, or the
@@ -123,6 +170,18 @@ fn mirror_settings(app: &App, cfg: &bm_core::config::LlmConfig) {
     let _ = settings.save(&path);
 }
 
+/// The `n` prompt: a provider the operator names exists nowhere yet, so both
+fn new_provider_prompt() -> Screen {
+    Screen::Text(TextPrompt::new(
+        TextKind::LlmNew,
+        "New provider",
+        "your own gateway: `<name> <url> [kind]` — e.g. \
+         `my-gateway https://tokenharbor.ai/v1`; kind is openai (the default), \
+         gemini or ollama",
+        "",
+    ))
+}
+
 pub(crate) async fn key_llm(
     app: &mut App,
     view: LlmView,
@@ -132,18 +191,41 @@ pub(crate) async fn key_llm(
 ) -> Flow {
     let cfg = bm_core::config::LlmConfig::load(&app.layout.root);
     let ids = LlmView::ids(&cfg);
-    if ids.is_empty() {
-        app.screen = Screen::Normal;
-        return Flow::KeepRunning;
-    }
     let mut v = view;
-    v.cursor = v.cursor.min(ids.len().saturating_sub(1));
-    let id = ids[v.cursor].clone();
+    // The row past the ids is not a provider: it is how one is made, so the
+    // cursor may rest there and `n` means the same on every row.
+    v.cursor = v.cursor.min(ids.len());
+    let id = ids.get(v.cursor).cloned();
     // The fetched list belongs to the provider it was fetched for; moving
-    if v.picking && app.llm_models_for != id {
+    if v.picking && id.as_deref() != Some(app.llm_models_for.as_str()) {
         v.picking = false;
         v.model_cursor = 0;
     }
+    let Some(id) = id else {
+        // The add row — and an empty list, which is nothing but that row.
+        match key.code {
+            KeyCode::Char('n') | KeyCode::Enter => {
+                app.llm_cursor = v.cursor;
+                app.screen = new_provider_prompt();
+            }
+            KeyCode::Esc => {
+                app.screen = Screen::Normal;
+                app.set_status(Level::Info, "closed the LLM screen");
+            }
+            KeyCode::Up => {
+                v.cursor = v.cursor.saturating_sub(1);
+                app.screen = Screen::Llm(v);
+            }
+            _ => {
+                app.screen = Screen::Llm(v);
+                app.set_status(
+                    Level::Info,
+                    "that row adds a provider — `n` names it, `↑` picks a provider instead",
+                );
+            }
+        }
+        return Flow::KeepRunning;
+    };
     match key.code {
         KeyCode::Esc => {
             if v.picking {
@@ -190,7 +272,7 @@ pub(crate) async fn key_llm(
             app.screen = Screen::Llm(v);
         }
         KeyCode::Down => {
-            v.cursor = (v.cursor + 1).min(ids.len().saturating_sub(1));
+            v.cursor = (v.cursor + 1).min(ids.len());
             app.screen = Screen::Llm(v);
         }
         KeyCode::Char('a') => {
@@ -200,6 +282,10 @@ pub(crate) async fn key_llm(
                 Err(msg) => app.set_status(Level::Error, msg),
             }
             app.screen = Screen::Llm(v);
+        }
+        KeyCode::Char('n') if !v.picking => {
+            app.llm_cursor = v.cursor;
+            app.screen = new_provider_prompt();
         }
         KeyCode::Char('k') if !v.picking => {
             app.llm_cursor = v.cursor;

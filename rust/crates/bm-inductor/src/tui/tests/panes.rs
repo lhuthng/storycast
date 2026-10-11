@@ -508,13 +508,15 @@ fn tasks_pane_counts_chapters_against_the_pipeline_that_feeds_them() {
     assert_eq!(
         counts
             .iter()
-            .map(|(st, done, denom)| (st.as_str(), *done, *denom))
+            .map(|(st, done, denom, failed, shelved)| {
+                (st.as_str(), *done, *denom, *failed, *shelved)
+            })
             .collect::<Vec<_>>(),
         vec![
-            ("crawl", 1, 2),
-            ("digest", 0, 1),
-            ("render", 0, 0),
-            ("merge", 0, 0),
+            ("crawl", 1, 2, 0, 0),
+            ("digest", 0, 1, 0, 1),
+            ("render", 0, 0, 0, 0),
+            ("merge", 0, 0, 0, 0),
         ]
     );
     let mut app = tasks_app();

@@ -6956,3 +6956,31 @@ fn a_held_cluster_still_reaps_an_expired_lease() {
         "but the row came home"
     );
 }
+
+/// The roll-up every `/api/state` carries: one bucket per stage and state the
+/// ledger actually holds, spelled the way the wire spells them.
+#[test]
+fn counts_buckets_the_ledger_by_stage_and_state() {
+    let (_d, mut inner) = fixture();
+    for (chapter, stage, state) in [
+        (1, Stage::Crawl, TaskState::Done),
+        (2, Stage::Crawl, TaskState::Done),
+        (1, Stage::Render, TaskState::Pending),
+        (2, Stage::Render, TaskState::Shelved),
+        (3, Stage::Merge, TaskState::Running),
+    ] {
+        let mut t = Task::new(chapter, stage);
+        t.state = state;
+        inner.tasks.insert(t.id(), t);
+    }
+    let counts = inner.counts();
+    assert_eq!(counts["crawl"]["done"], 2);
+    assert_eq!(counts["render"]["pending"], 1);
+    assert_eq!(counts["render"]["shelved"], 1);
+    assert_eq!(counts["merge"]["running"], 1);
+    assert!(
+        !counts["crawl"].contains_key("shelved"),
+        "a state no row holds is no bucket: {counts:?}"
+    );
+    assert_eq!(counts.len(), 3, "and a stage with no rows is none either");
+}

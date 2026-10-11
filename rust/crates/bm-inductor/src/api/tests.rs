@@ -517,6 +517,29 @@ async fn machine_state_route_updates_known_boxes_only() {
     }
 }
 
+/// The picker's fetch: the same speakers and cast, read off the lock.
+#[tokio::test]
+async fn the_roster_handler_answers_the_books_speakers() {
+    let d = scratch();
+    let layout = bm_core::Layout::new(d.path());
+    std::fs::write(layout.cast("vieneu"), r#"{"A":"Đức Trí"}"#).unwrap();
+    std::fs::write(
+        layout.script(1),
+        r#"{"roster":["A"],"segments":[{"speaker":"B","text":"x"}]}"#,
+    )
+    .unwrap();
+    let st = segment_state(&layout);
+    let Json(r) = roster(State(st)).await;
+    assert_eq!(r.cast.get("A").map(|s| s.as_str()), Some("Đức Trí"));
+    for who in ["A", "B"] {
+        assert!(
+            r.characters.contains(&who.to_string()),
+            "{who} speaks in the book: {:?}",
+            r.characters
+        );
+    }
+}
+
 #[test]
 fn local_roster_reads_cast_and_speakers_from_disk() {
     let d = scratch();
@@ -948,7 +971,7 @@ async fn state_reports_dispatch_and_the_range() {
 }
 
 #[test]
-fn stale_sidecar_roster_names_the_restart_not_provision() {
+fn a_stale_roster_is_reloaded_rather_than_provisioned() {
     let d = scratch();
     let layout = bm_core::Layout::new(d.path());
     let store = layout.tts_voices();
@@ -958,15 +981,30 @@ fn stale_sidecar_roster_names_the_restart_not_provision() {
         r#"{"presets":{"Phong Le 2":{"speaker_emb":[0.1],"codes":[]}}}"#,
     )
     .unwrap();
-    let body = r#"{"error":"unknown voice \"Phong Le 2\" on this box — :prov to push it (86 known)"}"#;
-    // On disk but unknown in memory: the sidecar predates the enrollment.
-    let hint = super::sidecar::stale_roster_hint(&layout, "Phong Le 2", body).unwrap();
-    assert!(hint.contains("pkill -x bm-tts"), "{hint}");
-    assert!(hint.contains(":prov"), "{hint}");
-    // Folded spelling still matches the enrolled voice.
-    assert!(super::sidecar::stale_roster_hint(&layout, "phong-le-2", body).is_some());
-    // Genuinely missing voice: no hint, the sidecar's own error stands.
-    assert!(super::sidecar::stale_roster_hint(&layout, "Nope", r#"unknown voice "Nope""#).is_none());
+    let body =
+        r#"{"error":"unknown voice \"Phong Le 2\" on this box — :prov to push it (86 known)"}"#;
+    // On disk but unknown in memory: the sidecar predates the enrollment, so
+    // the preview reloads it — including for the folded spelling.
+    assert!(super::sidecar::on_disk(&layout, "Phong Le 2"));
+    assert!(super::sidecar::on_disk(&layout, "phong-le-2"));
+    assert!(!super::sidecar::on_disk(&layout, "Nope"));
+    // Refusing names enrolling and pushing, never the sidecar's `:prov` alone.
+    let missing = super::sidecar::preview_refusal(&layout, "Nope", 500, r#"unknown voice "Nope""#);
+    assert!(
+        missing.contains("not enrolled on this machine"),
+        "{missing}"
+    );
+    assert!(
+        missing.contains(":N") && missing.contains(":prov"),
+        "{missing}"
+    );
+    // Enrolled but still unknown after the reload: point at the store.
+    let stranded = super::sidecar::preview_refusal(&layout, "Phong Le 2", 500, body);
+    assert!(stranded.contains("reloaded"), "{stranded}");
     // A non-voice 500 passes through untouched.
-    assert!(super::sidecar::stale_roster_hint(&layout, "Phong Le 2", "internal error").is_none());
+    let other = super::sidecar::preview_refusal(&layout, "Phong Le 2", 500, "internal error");
+    assert!(
+        other.contains("internal error") && other.contains("500"),
+        "{other}"
+    );
 }

@@ -60,6 +60,12 @@ pub(crate) fn audition(
         }
     };
 
+    // A render of exactly this sentence on exactly this voice that came back
+    // within the last minute: play it again, no sidecar round trip.
+    if app.replay_audition(voice, &l.text) {
+        return Some(l);
+    }
+
     // No backend, no worker, no sidecar: synthesize on this machine instead.
     if !matches!(app.conn, Conn::Up) {
         if app.layout.root.as_os_str().is_empty() {
@@ -79,6 +85,7 @@ pub(crate) fn audition(
                 text: l.text.clone(),
             },
         );
+        app.audition_cache.request(voice, &l.text);
         app.set_status(
             Level::Info,
             format!(
@@ -106,6 +113,7 @@ pub(crate) fn audition(
         app.audition = None;
         return held.cloned();
     }
+    app.audition_cache.request(voice, &l.text);
     app.set_status(
         Level::Info,
         format!(
@@ -307,6 +315,15 @@ pub(crate) fn pick_pointed(
         None => app.set_status(Level::Warn, "nothing to audition"),
         Some(v) => {
             let (character, voice) = (p.character.clone(), v.name.clone());
+            // `^T` / `:another` re-speaks on the speaker's *own* voice: a fresh
+            // line to judge the incumbent by, not another take from the candidate
+            // the cursor sits on. A speaker nobody has cast yet has no incumbent,
+            // and for them the pointed voice is all there is.
+            let voice = if reroll {
+                current_voice(app, &character).unwrap_or(voice)
+            } else {
+                voice
+            };
             p.line = audition(
                 app,
                 job_tx,

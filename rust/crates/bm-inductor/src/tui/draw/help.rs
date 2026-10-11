@@ -88,8 +88,9 @@ pub(crate) fn draw_help(f: &mut ratatui::Frame, app: &mut App, scroll: usize) {
         (
             "L / :llm",
             "LLM providers: add a key, set the endpoint and model, switch the \
-             active one. The next offer carries the active key+model, so this \
-             is the whole sync — no restart, no second file",
+             active one; `n` names one of your own — a gateway or a proxy, with \
+             its URL. The next offer carries the active key+model, so this is \
+             the whole sync — no restart, no second file",
         ),
         (
             "c",
@@ -219,9 +220,12 @@ pub(crate) fn draw_help(f: &mut ratatui::Frame, app: &mut App, scroll: usize) {
         "`T` renders that same held line with the pointed voice: the one",
         "deliberate generation, and the only way to hear two voices on the",
         "same sentence before either is assigned. Inductor down: this box",
-        "synthesizes it instead, so no worker needs to be on.",
-        "`^T` renders another line with the pointed voice; the chosen one",
-        "is shown above the list.",
+        "synthesizes it instead, so no worker needs to be on. The render is",
+        "kept for a minute, so pressing `T` again on that same sentence and",
+        "voice replays it instead of paying for another one.",
+        "`^T` renders another line with the speaker's own voice — the",
+        "incumbent beside the candidate, not the candidate taking a second",
+        "line; the chosen one is shown above the list.",
         "Keys or filter, never both: both screens open in audition focus,",
         "where `t`/`T`/`^T` play and any other letter focuses the filter",
         "instead. While the filter is focused every letter types — `t`/`T`",
@@ -330,10 +334,11 @@ pub(crate) fn draw_help(f: &mut ratatui::Frame, app: &mut App, scroll: usize) {
         "grid, so ←/→ step one chapter and ↑/↓ step a whole row.",
         "The manual digest exists for when no backend is available — a rate-limited",
         "fallback, a 503 from the model, or simply a model you already have open in",
-        "a browser. `Enter` on a chapter puts round 1's prompt on the clipboard;",
-        "paste it into any model, copy the answer, press `v` here. A valid cast buys",
-        "round 2's prompt, copied for you the same way; paste that answer and press",
-        "`v` again and the chapter is finished. `c` re-copies the current prompt.",
+        "a browser. `Enter` on a chapter puts its next prompt on the clipboard;",
+        "paste it into any model, copy the answer, press `v` here. A chapter opens",
+        "on its proofread, that buys the cast prompt, and the cast buys the script —",
+        "each copied for you the same way; the last `v` finishes the chapter.",
+        "`c` re-copies the current prompt.",
         "It is the *same* digest, not a looser one: the prompts and the validators",
         "are the worker's own, and the result is reported to the inductor exactly as",
         "a worker reports it. So an answer the automatic path would refuse is refused",

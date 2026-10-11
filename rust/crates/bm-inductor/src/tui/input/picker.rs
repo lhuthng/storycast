@@ -36,7 +36,7 @@ pub(crate) async fn key_picker(
                 p.filter_focus = false;
                 app.set_status(
                     Level::Info,
-                    "audition keys — t current · T candidate · ^T another",
+                    "audition keys — t current · T candidate · ^T another (own voice)",
                 );
                 app.screen = Screen::Pick(p);
             }
@@ -196,7 +196,7 @@ pub(crate) async fn key_picker(
                 'r' => {
                     app.load_roster(job_tx, http);
                 }
-                // `^T`: another line for the pointed voice — one random
+                // `^T`: another line on the speaker's own voice — the reference,
                 't' | 'T' if p.stage == PickStage::Voice && !p.filter_focus => {
                     pick_pointed(app, job_tx, http, &mut p, true);
                 }

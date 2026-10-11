@@ -1,5 +1,123 @@
 use super::*;
 
+/// One `/api/state` payload, already parsed. It is built off the UI task:
+/// a whole book's task list is megabytes, and the poll runs every 800 ms.
+#[derive(Debug)]
+pub(crate) struct StateSnap {
+    machines: Vec<Machine>,
+    beats: Vec<Heartbeat>,
+    tasks: Vec<Task>,
+    counts: serde_json::Value,
+    stats: WorkerStats,
+    dispatch: Option<Dispatch>,
+    settings: Option<serde_json::Value>,
+    events: Vec<crate::state::EventRecord>,
+}
+
+/// The payload as the server writes it, deserialized straight into the types
+/// the panes read: one pass, where the `Value` walk below parses every task,
+/// builds a tree of it and then takes it apart again.
+#[derive(serde::Deserialize)]
+struct RawDoc {
+    #[serde(default)]
+    tasks: Vec<Task>,
+    #[serde(default)]
+    machines: Vec<Machine>,
+    #[serde(default)]
+    beats: Vec<Heartbeat>,
+    #[serde(default)]
+    counts: serde_json::Value,
+    #[serde(default)]
+    stats: Option<serde_json::Value>,
+    #[serde(default)]
+    dispatch: Option<serde_json::Value>,
+    #[serde(default)]
+    settings: Option<serde_json::Value>,
+    #[serde(default)]
+    events: Vec<crate::state::EventRecord>,
+}
+
+impl RawDoc {
+    fn into_snap(self) -> StateSnap {
+        let RawDoc {
+            mut machines,
+            mut beats,
+            mut tasks,
+            counts,
+            stats,
+            dispatch,
+            settings,
+            events,
+        } = self;
+        // The API serialises HashMaps, whose iteration order is not
+        machines.sort_by(|a, b| a.addr.cmp(&b.addr));
+        beats.sort_by(|a, b| a.worker_id.cmp(&b.worker_id));
+        tasks.sort_by_key(|t| (t.chapter, t.stage));
+        StateSnap {
+            machines,
+            beats,
+            tasks,
+            counts,
+            stats: parse_stats(stats.as_ref()),
+            dispatch: parse_dispatch(dispatch.as_ref()),
+            settings,
+            events,
+        }
+    }
+}
+
+impl StateSnap {
+    /// Take each field out of the payload: no subtree is cloned, and a field
+    /// that will not parse lands on its default exactly as it did before. The
+    /// fallback for a payload [`RawDoc`] cannot take whole.
+    fn from_value(mut v: serde_json::Value) -> Self {
+        fn take<T: serde::de::DeserializeOwned + Default>(v: &mut serde_json::Value, key: &str) -> T {
+            v.get_mut(key)
+                .map(std::mem::take)
+                .and_then(|slot| serde_json::from_value(slot).ok())
+                .unwrap_or_default()
+        }
+        let mut machines: Vec<Machine> = take(&mut v, "machines");
+        let mut beats: Vec<Heartbeat> = take(&mut v, "beats");
+        let mut tasks: Vec<Task> = take(&mut v, "tasks");
+        // The API serialises HashMaps, whose iteration order is not
+        machines.sort_by(|a, b| a.addr.cmp(&b.addr));
+        beats.sort_by(|a, b| a.worker_id.cmp(&b.worker_id));
+        tasks.sort_by_key(|t| (t.chapter, t.stage));
+        let events = v
+            .get_mut("events")
+            .and_then(|e| e.as_array_mut())
+            .map(|list| {
+                list.drain(..)
+                    .filter_map(|item| serde_json::from_value(item).ok())
+                    .collect()
+            })
+            .unwrap_or_default();
+        StateSnap {
+            machines,
+            beats,
+            tasks,
+            counts: v.get_mut("counts").map(std::mem::take).unwrap_or_default(),
+            stats: parse_stats(v.get("stats")),
+            dispatch: parse_dispatch(v.get("dispatch")),
+            settings: v.get_mut("settings").map(std::mem::take),
+            events,
+        }
+    }
+}
+
+/// Parse one `/api/state` body. Blocking: megabytes of JSON on a full book.
+pub(crate) fn parse_state(raw: &[u8]) -> Result<StateSnap, String> {
+    match serde_json::from_slice::<RawDoc>(raw) {
+        Ok(doc) => Ok(doc.into_snap()),
+        // A row this build cannot read — an inductor on another version, via
+        // `--api` — drops that row here rather than the whole book.
+        Err(_) => serde_json::from_slice::<serde_json::Value>(raw)
+            .map(StateSnap::from_value)
+            .map_err(|e| format!("bad state payload: {e}")),
+    }
+}
+
 impl App {
     /// The settings actually in force: the live ones while the inductor
     pub(crate) fn effective_settings(&self) -> serde_json::Value {
@@ -138,24 +256,23 @@ impl App {
     pub(crate) async fn refresh(&mut self, http: &reqwest::Client) {
         let outcome = fetch_state(http, &self.api).await;
         match outcome {
-            Ok(v) => self.apply_state(v),
+            Ok(snap) => self.apply_snap(snap),
             Err(e) => self.state_failed(e),
         }
     }
 
-    /// Fold one `/api/state` payload into the screen.
-    pub(crate) fn apply_state(&mut self, v: serde_json::Value) {
-        let mut machines: Vec<Machine> =
-            serde_json::from_value(v.get("machines").cloned().unwrap_or_default())
-                .unwrap_or_default();
-        let mut beats: Vec<Heartbeat> =
-            serde_json::from_value(v.get("beats").cloned().unwrap_or_default()).unwrap_or_default();
-        let mut tasks: Vec<Task> =
-            serde_json::from_value(v.get("tasks").cloned().unwrap_or_default()).unwrap_or_default();
-        // The API serialises HashMaps, whose iteration order is not
-        machines.sort_by(|a, b| a.addr.cmp(&b.addr));
-        beats.sort_by(|a, b| a.worker_id.cmp(&b.worker_id));
-        tasks.sort_by_key(|t| (t.chapter, t.stage));
+    /// Fold one parsed `/api/state` snapshot into the screen.
+    pub(crate) fn apply_snap(&mut self, snap: StateSnap) {
+        let StateSnap {
+            machines,
+            beats,
+            tasks,
+            counts,
+            stats,
+            dispatch,
+            settings,
+            events,
+        } = snap;
         // Which launched boxes are waiting to be onboarded, read off the note
         self.onboarded.retain(|addr| {
             machines
@@ -172,11 +289,11 @@ impl App {
         self.machines = machines;
         self.beats = beats;
         self.tasks = tasks;
-        self.counts = v.get("counts").cloned().unwrap_or_default();
-        self.stats = parse_stats(v.get("stats"));
-        self.dispatch = parse_dispatch(v.get("dispatch"));
-        self.settings = v.get("settings").cloned();
-        self.ingest_events(v.get("events"));
+        self.counts = counts;
+        self.stats = stats;
+        self.dispatch = dispatch;
+        self.settings = settings;
+        self.ingest_events(events);
         if self.selected >= self.machines.len() {
             self.selected = self.machines.len().saturating_sub(1);
         }
@@ -189,6 +306,13 @@ impl App {
         }
     }
 
+    /// Fold one raw `/api/state` payload here and now, for a test that already
+    /// holds the JSON: the poller's path is `fetch_state` → `apply_snap`.
+    #[cfg(test)]
+    pub(crate) fn apply_state(&mut self, v: serde_json::Value) {
+        self.apply_snap(StateSnap::from_value(v));
+    }
+
     /// Record a failed poll. The message is only logged on the *transition* into
     pub(crate) fn state_failed(&mut self, e: String) {
         if self.conn != Conn::Down(e.clone()) {
@@ -198,17 +322,7 @@ impl App {
     }
 
     /// Append scheduler events the inductor has not shown us yet.
-    pub(crate) fn ingest_events(&mut self, events: Option<&serde_json::Value>) {
-        let Some(list) = events.and_then(|v| v.as_array()) else {
-            return;
-        };
-        let mut fresh: Vec<crate::state::EventRecord> = Vec::new();
-        for item in list {
-            match serde_json::from_value::<crate::state::EventRecord>(item.clone()) {
-                Ok(rec) => fresh.push(rec),
-                Err(_) => continue,
-            }
-        }
+    pub(crate) fn ingest_events(&mut self, fresh: Vec<crate::state::EventRecord>) {
         let newest = fresh.iter().map(|e| e.id).max();
         // A restarted inductor begins its ids at 0 again. Without this reset the
         if let (Some(newest), Some(last)) = (newest, self.last_event_id) {
@@ -384,7 +498,7 @@ impl App {
                 self.cloud_error = Some(e);
             }
             // A poller snapshot, applied the moment it arrives: nothing here
-            Ev::State(Ok(v)) => self.apply_state(v),
+            Ev::State(Ok(snap)) => self.apply_snap(snap),
             Ev::State(Err(e)) => self.state_failed(e),
             Ev::Done(kind) => {
                 self.pending = self.pending.saturating_sub(1);
@@ -408,6 +522,14 @@ impl App {
                         self.inflight.retain(|k| *k != key);
                         if op == Op::PreviewVoice || op == Op::Segment {
                             self.audition = None;
+                            // Keep a render for a minute: the same `T` again on
+                            // this voice and this sentence replays it instead of
+                            // buying another sidecar render.
+                            if op == Op::PreviewVoice && ok {
+                                if let (Some(v), Some(a)) = (voice.as_ref(), audio_b64.as_ref()) {
+                                    self.audition_cache.fill(v, a.clone());
+                                }
+                            }
                             if ok {
                                 if let Screen::Pick(p) = &mut self.screen {
                                     if let Some(v) = voice {

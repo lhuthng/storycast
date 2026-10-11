@@ -45,6 +45,8 @@ pub(crate) enum TextKind {
     AwsDiscover,
     /// `:` command line: the buffer names a key (`m`) or a word
     Command,
+    /// A provider the operator names (`L` → `n`): `<name> <url> [kind]`.
+    LlmNew,
     /// One LLM provider's secret key (`L` → `k`): typed, never displayed.
     LlmKey(String),
     /// One provider's base URL (`L` → `u`).

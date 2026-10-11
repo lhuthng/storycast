@@ -9,8 +9,8 @@ use axum::{
     Router,
 };
 use bm_proto::{
-    Complete, Heartbeat, Machine, MachineState, OpRequest, OpResult, Register, Roster, TaskRequest,
-    VoiceInfo,
+    Complete, Heartbeat, Machine, MachineState, OpRequest, OpResult, Register, Roster, Task,
+    TaskRequest, VoiceInfo,
 };
 use serde::Deserialize;
 use std::collections::BTreeMap;
@@ -427,44 +427,73 @@ pub(crate) async fn enqueue_remainder(st: &Shared, go: bool) -> Option<String> {
     ))
 }
 
-async fn state(State(st): State<Shared>) -> impl IntoResponse {
+/// What `/api/state` sends, owning what it names so the body is serialized
+/// **after** the state lock is dropped: a whole book's task list is megabytes,
+/// and building it while holding the lock parked every heartbeat behind the
+/// dashboard's 800 ms poll.
+#[derive(serde::Serialize)]
+struct StateDoc {
+    tasks: Vec<Task>,
+    machines: Vec<Machine>,
+    beats: Vec<Heartbeat>,
+    counts: std::collections::HashMap<String, std::collections::HashMap<String, usize>>,
+    /// Per-worker per-stage completions plus per-stage task averages
+    stats: serde_json::Value,
+    /// Settings ride along so the TUI can prefill prompts with the values
+    settings: bm_core::config::Settings,
+    /// Scheduler events (task done/fail, retry, orphan reap, …) surfaced in
+    events: Vec<crate::state::EventRecord>,
+    /// The exclusive-write queue, when an operator has parked one: the
+    exclusive: serde_json::Value,
+    /// Whether anything is being handed out at all, and where the authored
+    /// range stands. The footer says so while held — "held · ch4..100 ·
+    /// 3 done, 97 to go — :go" — because neither is visible from the task
+    dispatch: DispatchDoc,
+}
+
+#[derive(serde::Serialize)]
+struct DispatchDoc {
+    held: bool,
+    span: String,
+    remaining: Option<(u32, u32, u32)>,
+}
+
+async fn state(State(st): State<Shared>) -> Json<StateDoc> {
     let inner = st.lock().await;
-    let events: Vec<_> = inner.recent_events(100);
-    Json(serde_json::json!({
-        "tasks": inner.tasks.values().collect::<Vec<_>>(),
-        "machines": inner.machines.values().collect::<Vec<_>>(),
-        "beats": inner.beats.values().collect::<Vec<_>>(),
-        "counts": inner.counts(),
-        // Per-worker per-stage completions plus per-stage task averages
-        "stats": inner.stats.summary(),
-        // Settings ride along so the TUI can prefill prompts with the values
-        "settings": inner.settings,
-        // Scheduler events (task done/fail, retry, orphan reap, …) surfaced in
-        "events": events,
-        // The exclusive-write queue, when an operator has parked one: the
-        "exclusive": inner.exclusive_snapshot(),
-        // Whether anything is being handed out at all, and where the authored
-        // range stands. The footer says so while held — "held · ch4..100 ·
-        // 3 done, 97 to go — :go" — because neither is visible from the task
-        "dispatch": {
-            "held": inner.dispatch_held,
-            "span": inner.remaining_line(),
-            "remaining": inner.remaining(),
+    // Cloning the rows is a few milliseconds; the serialize they feed is 4 MB
+    // and happens outside the lock.
+    Json(StateDoc {
+        tasks: inner.tasks.values().cloned().collect(),
+        machines: inner.machines.values().cloned().collect(),
+        beats: inner.beats.values().cloned().collect(),
+        counts: inner.counts(),
+        stats: inner.stats.summary(),
+        settings: inner.settings.clone(),
+        events: inner.recent_events(100).into_iter().cloned().collect(),
+        exclusive: serde_json::to_value(inner.exclusive_snapshot()).unwrap_or_default(),
+        dispatch: DispatchDoc {
+            held: inner.dispatch_held,
+            span: inner.remaining_line(),
+            remaining: inner.remaining(),
         },
-    }))
+    })
 }
 
 /// The voice picker's whole data model in one call: roster + cast + speakers.
 async fn roster(State(st): State<Shared>) -> Json<Roster> {
-    let (layout, engine, characters, cast) = {
+    // The speaker list walks every script in the book (~15ms on a big one), so
+    // it is built from a lock-free twin instead of under the scheduler's mutex:
+    // an offer must never wait on a picker's fetch.
+    let (layout, settings, cast) = {
         let inner = st.lock().await;
         (
             inner.layout.clone(),
-            inner.settings.engine.clone(),
-            inner.known_characters(),
+            inner.settings.clone(),
             inner.cast_snapshot(),
         )
     };
+    let engine = settings.engine.clone();
+    let characters = Inner::new(layout.clone(), settings).known_characters();
     Json(build_roster(&layout, &engine, characters, cast).await)
 }
 

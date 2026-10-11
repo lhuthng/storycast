@@ -112,7 +112,7 @@ impl HitRegion {
     }
 }
 
-mod state;
+pub(crate) mod state;
 pub(crate) struct App {
     pub(crate) api: String,
     /// The root this dashboard was started on, *with* the workspace the
@@ -192,6 +192,9 @@ pub(crate) struct App {
     pub(crate) refreshed: Option<Instant>,
     /// Voice whose audition render is in flight, if any.
     pub(crate) audition: Option<String>,
+    /// The last render, held for a minute so `T` can replay it instead of
+    /// buying the same sentence on the same voice twice.
+    pub(crate) audition_cache: crate::tui::audition::AuditionCache,
     /// Sentences locked by Enter-pick, per character. Picking a voice locks
     pub(crate) locked_lines: HashMap<String, crate::tui::audition::AuditionLine>,
     /// `speaker -> their lines`, from `data/script-*.json`. Built once per
@@ -274,6 +277,7 @@ impl App {
             tick: 0,
             refreshed: None,
             audition: None,
+            audition_cache: Default::default(),
             locked_lines: HashMap::new(),
             lines: None,
             lines_loading: false,
@@ -343,11 +347,12 @@ impl App {
     }
 
     /// Finish an audition: play what came back, and always leave a status.
-    fn play_audition(&mut self, ok: bool, audio_b64: Option<String>) {
+    /// True when the wav actually reached the speaker.
+    fn play_audition(&mut self, ok: bool, audio_b64: Option<String>) -> bool {
         if !ok {
             // The op's own failure text is already in the event pane; the bar's
             self.set_status(Level::Error, "audition failed — see the events pane");
-            return;
+            return false;
         }
         let Some(b64) = audio_b64 else {
             // What an *older inductor* answers with: it has no audio field at
@@ -355,7 +360,7 @@ impl App {
                 Level::Warn,
                 "the inductor sent no audio — restart it (older build?)",
             );
-            return;
+            return false;
         };
         let wav = match B64.decode(b64.as_bytes()) {
             Ok(w) => w,
@@ -364,15 +369,38 @@ impl App {
                     Level::Error,
                     format!("undecodable audio from the inductor: {e}"),
                 );
-                return;
+                return false;
             }
         };
         let kb = wav.len() / 1024;
         match self.player.play_bytes(&wav) {
-            Ok(()) => self.set_status(Level::Info, format!("playing {kb} KB")),
+            Ok(()) => {
+                self.set_status(Level::Info, format!("playing {kb} KB"));
+                true
+            }
             // The render worked and the speaker did not. Naming that split is
-            Err(e) => self.set_status(Level::Error, e),
+            Err(e) => {
+                self.set_status(Level::Error, e);
+                false
+            }
         }
+    }
+
+    /// Play this voice's render of this sentence out of the short cache. False
+    /// only when the cache has nothing fresh — the caller then renders.
+    pub(crate) fn replay_audition(&mut self, voice: &str, text: &str) -> bool {
+        let Some(audio) = self.audition_cache.fresh(voice, text).map(str::to_string) else {
+            return false;
+        };
+        if self.play_audition(true, Some(audio)) {
+            self.set_status(
+                Level::Info,
+                format!("cached · “{}” ({voice})", bm_core::util::head_chars(text, 48)),
+            );
+        }
+        // A replay that failed already left its own status standing; rendering
+        // over it would swallow the reason the speaker said no.
+        true
     }
 
     pub(crate) fn push_log(&mut self, mut line: LogLine) {

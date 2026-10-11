@@ -8,18 +8,49 @@ use std::collections::HashMap;
 /// RAM percent above which a box is offered nothing.
 const MEM_PCT_CEILING: f32 = 90.0;
 
+/// The two places a script names a speaker, and nothing else: the roster walks
+/// every script in the book on each fetch, so the read is typed rather than a
+/// `Value` tree it then picks apart.
+#[derive(serde::Deserialize)]
+struct ScriptNames {
+    #[serde(default)]
+    roster: Vec<String>,
+    #[serde(default)]
+    segments: Vec<ScriptSpeaker>,
+}
+
+#[derive(serde::Deserialize)]
+struct ScriptSpeaker {
+    #[serde(default)]
+    speaker: String,
+}
+
 mod build;
 mod complete;
 mod fail;
 impl Inner {
     pub fn counts(&self) -> HashMap<String, HashMap<String, usize>> {
-        let mut out: HashMap<String, HashMap<String, usize>> = HashMap::new();
+        // Borrowed keys inside the loop: a book is tens of thousands of rows and
+        // this runs on every `/api/state`, so the only allocations are the few
+        // stage and state names the ledger actually uses.
+        let mut out: HashMap<&'static str, HashMap<&'static str, usize>> = HashMap::new();
         for t in self.tasks.values() {
-            let e = out.entry(t.stage.as_str().into()).or_default();
-            let k = format!("{:?}", t.state).to_lowercase();
-            *e.entry(k).or_default() += 1;
+            *out.entry(t.stage.as_str())
+                .or_default()
+                .entry(t.state.as_str())
+                .or_default() += 1;
         }
-        out
+        out.into_iter()
+            .map(|(stage, states)| {
+                (
+                    stage.to_string(),
+                    states
+                        .into_iter()
+                        .map(|(state, n)| (state.to_string(), n))
+                        .collect(),
+                )
+            })
+            .collect()
     }
 
     /// The cast exactly as the cast file holds it.
@@ -55,23 +86,17 @@ impl Inner {
         }
         let scripts = self.layout.scripts();
         for sp in scripts {
-            let Ok(data) = bm_core::read_json::<Value>(&sp) else {
+            let Ok(doc) = bm_core::read_json::<ScriptNames>(&sp) else {
                 continue;
             };
-            if let Some(roster) = data.get("roster").and_then(|r| r.as_array()) {
-                for n in roster.iter().filter_map(|v| v.as_str()) {
-                    if !n.is_empty() {
-                        set.insert(n.to_string());
-                    }
+            for n in doc.roster {
+                if !n.is_empty() {
+                    set.insert(n);
                 }
             }
-            if let Some(segs) = data.get("segments").and_then(|s| s.as_array()) {
-                for s in segs {
-                    if let Some(sp) = s.get("speaker").and_then(|v| v.as_str()) {
-                        if !sp.is_empty() {
-                            set.insert(sp.to_string());
-                        }
-                    }
+            for seg in doc.segments {
+                if !seg.speaker.is_empty() {
+                    set.insert(seg.speaker);
                 }
             }
         }

@@ -160,7 +160,7 @@ pub(crate) static WORDS: &[Word] = &[
     Word { key: None, names: &["login"], desc: Some("store the IAM user's key from the console's accessKeys.csv — setup, once"), cmd: Command::AwsLogin },
     Word { key: None, names: &["discover"], desc: Some("read the account into `.bm/aws.json`: AMI, subnet, group, keypair, instance profile"), cmd: Command::AwsDiscover },
     Word { key: Some('l'), names: &["pool", "aws", "cloud"], desc: Some("what the EC2 account holds — launches nothing"), cmd: Command::AwsPool },
-    Word { key: Some('L'), names: &["llm", "model", "models"], desc: Some("LLM providers: add a key, set the endpoint and model, switch the active one — same as L"), cmd: Command::Llm },
+    Word { key: Some('L'), names: &["llm", "model", "models"], desc: Some("LLM providers: add a key, or name your own provider (`n`: name + URL), set the model, switch the active one — same as L"), cmd: Command::Llm },
     Word { key: Some('w'), names: &["up", "launch"], desc: Some("launch EC2 boxes and link them into the cluster — spends money"), cmd: Command::AwsUp { count: 1 } },
     Word { key: Some('o'), names: &["down", "terminate"], desc: Some("terminate the live EC2 boxes — destructive; asks first, refuses while a render is in flight"), cmd: Command::AwsDown { force: false } },
     Word { key: Some('X'), names: &["stop"], desc: Some("stop everything everywhere: local backend plus workers on all machines"), cmd: Command::Stop },
@@ -188,7 +188,7 @@ pub(crate) static WORDS: &[Word] = &[
     Word { key: None, names: &["help"], desc: None, cmd: Command::Key(KeyCode::Char('?')) },
     Word { key: None, names: &["current", "cur"], desc: Some("play the held line with the current voice, from cache only"), cmd: Command::AuditionCurrent },
     Word { key: None, names: &["try", "test"], desc: Some("render the held line with the pointed voice"), cmd: Command::AuditionTry },
-    Word { key: None, names: &["another", "change", "next"], desc: Some("render another line with the pointed voice"), cmd: Command::AuditionAnother },
+    Word { key: None, names: &["another", "change", "next"], desc: Some("render another line with the speaker's own voice"), cmd: Command::AuditionAnother },
 ];
 
 /// `:` command line → the command. A single character is a command key

@@ -140,7 +140,7 @@ pub(crate) async fn key_digest(
                             app.set_status(Level::Info, format!("ch{}: digest accepted", ch.n));
                         }
                         Ok(None) => {
-                            // Round 1 landed: round 2's prompt is already on the
+                            // A round landed: the next prompt is already on the
                             app.set_status(
                                 Level::Info,
                                 format!("ch{}: cast accepted — script prompt copied", ch.n),
@@ -163,7 +163,7 @@ pub(crate) async fn key_digest(
     Flow::KeepRunning
 }
 
-/// Start a chapter: build round 1's prompt and put it on the clipboard.
+/// Start a chapter: build its next prompt and put it on the clipboard.
 fn open_chapter(
     layout: &bm_core::Layout,
     engine: &str,
@@ -203,7 +203,7 @@ fn part_note(part: Option<bm_core::digest::ManualPart>) -> String {
     }
 }
 
-/// Take one pasted answer: validate it, and either ask for round 2 or finish.
+/// Take one pasted answer: validate it, and either ask for the next round or finish.
 fn accept(
     layout: &bm_core::Layout,
     engine: &str,
@@ -234,6 +234,7 @@ fn accept(
                 "{}{} accepted — {copied}",
                 part_note(part),
                 match round {
+                    bm_core::digest::Round::Repair => "proofread",
                     bm_core::digest::Round::Staging => "cast",
                     bm_core::digest::Round::Attribution => "script",
                     // The manual flow stages and sounds in one round, so a sound

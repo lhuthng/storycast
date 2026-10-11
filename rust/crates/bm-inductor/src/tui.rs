@@ -89,6 +89,10 @@ async fn run_loop(
     let poll_tx = tx.clone();
     tokio::spawn(async move {
         let mut ticker = tokio::time::interval(Duration::from_millis(REFRESH_TICKS * 200));
+        // A whole-book state can take longer than the period to answer: the
+        // next poll then waits its full turn instead of firing straight away,
+        // so the dashboard keeps one request in flight rather than a pile.
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             ticker.tick().await;
             // The first tick fires immediately, so the dashboard fills without

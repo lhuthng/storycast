@@ -391,8 +391,8 @@ pub(crate) enum Ev {
         provider: String,
         result: Result<Vec<String>, String>,
     },
-    /// A `/api/state` snapshot from the background poller. Carrying the payload
-    State(Result<serde_json::Value, String>),
+    /// A parsed `/api/state` snapshot from the background poller.
+    State(Result<crate::tui::app::state::StateSnap, String>),
     /// The backend a `B` job started is up enough to take work: enqueue this.
     BackendLive {
         start: u32,
@@ -489,20 +489,25 @@ pub(crate) fn unreachable_verdict(api: &str, refused: bool, detail: &str) -> Str
     }
 }
 
-/// Fetch `/api/state` once.
+/// Fetch `/api/state` once and parse it off the async workers: a whole book's
+/// task list is megabytes, and this runs on every poll.
 pub(crate) async fn fetch_state(
     http: &reqwest::Client,
     api: &str,
-) -> Result<serde_json::Value, String> {
+) -> Result<crate::tui::app::state::StateSnap, String> {
     let url = format!("{}/api/state", api.trim_end_matches('/'));
-    match http.get(&url).send().await {
+    let raw = match http.get(&url).send().await {
         Ok(r) => r
-            .json::<serde_json::Value>()
+            .bytes()
             .await
-            .map_err(|e| format!("bad state payload: {e}")),
+            .map(|b| b.to_vec())
+            .map_err(|e| format!("bad state payload: {e}"))?,
         // Which verdict, and why, is `unreachable_verdict`'s business.
-        Err(e) => Err(unreachable_verdict(api, e.is_connect(), &e.to_string())),
-    }
+        Err(e) => return Err(unreachable_verdict(api, e.is_connect(), &e.to_string())),
+    };
+    tokio::task::spawn_blocking(move || crate::tui::app::state::parse_state(&raw))
+        .await
+        .unwrap_or_else(|e| Err(format!("state parse task failed: {e}")))
 }
 
 /// Report one line to the event pane.

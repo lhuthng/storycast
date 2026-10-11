@@ -44,17 +44,7 @@ pub(crate) fn draw_tasks(f: &mut ratatui::Frame, app: &App, area: Rect) {
         }
         Some(_) => {
             // Pipeline order with pipeline denominators: each stage over what
-            for (st, done, denom) in pipeline_counts(&app.tasks) {
-                let failed = app
-                    .tasks
-                    .iter()
-                    .filter(|t| t.stage == st && t.state == TaskState::Failed)
-                    .count() as u64;
-                let shelved = app
-                    .tasks
-                    .iter()
-                    .filter(|t| t.stage == st && t.state == TaskState::Shelved)
-                    .count() as u64;
+            for (st, done, denom, failed, shelved) in pipeline_counts(&app.tasks) {
                 let open = denom.saturating_sub(done);
                 let mut spans = vec![
                     Span::styled(
