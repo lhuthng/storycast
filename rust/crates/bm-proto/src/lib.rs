@@ -705,6 +705,14 @@ pub struct Heartbeat {
     /// starved by a fact the inductor has not got.
     #[serde(default)]
     pub sources_stages: Vec<String>,
+    /// Hash of the box's baked voice store (`models/voices.json`), read fresh
+    /// on every beat. The render gate holds render work from a box whose hash
+    /// disagrees with this checkout's until its sync lands. `None` from an
+    /// older agent, read as "no opinion" like every other new beat field: the
+    /// box is offered work as before rather than starved by a fact the
+    /// inductor has not got.
+    #[serde(default)]
+    pub voices_hash: Option<String>,
     /// Whether this worker keeps a TTS sidecar, as it currently believes.
     /// `None` from an older agent, read as "keeps one", which is both the
     /// default and the safe read (the old behaviour, never a stuck refusal).
