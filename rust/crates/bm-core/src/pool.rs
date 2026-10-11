@@ -1,5 +1,6 @@
 //! Sample voice pool: tag-matched clone voices from `refs/`.
 
+use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -310,11 +311,20 @@ pub fn add_sample(
     // enrolled, assignable, and unspeakable until the next provision.
     if bake_missing_voices(layout).contains(&name) {
         log.push(format!(
-            "baked {name} into {} (the sidecar speaks it; :prov pushes it to workers)",
+            "baked {name} into {} (the sidecar speaks it; synced to workers on add)",
             layout.tts_voices().display()
         ));
     }
     Ok(log)
+}
+
+/// Hash of the baked voice store, computed the same way on both sides of the
+/// render gate: equality means the box speaks everything local speaks. `None`
+/// when the store is not on disk (no engine tree yet): no opinion, not a no.
+pub fn voices_store_hash(root: &Path, engine: &str) -> Option<String> {
+    let bytes =
+        std::fs::read(root.join("engines").join(engine).join("models/voices.json")).ok()?;
+    Some(format!("{:x}", Sha256::digest(&bytes)))
 }
 
 /// The voices this engine's **own store** holds, from

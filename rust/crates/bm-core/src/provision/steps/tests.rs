@@ -1,6 +1,45 @@
 use super::*;
 
 #[test]
+fn voice_sync_lists_the_store_and_the_clips_file() {
+    // One enrolled voice owns exactly its baked files: the shared store, plus
+    // its own clip on clip-store engines. Nothing else rides a voice sync.
+    let dir = std::env::temp_dir().join(format!("bm-voice-sync-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let models = dir.join("engines/pocket/models");
+    std::fs::create_dir_all(models.join("clones")).unwrap();
+    std::fs::write(
+        models.join("voices.json"),
+        r#"{"presets":{"A":{"file":"clones/a.wav"}}}"#,
+    )
+    .unwrap();
+    std::fs::write(models.join("clones/a.wav"), b"RIFF").unwrap();
+    let layout = crate::Layout {
+        root: dir.clone(),
+        work: dir.clone(),
+        adapter: "default".into(),
+        engine: "pocket".into(),
+    };
+    let mut files = super::models::baked_voice_files(&layout, "A");
+    files.sort();
+    assert_eq!(
+        files,
+        vec![
+            "engines/pocket/models/clones/a.wav".to_string(),
+            "engines/pocket/models/voices.json".to_string(),
+        ],
+        "store plus the voice's own clip: {files:?}"
+    );
+    // A voice with nothing baked lists nothing: :prov stays its ride.
+    let missing = super::models::baked_voice_files(&layout, "Nobody");
+    assert!(
+        missing.iter().all(|f| f.ends_with("voices.json")),
+        "no clip invented for an unbaked voice: {missing:?}"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
 fn live_log_streams_a_copy_and_keeps_the_lines() {
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     let mut log = LiveLog::new(Some(tx));

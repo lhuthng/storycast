@@ -1,5 +1,6 @@
 use super::super::{REMOTE_DIR, TTS_PORT};
 use super::*;
+use crate::Layout;
 use anyhow::Context;
 use anyhow::Result;
 
@@ -289,4 +290,98 @@ echo stopped"#,
         let _ = self.run(&script, 30)?;
         Ok(())
     }
+
+    /// Push one enrolled voice to this box and bounce only its TTS sidecar:
+    /// the targeted form of the whole-models push `:prov` does. A box already
+    /// speaking the voice is left alone; an unreachable one keeps the old
+    /// path, and the next provision's hash check pushes everything.
+    pub fn sync_voice(&self, layout: &Layout, name: &str) -> Result<Vec<String>> {
+        let probe = self.probe(&layout.engine);
+        if !probe.reachable {
+            anyhow::bail!(
+                "{} unreachable, the next :prov covers it",
+                self.target
+            );
+        }
+        if probe
+            .voices
+            .iter()
+            .any(|v| v == name || v.starts_with(&format!("{name} ")))
+        {
+            return Ok(vec![format!("{} already speaks {name}", self.target)]);
+        }
+        let files = baked_voice_files(layout, name);
+        if files.is_empty() {
+            return Ok(vec![format!(
+                "{name} has nothing baked here yet, the next :prov covers {}",
+                self.target
+            )]);
+        }
+        let t0 = std::time::Instant::now();
+        self.rsync_push_files(&layout.root, &files)?;
+        let mut log = vec![format!(
+            "{} <= {} ({}s)",
+            self.target,
+            files.join(", "),
+            t0.elapsed().as_secs()
+        )];
+        // A current sidecar reloads the store itself, so a bounce is the
+        // fallback, not the plan: re-probe, and restart only while the voice
+        // is still missing from the roster it serves.
+        if self
+            .probe(&layout.engine)
+            .voices
+            .iter()
+            .any(|v| v == name || v.starts_with(&format!("{name} ")))
+        {
+            log.push(format!(
+                "{} serves {name} with no restart",
+                self.target
+            ));
+            return Ok(log);
+        }
+        self.stop_tts()?;
+        log.push(format!("{} stopped TTS to reload the voice store", self.target));
+        log.push(format!(
+            "{} tts: {}",
+            self.target,
+            self.start_tts(&layout.engine)?
+        ));
+        Ok(log)
+    }
+}
+
+/// The baked files one voice owns, checkout-relative for `rsync_push_files`:
+/// the shared store, plus its clip file on clip-store engines. Only files
+/// actually on disk: a voice with nothing baked is `:prov`'s to push.
+pub(crate) fn baked_voice_files(layout: &Layout, name: &str) -> Vec<String> {
+    let mut files = Vec::new();
+    let mut push = |abs: std::path::PathBuf| {
+        if abs.is_file() {
+            if let Some(rel) = abs
+                .strip_prefix(&layout.root)
+                .ok()
+                .map(|r| r.to_string_lossy().to_string())
+            {
+                files.push(rel);
+            }
+        }
+    };
+    push(layout.tts_voices());
+    if crate::voices::store_kind(&layout.engine) == crate::voices::VoiceStore::Clips {
+        let file = std::fs::read_to_string(layout.tts_voices())
+            .ok()
+            .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+            .and_then(|doc| {
+                doc.get("presets")?
+                    .get(name)?
+                    .get("file")?
+                    .as_str()
+                    .map(str::to_string)
+            });
+        if let Some(file) = file {
+            push(layout.models_dir().join(file));
+        }
+    }
+    files
 }
