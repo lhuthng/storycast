@@ -288,7 +288,7 @@ pub(crate) fn sound_gap(
     }
     let merged = merge_scripts(scripts.iter().copied());
     if let Some(bed) = open_beds(&merged, pool).into_iter().next() {
-        let owner = bed_owner(&bed, scripts);
+        let owner = bed_owner(&bed, scripts, pool);
         return Some((unclosed_beds(&merged, pool).unwrap_or_default(), owner));
     }
     for (i, script) in scripts.iter().enumerate() {
@@ -429,22 +429,39 @@ fn union_characters(into: &mut Vec<Value>, from: Option<&Value>) {
 }
 
 /// Which part to re-ask when a looping bed is still open at the end of a
-fn bed_owner(bed: &str, scripts: &[&Value]) -> usize {
+/// chapter: the last part that places it, by name or by a query that can draw
+/// it — asking a part that never opened the bed would re-ask the same chapter
+/// into the same gap.
+fn bed_owner(bed: &str, scripts: &[&Value], pool: &crate::audio_pool::ClipPool) -> usize {
     let mut owner = 0;
     for (i, script) in scripts.iter().enumerate() {
         let placed = script
             .get("segments")
             .and_then(Value::as_array)
-            .is_some_and(|items| {
-                items
-                    .iter()
-                    .any(|item| item.get("sound").and_then(Value::as_str) == Some(bed))
-            });
+            .is_some_and(|items| items.iter().any(|item| places(item, bed, pool)));
         if placed {
             owner = i;
         }
     }
     owner
+}
+
+/// Whether one sound item places `bed`: it names it, or its query can draw it.
+fn places(item: &Value, bed: &str, pool: &crate::audio_pool::ClipPool) -> bool {
+    if item.get("sound").and_then(Value::as_str) == Some(bed) {
+        return true;
+    }
+    let Some(query) = item.get("sound_tags").and_then(Value::as_array) else {
+        return false;
+    };
+    let query: Vec<String> = query
+        .iter()
+        .filter_map(|t| t.as_str())
+        .map(str::to_string)
+        .collect();
+    crate::audio_pool::candidates(pool, &query)
+        .iter()
+        .any(|(name, _)| *name == bed)
 }
 
 /// One part's two rounds: attribution, then staging against that map.
@@ -475,7 +492,9 @@ impl PartCtx<'_> {
         let (a, b) = match round {
             Round::Attribution => (self.from, self.mid),
             Round::Staging => (self.mid, self.to),
-            Round::Sound => unreachable!("the sound pass does not run per part"),
+            Round::Repair | Round::Sound => {
+                unreachable!("this pass does not run per part")
+            }
         };
         (a.max(self.hi), b.max(self.hi))
     }
@@ -503,7 +522,7 @@ pub(crate) async fn stage_part(
     from: f32,
     mid: f32,
     to: f32,
-) -> Result<(Value, Value)> {
+) -> Result<(Value, Value), Fail> {
     let mut ctx = PartCtx {
         layout,
         n,
@@ -520,27 +539,49 @@ pub(crate) async fn stage_part(
         to,
         hi: from,
     };
+    // The last staging complaint, so a fresh cast that changes nothing is
+    // told apart from a new fault: identical twice blames the text.
+    let mut last_staging_why: Option<String> = None;
     loop {
         // G_attribution. Nothing can blame a later step from here, so a Back is
+        // either the proofread (out of this loop's reach, carried upward) or a
+        // bug, which dies naming it.
         let context = match run_g(Round::Attribution, &mut ctx, None, calls).await {
             Ok(context) => context,
-            Err(Fail::Dead(e)) => return Err(e),
-            Err(Fail::Back(why)) => {
-                return Err(anyhow::anyhow!(
-                    "digest attribution gate blamed another step ({why})"
-                ))
+            Err(Fail::Dead(e)) => return Err(Fail::Dead(e)),
+            Err(Fail::Back(Round::Repair, why)) => return Err(Fail::Back(Round::Repair, why)),
+            Err(Fail::Back(blame, why)) => {
+                return Err(Fail::Dead(anyhow::anyhow!(
+                    "digest attribution gate blamed another step ({}: {why})",
+                    blame.as_str()
+                )))
             }
         };
         match run_g(Round::Staging, &mut ctx, Some(&context), calls).await {
             Ok(script) => return Ok((context, script)),
-            Err(Fail::Dead(e)) => return Err(e),
-            Err(Fail::Back(why)) => ctx.report(
-                ctx.to,
-                format!(
-                    "{}{why}; the cast owns that, so attribution runs again",
-                    part_prefix(ctx.part)
-                ),
-            ),
+            Err(Fail::Dead(e)) => return Err(Fail::Dead(e)),
+            Err(Fail::Back(Round::Repair, why)) => {
+                return Err(Fail::Back(Round::Repair, why));
+            }
+            Err(Fail::Back(_, why)) => {
+                // The cast owns that — unless a fresh cast just changed
+                // nothing: the same staging complaint twice means the cast is
+                // innocent, and blame walks out to the proofread instead.
+                if last_staging_why.as_deref() == Some(why.as_str()) {
+                    return Err(Fail::Back(
+                        Round::Repair,
+                        format!("{why}; a fresh cast changed nothing, so the text owns that"),
+                    ));
+                }
+                last_staging_why = Some(why.clone());
+                ctx.report(
+                    ctx.to,
+                    format!(
+                        "{}{why}; the cast owns that, so attribution runs again",
+                        part_prefix(ctx.part)
+                    ),
+                );
+            }
         }
     }
 }

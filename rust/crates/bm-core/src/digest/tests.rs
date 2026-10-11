@@ -30,6 +30,8 @@ use super::parts::Part;
 use super::parts::Parts;
 use super::prompts::build_staging_prompt;
 use super::run::assemble_outcome;
+use super::run::escalate;
+use super::run::outer;
 use super::run::route;
 use super::run::GCalls;
 use super::run::Route;
@@ -216,6 +218,22 @@ fn a_json_complaint_carries_its_own_remedy() {
 fn a_raw_control_character_is_repaired_rather_than_reported() {
     let value = parse_json_repaired("{\"a\": \"one\ntwo\"}").unwrap();
     assert_eq!(value["a"], json!("one\ntwo"));
+}
+
+/// The other shape a model produces: the object escaped a level too deep, so
+/// its own closing quote is escaped with it and the last string never ends.
+/// A chapter's proofread came back exactly this way, object intact inside.
+#[test]
+fn json_repair_reads_an_object_that_was_escaped_twice() {
+    let object = r#"{"text": "Anh ấy nói: \"Đi thôi\".\nRồi đi.", "changes": ["wrapped the line"]}"#;
+    let doubled = object.replace('\\', "\\\\").replace('"', "\\\"");
+    assert!(
+        serde_json::from_str::<Value>(&doubled).is_err(),
+        "the shape this fixes must be a parse error to begin with"
+    );
+    let value = parse_json_repaired(&doubled).unwrap();
+    assert_eq!(value["text"], json!("Anh ấy nói: \"Đi thôi\".\nRồi đi."));
+    assert_eq!(value["changes"][0], json!("wrapped the line"));
 }
 
 #[test]
@@ -2325,7 +2343,6 @@ fn expand_sound_fields_lifts_the_seam_out_of_the_line() {
     let line = |text: &str| json!({"speaker": "Narrator", "text": text});
     let mut a = line("Nàng lau mồ hôi trên trán, siết chặt cuốn võ thư trong tay");
     a["sound_after"] = json!("page-turn");
-    a["stop_after"] = json!("none");
     let b = line(", như nhặt được báu vật.");
     let got = expand_sound_fields(&[a, b.clone()]).unwrap();
     assert_eq!(got.len(), 3, "{got:?}");
@@ -2353,7 +2370,8 @@ fn expand_sound_fields_lifts_the_seam_out_of_the_line() {
     assert_eq!(got[1], json!({"sound": "food-prep"}));
     assert_eq!(got[3], json!({"stop": "food-prep"}));
 
-    // `none` is a decision and adds nothing; the field still comes off.
+    // An answer from a pack that still required the field may say `none`: it
+    // fires nothing, and the field comes off.
     let mut quiet = line("x");
     quiet["sound_after"] = json!("none");
     quiet["stop_after"] = json!("NONE");
@@ -2361,12 +2379,12 @@ fn expand_sound_fields_lifts_the_seam_out_of_the_line() {
     assert_eq!(got.len(), 2, "{got:?}");
     assert!(got[0].get("sound_after").is_none() && got[0].get("stop_after").is_none());
 
-    // A blank is refused, by name, and the message says what to write.
+    // A blank is refused, by name, and the message says to omit the field.
     for key in ["sound_after", "stop_after"] {
         let mut blank = line("z");
         blank[key] = json!("  ");
         let err = expand_sound_fields(&[blank]).unwrap_err();
-        assert!(err.to_string().contains("none"), "{key}: {err}");
+        assert!(err.to_string().contains("omit"), "{key}: {err}");
     }
 
     // A name outside the vocabulary is lifted anyway, so the validator gets
@@ -2374,6 +2392,67 @@ fn expand_sound_fields_lifts_the_seam_out_of_the_line() {
     bogus["sound_after"] = json!("thunder");
     let got = expand_sound_fields(&[bogus]).unwrap();
     assert_eq!(got[1], json!({"sound": "thunder"}));
+}
+
+/// A seam can carry a combo: the names fire there, in the order written.
+#[test]
+fn expand_sound_fields_fires_a_combo_in_order() {
+    let line = |text: &str| json!({"speaker": "Narrator", "text": text});
+    let mut open = line("Hai người liền đi đến phòng bếp.");
+    open["sound_after"] = json!("food-prep,pot-clang");
+    let mut close = line("Rồi họ đi ra.");
+    // The array form is for a script no decoder bounded: same names, same order.
+    close["stop_after"] = json!(["food-prep", "pot-clang"]);
+    let got = expand_sound_fields(&[open, close]).unwrap();
+    assert_eq!(got.len(), 6, "{got:?}");
+    assert_eq!(got[1], json!({"sound": "food-prep"}));
+    assert_eq!(got[2], json!({"sound": "pot-clang"}));
+    assert_eq!(got[4], json!({"stop": "food-prep"}));
+    assert_eq!(got[5], json!({"stop": "pot-clang"}));
+
+    // A legacy `none` in a list is dropped, not fired; an empty list fires
+    // nothing.
+    let mut mixed = line("y");
+    mixed["sound_after"] = json!(" none , food-prep ");
+    assert_eq!(
+        expand_sound_fields(&[mixed]).unwrap()[1],
+        json!({"sound": "food-prep"})
+    );
+    let mut empty = line("z");
+    empty["stop_after"] = json!([]);
+    assert_eq!(expand_sound_fields(&[empty]).unwrap().len(), 1);
+
+    // A non-string element is refused, not silently skipped.
+    let mut bad = line("w");
+    bad["sound_after"] = json!(["food-prep", 3]);
+    assert!(expand_sound_fields(&[bad]).is_err());
+}
+
+/// A `tags:` query is lifted as one item the pool answers, not as a name.
+#[test]
+fn expand_sound_fields_lifts_a_tag_query() {
+    let line = |text: &str| json!({"speaker": "Narrator", "text": text});
+    let mut open = line("Hai người liền rút kiếm.");
+    open["sound_after"] = json!("tags:slash,sword");
+    let mut close = line("Rồi họ đi ra.");
+    close["stop_after"] = json!("tags:kitchen");
+    let got = expand_sound_fields(&[open, close]).unwrap();
+    assert_eq!(got.len(), 4, "{got:?}");
+    assert_eq!(got[1], json!({"sound_tags": ["slash", "sword"]}));
+    assert_eq!(got[3], json!({"stop_tags": ["kitchen"]}));
+    // A query with no tags, and a list holding one, are refused by name.
+    let mut empty = line("x");
+    empty["sound_after"] = json!("tags: , ");
+    let err = expand_sound_fields(&[empty]).unwrap_err();
+    assert!(err.to_string().contains("tags:"), "{err}");
+    let mut listed = line("y");
+    listed["sound_after"] = json!(["tags:slash,sword"]);
+    let got = expand_sound_fields(&[listed]).unwrap();
+    assert_eq!(
+        got[1],
+        json!({"sound": "tags:slash,sword"}),
+        "an array is names, so a name that looks like a query stays one"
+    );
 }
 
 /// The fixture adapter's rule-10 cue list, read from the same file the loader
@@ -2660,25 +2739,26 @@ fn the_manual_rounds_ask_for_the_right_prompt_and_refuse_a_paste_out_of_order() 
     crate::profile::install_fixture(&dir).expect("fixture profile");
     let layout = Layout::new(&dir);
     std::fs::create_dir_all(layout.chapters()).unwrap();
-    std::fs::write(
-        layout.chapter_txt(51),
-        "Chương 51: Fixture\n\nHắn gật đầu.\n\n\"Ừm!\"\n",
-    )
-    .unwrap();
+    let chapter = "Chương 51: Fixture\n\nHắn gật đầu.\n\n\"Ừm!\"\n";
+    std::fs::write(layout.chapter_txt(51), chapter).unwrap();
 
-    // Round 1 is the attribution pass, and the fixture's template is a stub
+    // Round 1 is the proofread: the worker's own first prompt, asked for on a
+    // chapter that has not had one whatever the scan made of it, because the
+    // operator replaces the model's transport and nothing else.
     let first = manual_prompt(&layout, "vieneu", 51, None).unwrap();
-    assert_eq!(first.round, Round::Attribution);
+    assert_eq!(first.round, Round::Repair, "the proofread opens the chapter");
     assert!(
-        first.text.contains("Fixture dramatization prompt"),
-        "the attribution template, as the fixture ships it: {}",
+        first.text.contains("Fixture proofread prompt"),
+        "the proofread template, as the fixture ships it: {}",
         head_chars(&first.text, 120)
     );
-    // The chapter arrives as prepared events: the quote is answerable, the
-    assert!(first.text.contains("dialogue_events"), "{}", first.text);
-    assert!(first.text.contains("Ừm!"), "the line it must attribute");
     assert!(
-        first.text.contains("---ATTRIBUTION OUTPUT CONTRACT---"),
+        first.text.contains(chapter.trim_end()),
+        "the whole chapter rides along: {}",
+        head_chars(&first.text, 200)
+    );
+    assert!(
+        first.text.contains("---REPAIR OUTPUT CONTRACT---"),
         "the worker's own contract: {}",
         head_chars(&first.text, 200)
     );
@@ -2697,22 +2777,54 @@ fn the_manual_rounds_ask_for_the_right_prompt_and_refuse_a_paste_out_of_order() 
         .expect_err("not JSON");
     assert!(err.to_string().contains("not valid JSON"), "{err:#}");
 
-    // With a cast in hand, round 2 renders the *staging* prompt against it.
+    // The proofread's answer lands, and round 2 is the attribution pass —
+    // rendered against the text the audio will speak.
+    let pasted = json!({"text": chapter, "changes": []}).to_string();
+    let answer = manual_accept(&layout, "vieneu", 51, Round::Repair, &pasted, None)
+        .expect("the proofread is usable");
+    let second = answer.prompt.expect("the attribution prompt follows it");
+    assert_eq!(second.round, Round::Attribution);
+    assert!(
+        second.text.contains("Fixture dramatization prompt"),
+        "the attribution template, as the fixture ships it: {}",
+        head_chars(&second.text, 120)
+    );
+    // The chapter arrives as prepared events: the quote is answerable, the
+    assert!(second.text.contains("dialogue_events"), "{}", second.text);
+    assert!(second.text.contains("Ừm!"), "the line it must attribute");
+    assert!(
+        second.text.contains("---ATTRIBUTION OUTPUT CONTRACT---"),
+        "the worker's own contract: {}",
+        head_chars(&second.text, 200)
+    );
+    assert!(
+        !second.text.contains("{chapter_text}"),
+        "no placeholder leaked"
+    );
+    // It is behind the chapter now: asking again does not ask for it twice.
+    let again = manual_prompt(&layout, "vieneu", 51, None).unwrap();
+    assert_eq!(
+        again.round,
+        Round::Attribution,
+        "the proofread is not asked for a chapter that has had one"
+    );
+
+    // With a cast in hand, the staging prompt is rendered against it.
     let cast = json!({
         "roster": ["Narrator", "Anonymous"],
         "mentions": {},
         "speakers": {"e0002": "Anonymous"}
     });
-    let second = manual_prompt(&layout, "vieneu", 51, Some(&cast)).unwrap();
-    assert_eq!(second.round, Round::Staging);
-    assert_ne!(second.text, first.text, "a different pass, not a repeat");
-    assert!(second.text.contains("---STAGING OUTPUT CONTRACT---"));
+    let staging = manual_prompt(&layout, "vieneu", 51, Some(&cast)).unwrap();
+    assert_eq!(staging.round, Round::Staging);
+    assert_ne!(staging.text, second.text, "a different pass, not a repeat");
+    assert!(staging.text.contains("---STAGING OUTPUT CONTRACT---"));
     assert!(
-        second.text.contains("fixed_speakers"),
-        "round 2 is rendered against the map round 1 fixed"
+        staging.text.contains("fixed_speakers"),
+        "the staging prompt is rendered against the map the cast round fixed"
     );
     for ph in ["{cast_json}", "{music_palette}", "{inject_sounds}"] {
-        assert!(!second.text.contains(ph), "placeholder leaked: {ph}");
+        assert!(!staging.text.contains(ph), "placeholder leaked: {ph}");
     }
 
     // A chapter with no text fails by path, so the operator knows which file
@@ -2728,13 +2840,23 @@ fn a_valid_pair_of_pastes_finishes_the_chapter() {
     crate::profile::install_fixture(&dir).expect("fixture profile");
     let layout = Layout::new(&dir);
     std::fs::create_dir_all(layout.chapters()).unwrap();
-    std::fs::write(
-        layout.chapter_txt(51),
-        "Chương 51: Fixture\n\nHắn gật đầu.\n\n\"Ừm!\"\n",
-    )
-    .unwrap();
+    let chapter = "Chương 51: Fixture\n\nHắn gật đầu.\n\n\"Ừm!\"\n";
+    std::fs::write(layout.chapter_txt(51), chapter).unwrap();
 
-    // Round 1: the attribution answer, one entry per *dialogue* event, in
+    // Round 1 is the proofread, and its paste is the chapter that everything
+    // after it reads.
+    let answer = manual_accept(
+        &layout,
+        "vieneu",
+        51,
+        Round::Repair,
+        &json!({"text": chapter, "changes": []}).to_string(),
+        None,
+    )
+    .expect("a proofread that returned the chapter");
+    assert_eq!(answer.prompt.map(|p| p.round), Some(Round::Attribution));
+
+    // Round 2: the attribution answer, one entry per *dialogue* event, in
     let cast = manual_accept(
         &layout,
         "vieneu",
@@ -2747,13 +2869,13 @@ fn a_valid_pair_of_pastes_finishes_the_chapter() {
         None,
     )
     .expect("a well-formed attribution answer");
-    let cast = cast.cast.expect("round 1 yields the cast");
+    let cast = cast.cast.expect("the cast round yields the cast");
     assert!(cast.get("outcome").is_none(), "and nothing finished");
     assert_eq!(cast["speakers"]["e0002"], json!("Anonymous"));
     // Narration is attached by code, so it is in the map the *next* round
     assert_eq!(cast["speakers"]["e0001"], json!("Narrator"));
 
-    // Round 2: staging, carrying no speaker, checked against that map.
+    // Round 3: staging, carrying no speaker, checked against that map.
     let done = manual_accept(
         &layout,
         "vieneu",
@@ -3404,6 +3526,19 @@ fn a_long_chapter_is_staged_in_parts_and_merges_into_one_script() {
     let checkpoint = layout.data().join(".digest-parts-ch51.json");
 
     // (3) The flow, part by part, exactly as the TUI and the backup runner
+    // runs it — and it opens on the proofread, the worker's own first prompt.
+    let first = manual_prompt(&layout, "vieneu", 51, None).unwrap();
+    assert_eq!(first.round, Round::Repair, "the proofread opens the chapter");
+    manual_accept(
+        &layout,
+        "vieneu",
+        51,
+        Round::Repair,
+        &json!({"text": text, "changes": []}).to_string(),
+        None,
+    )
+    .expect("the proofread lands before any part is staged");
+
     let mut cast: Option<Value> = None;
     let mut outcome = None;
     let mut prompts: Vec<ManualPrompt> = Vec::new();
@@ -3566,8 +3701,7 @@ fn a_part_that_leaves_a_bed_open_is_refused_without_moving_on() {
 
 /// **The severity rule, every cell.** The ladder is only as honest as this
 #[test]
-fn a_failure_is_retried_in_place_or_handed_back_by_whoever_owns_it() {
-    // Its own fault: one more ask in place, then the chapter is over.
+fn a_failure_is_retried_in_place_or_handed_back_by_whoever_owns_it() {    // Its own fault: one more ask in place, then the chapter is over.
     assert_eq!(route(Round::Staging, Round::Staging, 0), Route::Retry);
     assert_eq!(route(Round::Staging, Round::Staging, 1), Route::Die);
     // Someone else's fault: never a retry, and **not on the last attempt
@@ -3575,6 +3709,37 @@ fn a_failure_is_retried_in_place_or_handed_back_by_whoever_owns_it() {
     assert_eq!(route(Round::Attribution, Round::Staging, 1), Route::Back);
     // Total, so a blame naming a *later* step is still a hand-back rather
     assert_eq!(route(Round::Staging, Round::Attribution, 0), Route::Back);
+}
+
+/// Blame walks one step out: staging re-resolves the cast, attribution
+/// re-reads the text. Repair and sound have nowhere out to go.
+#[test]
+fn blame_walks_outward_one_step() {
+    assert_eq!(outer(Round::Staging), Some(Round::Attribution));
+    assert_eq!(outer(Round::Attribution), Some(Round::Repair));
+    assert_eq!(outer(Round::Repair), None);
+    assert_eq!(outer(Round::Sound), None);
+}
+
+/// A repair that leaves the complaint word-for-word is no progress, so the
+/// second identical failure hands outward; anything else stays put.
+#[test]
+fn an_identical_second_failure_escalates() {
+    let same = Complaint::new(Round::Staging, "e0058 changed");
+    assert_eq!(
+        escalate(Round::Staging, Some("e0058 changed"), &same),
+        Some(Round::Attribution)
+    );
+    // A new complaint is progress of a sort: retry in place.
+    assert_eq!(escalate(Round::Staging, Some("e0053 changed"), &same), None);
+    // First failure always retries in place.
+    assert_eq!(escalate(Round::Staging, None, &same), None);
+    // Someone else's fault was already handed back, not escalated.
+    let theirs = Complaint::new(Round::Attribution, "e0058 changed");
+    assert_eq!(escalate(Round::Staging, Some("e0058 changed"), &theirs), None);
+    // Nowhere out to go: the chapter dies instead.
+    let repair = Complaint::new(Round::Sound, "sound refused");
+    assert_eq!(escalate(Round::Sound, Some("sound refused"), &repair), None);
 }
 
 #[test]
