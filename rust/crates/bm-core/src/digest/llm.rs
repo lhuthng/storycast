@@ -976,4 +976,24 @@ mod tests {
         assert_eq!(parse_retry_delay(r#"{"retryDelay": "53s"}"#), Some(53.0));
         assert_eq!(parse_retry_delay("no hint here"), None);
     }
+
+    #[test]
+    fn retry_delay_is_read_only_from_a_number_that_is_there() {
+        assert_eq!(parse_retry_delay("retry in 1.5"), Some(1.5));
+        assert_eq!(parse_retry_delay("retryDelay: 5"), Some(5.0));
+        // `retry in` is checked first, so it wins when both hints appear.
+        assert_eq!(parse_retry_delay("retryDelay 9, retry in 3s"), Some(3.0));
+        // Only the first hint is read.
+        assert_eq!(parse_retry_delay("retry in 10s, retry in 20s"), Some(10.0));
+        for bad in [
+            "",
+            "retry in",
+            "retry in ",
+            "retry in abc",
+            "retry in 12.5.5",
+            "retryDelay\": \"soon",
+        ] {
+            assert_eq!(parse_retry_delay(bad), None, "{bad:?}");
+        }
+    }
 }

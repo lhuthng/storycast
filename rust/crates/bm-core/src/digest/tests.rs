@@ -3225,6 +3225,69 @@ fn an_excerpt_answer_is_read_softly() {
     assert_eq!(parse_excerpt(r#"{"excerpt": ""}"#).as_deref(), None);
 }
 
+/// The answer is read softly on the *shape* too: a fence, a BOM, broken JSON
+/// and a non-string field are all things a model returns, and none may be fatal.
+#[test]
+fn an_excerpt_answer_survives_odd_framing_and_is_bounded() {
+    use super::parse::EXCERPT_CHARS;
+
+    assert_eq!(
+        parse_excerpt("```json\n{\"excerpt\":\"Hi\"}\n```").as_deref(),
+        Some("Hi")
+    );
+    assert_eq!(
+        parse_excerpt("\u{feff}{\"excerpt\":\"Hi\"}").as_deref(),
+        Some("Hi"),
+        "a byte-order mark is framing, not content"
+    );
+    assert_eq!(
+        parse_excerpt("```json\n```").as_deref(),
+        None,
+        "an empty fence is nothing, not the word json"
+    );
+    assert_eq!(parse_excerpt("\u{feff}").as_deref(), None);
+    assert!(
+        parse_excerpt("{broken json").is_some(),
+        "a fence that never closed is still prose"
+    );
+    assert!(
+        parse_excerpt(r#"{"excerpt": 5}"#).is_some(),
+        "a non-string excerpt falls back to the raw text"
+    );
+
+    let long = "a".repeat(EXCERPT_CHARS * 2);
+    assert_eq!(
+        parse_excerpt(&long).map(|s| s.chars().count()),
+        Some(EXCERPT_CHARS),
+        "the excerpt is capped so one answer cannot fill a script"
+    );
+}
+
+/// A fence's language tag is not case-sensitive, a multi-line answer becomes
+/// one line, and extra keys or a whitespace value change nothing.
+#[test]
+fn an_excerpt_reads_a_language_tag_and_squeezes_whitespace() {
+    assert_eq!(
+        parse_excerpt("```JSON\n{\"excerpt\":\"Hi\"}\n```").as_deref(),
+        Some("Hi")
+    );
+    assert_eq!(parse_excerpt("a\n\nb\tc").as_deref(), Some("a b c"));
+    assert_eq!(
+        parse_excerpt(r#"{"excerpt":"   "}"#).as_deref(),
+        None,
+        "whitespace is still empty"
+    );
+    assert_eq!(
+        parse_excerpt(r#"{"excerpt":"x","other":1}"#).as_deref(),
+        Some("x"),
+        "extra keys are ignored"
+    );
+    assert!(
+        parse_excerpt("null").is_some(),
+        "a bare JSON null falls through to the raw text"
+    );
+}
+
 /// Recovering an excerpt must not disturb the script it lands in: the
 #[test]
 fn write_excerpt_touches_only_the_excerpt() {
