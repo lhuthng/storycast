@@ -141,28 +141,39 @@ pub(crate) async fn key_picker(
             app.screen = Screen::Pick(p);
         }
         // Movement is arrows only. `j`/`k` used to move too, which meant a
+        // Character rows have no headings, so only the voice stage settles
+        // against the voice list; settling a character cursor against it is
+        // what stranded row 0.
         KeyCode::Up => {
             // Backwards over a heading, not forwards onto it: from the first
             p.cursor = p.cursor.saturating_sub(1);
-            p.cursor = settle_cursor_back(&filtered_voices(app, &p.filter), p.cursor);
+            if p.stage == PickStage::Voice {
+                p.cursor = settle_cursor_back(&filtered_voices(app, &p.filter), p.cursor);
+            }
             app.screen = Screen::Pick(p);
         }
         KeyCode::Down => {
             // Clamped: the highlight must never leave the list, or Down
             let last = list_len(app, &p);
             p.cursor = (p.cursor + 1).min(last);
-            p.cursor = settle_cursor(&filtered_voices(app, &p.filter), p.cursor);
+            if p.stage == PickStage::Voice {
+                p.cursor = settle_cursor(&filtered_voices(app, &p.filter), p.cursor);
+            }
             app.screen = Screen::Pick(p);
         }
         KeyCode::PageUp => {
             p.cursor = p.cursor.saturating_sub(8);
-            p.cursor = settle_cursor_back(&filtered_voices(app, &p.filter), p.cursor);
+            if p.stage == PickStage::Voice {
+                p.cursor = settle_cursor_back(&filtered_voices(app, &p.filter), p.cursor);
+            }
             app.screen = Screen::Pick(p);
         }
         KeyCode::PageDown => {
             let last = list_len(app, &p);
             p.cursor = (p.cursor + 8).min(last);
-            p.cursor = settle_cursor(&filtered_voices(app, &p.filter), p.cursor);
+            if p.stage == PickStage::Voice {
+                p.cursor = settle_cursor(&filtered_voices(app, &p.filter), p.cursor);
+            }
             app.screen = Screen::Pick(p);
         }
         KeyCode::Backspace => {
@@ -171,7 +182,11 @@ pub(crate) async fn key_picker(
                 p.filter_focus = true;
             }
             p.filter.pop();
-            p.cursor = settle_cursor(&filtered_voices(app, &p.filter), 0);
+            p.cursor = if p.stage == PickStage::Voice {
+                settle_cursor(&filtered_voices(app, &p.filter), 0)
+            } else {
+                0
+            };
             p.scroll = 0;
             app.screen = Screen::Pick(p);
         }
@@ -179,7 +194,11 @@ pub(crate) async fn key_picker(
             match c {
                 'u' => {
                     p.filter.clear();
-                    p.cursor = settle_cursor(&filtered_voices(app, &p.filter), 0);
+                    p.cursor = if p.stage == PickStage::Voice {
+                        settle_cursor(&filtered_voices(app, &p.filter), 0)
+                    } else {
+                        0
+                    };
                     p.scroll = 0;
                     if p.stage == PickStage::Voice {
                         p.filter_focus = true;
@@ -210,7 +229,11 @@ pub(crate) async fn key_picker(
                 p.filter_focus = true;
             }
             p.filter.push(c);
-            p.cursor = settle_cursor(&filtered_voices(app, &p.filter), 0);
+            p.cursor = if p.stage == PickStage::Voice {
+                settle_cursor(&filtered_voices(app, &p.filter), 0)
+            } else {
+                0
+            };
             p.scroll = 0;
             app.screen = Screen::Pick(p);
         }

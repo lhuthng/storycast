@@ -286,6 +286,31 @@ async fn a_group_heading_is_a_label_and_never_the_thing_a_key_acts_on() {
     }
 }
 
+#[tokio::test]
+async fn the_character_stage_has_no_headings_so_up_reaches_row_zero() {
+    // The reported bug: character rows settled against the *voice* list, so
+    // Up from row 1 snapped back onto row 1 through the voice list's first
+    // heading, and the first character was unreachable.
+    let http = reqwest::Client::new();
+    let (job_tx, _job_rx) = tokio::sync::mpsc::unbounded_channel::<Job>();
+    let mut app = voice_app(pooled_roster());
+    if let Screen::Pick(p) = &mut app.screen {
+        p.stage = PickStage::Character;
+        p.filter.clear();
+        p.cursor = 1;
+    }
+    handle_key(&mut app, key(KeyCode::Up), &http, &job_tx).await;
+    match &app.screen {
+        Screen::Pick(p) => assert_eq!(p.cursor, 0, "Up reaches the first character"),
+        other => panic!("{other:?}"),
+    }
+    handle_key(&mut app, key(KeyCode::Down), &http, &job_tx).await;
+    match &app.screen {
+        Screen::Pick(p) => assert_eq!(p.cursor, 1, "Down returns to the second"),
+        other => panic!("{other:?}"),
+    }
+}
+
 #[test]
 fn the_cast_table_names_only_what_it_shows() {
     // `gender` and `accent` read `unknown` on most rows and the language is
