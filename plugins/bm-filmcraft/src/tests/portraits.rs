@@ -70,13 +70,122 @@ fn the_envelope_takes_its_floor_from_the_chapter_itself() {
 }
 
 #[test]
-fn only_the_frames_that_move_the_badge_are_keyed() {
-    let keys = portrait::keys(&[0.0, 1.0, 1.0, 0.5, 0.25, 0.1, 0.0], 0.02);
-    assert!(keys.contains(&(1, 1.0)), "the attack is kept exactly: {keys:?}");
-    assert!(!keys.iter().any(|(f, _)| *f == 2), "a hold between two keys needs none");
-    assert!(keys.iter().any(|(f, _)| *f == 6), "the last frame is the badge at rest again");
-    assert!(keys.len() < 7, "so the script does not carry every frame: {keys:?}");
-    assert_eq!(portrait::keys(&[], 0.02), Vec::new());
+fn a_badges_frames_are_the_ones_a_straight_line_cannot_hold() {
+    let t = template();
+    let ratio = portrait::ratio(&t, Path::new("../.."), 1080);
+    let react = t.sticker().unwrap().react.clone();
+    // A syllable, its release, and then a hold: the badge settles and stays put.
+    let amounts: [f32; 9] = [0.0, 1.0, 0.6, 0.36, 0.216, 0.13, 0.05, 0.05, 0.05];
+    let frames = portrait::badge_frames(&amounts, ratio, &react);
+    assert!(frames.contains(&1), "the syllable moves it far more than the tolerance: {frames:?}");
+    assert_eq!(frames.first(), Some(&0), "from the badge at rest");
+    assert_eq!(frames.last(), Some(&(amounts.len() - 1)), "to the badge at rest again");
+    assert!(frames.len() < amounts.len(), "so not every frame is keyed: {frames:?}");
+    // A syllable and then nothing moving: the attack is keyed, the hold is not.
+    let held: [f32; 5] = [0.0, 1.0, 1.0, 1.0, 1.0];
+    assert_eq!(
+        portrait::badge_frames(&held, ratio, &react),
+        vec![0, 1, 4],
+        "the frame it moves on, its end, and none of the hold between them"
+    );
+    assert_eq!(
+        portrait::badge_frames(&[] as &[f32], ratio, &react),
+        Vec::<usize>::new(),
+        "nothing to key"
+    );
+    // What those keys draw: FilmCraft lines two of them up. The one rule holds
+    // the badge's own size within its tolerance of the measured reaction.
+    let height = |a: f32| portrait::size_pct(ratio, &react, a).1;
+    let mut worst = 0.0f64;
+    for f in 0..amounts.len() {
+        let i = frames.iter().rposition(|k| *k <= f).unwrap();
+        let drawn = match frames.get(i + 1) {
+            None => height(amounts[frames[i]]),
+            Some(next) => {
+                let (a, b) = (frames[i], *next);
+                let (va, vb) = (height(amounts[a]), height(amounts[b]));
+                va + (vb - va) * ((f - a) as f64 / (b - a) as f64)
+            }
+        };
+        worst = worst.max((drawn - height(amounts[f])).abs());
+    }
+    assert!(worst <= 0.51, "the line sits {worst:.3} percent off the reaction");
+}
+
+#[test]
+fn a_measured_badge_jumps_on_the_syllable_and_rests_between() {
+    let mut plan =
+        plan::Plan::build(&two_acts(), &book("badge-env"), 0.8, template(), (1920, 1080)).unwrap();
+    let portraits = plan.portraits(Path::new("../..")).unwrap();
+    // `listen` measures this with ffmpeg, one pass a chapter; a test can hand
+    // the numbers over instead: a syllable on frames 10..20, silence either side.
+    let env: Vec<f32> = (0..=300).map(|f| if (10..20).contains(&f) { 1.0 } else { 0.0 }).collect();
+    for span in plan.spans.iter_mut() {
+        span.env = env.clone();
+    }
+    let steps = plan
+        .steps(&[11, 12, 13], Path::new("/renders/book.srt"), &portraits, &[7, 8], &element::Elements::default(), &[])
+        .unwrap();
+    let tracks: Vec<String> =
+        (0..portraits.lanes).map(|l| format!("V{}", plan.portrait_track(l) + 1)).collect();
+    let badges: Vec<usize> = steps
+        .iter()
+        .enumerate()
+        .filter(|(_, s)| {
+            s.id == "timeline.place"
+                && s.params["track"]
+                    .as_str()
+                    .map(|t| tracks.iter().any(|n| n == t))
+                    .unwrap_or(false)
+        })
+        .map(|(i, _)| i)
+        .collect();
+    // Every clip answers with the id FilmCraft would report for it, the thumb's
+    // placed still and its fallback disc included, so the pass can find them all.
+    let replies: Vec<serde_json::Value> = (0..steps.len())
+        .map(|i| json!({"ok": true, "result": {"clip": 100 + i, "clips": [100 + i]}}))
+        .collect();
+    let moving = plan.animate(&steps, &replies, &portraits, &element::Elements::default()).unwrap();
+    let theirs: Vec<&plan::Step> =
+        moving.iter().filter(|s| s.params["clip"] == json!(100 + badges[0])).collect();
+    // The chapter starts at 0 and runs at the template's frame rate, so a key's
+    // time over one frame is the frame it is on.
+    let per = (filmcraft::TICKS_PER_SECOND / plan.fps).round() as i64;
+    let at = |param: &str| -> Vec<(i64, f64)> {
+        theirs
+            .iter()
+            .filter(|s| s.id == "effects.setParam" && s.params["param"] == json!(param))
+            .map(|s| {
+                (
+                    s.params["time"].as_i64().unwrap() / per,
+                    s.params["value"].as_f64().unwrap(),
+                )
+            })
+            .collect()
+    };
+    let (height, width) = (at("scale"), at("scale_width"));
+    assert!(
+        height.len() == width.len() && height.iter().zip(&width).all(|(a, b)| a.0 == b.0),
+        "the two axes are keyed together: {height:?} {width:?}"
+    );
+    assert_eq!(height.first().map(|(f, _)| *f), Some(0), "from the cue's own first frame");
+    assert!(
+        (height.first().unwrap().1 - 92.857).abs() < 0.01,
+        "with the badge at rest: {height:?}"
+    );
+    assert!(
+        height.iter().any(|(f, _)| *f == 9),
+        "the frame before the syllable is keyed, so the attack is not ramped: {height:?}"
+    );
+    assert!(
+        height.iter().any(|(f, v)| *f == 10 && (v - 103.071).abs() < 0.01),
+        "and its peak: {height:?}"
+    );
+    assert!(
+        (width.iter().find(|(f, _)| *f == 10).unwrap().1 - 86.357).abs() < 0.01,
+        "squashed on the syllable: {width:?}"
+    );
+    assert!(height.len() < 61, "and far short of a key a frame: {}", height.len());
 }
 
 #[test]
@@ -152,7 +261,7 @@ fn a_books_speakers_place_a_badge_that_rides_its_own_cue() {
     // The thumb is a still clip, so its own movement lives on its motion layer.
     let thumb_moves: Vec<&plan::Step> =
         moving.iter().filter(|s| s.params["clip"] == json!(2)).collect();
-    assert_eq!(thumb_moves.len(), 8, "position, rotation and the disc's size");
+    assert_eq!(thumb_moves.len(), 7, "position, rotation and the disc's size");
     assert_eq!(
         thumb_moves.iter().filter(|s| s.id == "effects.addKeyframe").count(),
         2,
@@ -162,10 +271,26 @@ fn a_books_speakers_place_a_badge_that_rides_its_own_cue() {
         thumb_moves.iter().all(|s| s.params["effect"] == json!("motion")),
         "a placed still carries its movement on `motion`"
     );
+    // A constant rate is a straight line, so its ends are all it needs: two
+    // keys, the second one a whole revolution per `spin_s` after the first.
+    let thumb_cfg = template().timeline.thumb.unwrap();
+    let sign = if thumb_cfg.direction.eq_ignore_ascii_case("cw") { 1.0 } else { -1.0 };
+    let turns: Vec<(f64, f64)> = thumb_moves
+        .iter()
+        .filter(|s| s.id == "effects.setParam" && s.params["param"] == json!("rotation"))
+        .map(|s| {
+            (
+                s.params["time"].as_i64().unwrap() as f64 / filmcraft::TICKS_PER_SECOND,
+                s.params["value"].as_f64().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(turns.len(), 2, "the ends of one constant turn: {turns:?}");
+    assert_eq!(turns[0], (0.0, 0.0));
     assert!(
-        thumb_moves.iter().any(|s| s.params["param"] == json!("rotation")
-            && s.params["value"] == json!(-360.0)),
-        "and it turns a whole revolution: {thumb_moves:?}"
+        (turns[1].1 - sign * 360.0 * turns[1].0 / thumb_cfg.spin_s).abs() < 1e-6,
+        "and it turns a whole revolution every {}s: {turns:?}",
+        thumb_cfg.spin_s
     );
     assert!(
         thumb_moves.iter().any(|s| s.params["param"] == json!("scale")

@@ -1,9 +1,9 @@
-//! The template's animation vocabulary: a property's segment, its easing, and
-//! where it sits at an instant.
+//! The template's animation vocabulary: a property's segment, its easing, where
+//! it sits at an instant, and the keys FilmCraft is given.
 //!
 //! `bm-video` evaluates the same keys of the same document, so one motion is one
-//! thing in both renderers: this is a port of its `render/layers.rs`, not a
-//! second language.
+//! thing in both renderers: the evaluation is a port of its `render/layers.rs`,
+//! not a second language. The keying is this plugin's own.
 
 use anyhow::{bail, Result};
 use serde::Deserialize;
@@ -221,4 +221,44 @@ pub fn preset_tracks(
              `spin`, or animate it with tracks"
         ),
     })
+}
+
+/// How far the drawn line may sit from the curve, in the property's own unit:
+/// half a pixel of movement, half a degree of turn, half a percent of a size or
+/// an opacity. One tolerance for every animated property the plugin keys.
+pub(crate) const TOL: f64 = 0.5;
+
+/// The frames worth a key: between two of them a straight line stays within
+/// `TOL` of the curve, so FilmCraft's own tween draws the eased shape.
+///
+/// A chord holds while its slope is inside every point's pin, `(y ± TOL) / x`
+/// — one division a frame, where testing each chord against every point
+/// between it and the anchor was a span's work a frame.
+pub(crate) fn decimate(v: impl Fn(usize) -> f64, frames: usize) -> Vec<usize> {
+    let mut out = vec![0usize];
+    let mut anchor = 0usize;
+    let mut base = v(0);
+    let (mut lo, mut hi) = (f64::NEG_INFINITY, f64::INFINITY);
+    for i in 1..frames {
+        let (mut y, mut x) = (v(i) - base, (i - anchor) as f64);
+        let slope = y / x;
+        if i > anchor + 1 && !(lo <= slope && slope <= hi) {
+            // The first chord that leaves the curve: the key is the frame the
+            // last chord that held was drawn from.
+            let keep = i - 1;
+            out.push(keep);
+            anchor = keep;
+            base = v(keep);
+            (lo, hi) = (f64::NEG_INFINITY, f64::INFINITY);
+            (y, x) = (v(i) - base, (i - anchor) as f64);
+        }
+        if x > 0.0 {
+            lo = lo.max((y - TOL) / x);
+            hi = hi.min((y + TOL) / x);
+        }
+    }
+    if out.last() != Some(&(frames - 1)) {
+        out.push(frames - 1);
+    }
+    out
 }

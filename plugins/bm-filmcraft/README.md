@@ -142,9 +142,12 @@ which is how the fade in and the fade out above are written.
 
 FilmCraft tweens two keys in a straight line, so each track is **decimated** into
 the frames that hold its eased shape to within half a pixel, half a degree and
-half a percent: a 2 s sine bob costs about 13 keys a cycle, not 48. Those are fake
-keys on a curve, but each one is *the curve's* value at its frame, so the export
-is the template's motion rather than an approximation a person has to correct. A
+half a percent: a 2 s sine bob costs about 13 keys a cycle, not 48. That one
+rule, at those tolerances, is what keys the thumb's travel and turn and every
+badge's reaction too — one rule for every animated property in the project.
+Those are fake keys on a curve, but each one is *the curve's* value at its
+frame, so the export is the template's motion rather than an approximation a
+person has to correct. A
 property no track moves is set once, and never keyed at all. The clip's
 `motion.anchor` is left alone, so a sprite turns about its own centre rather than
 the frame's: on a ±8° sway the ink's centroid moved 0.9 px across the swing,
@@ -201,16 +204,24 @@ property is already animated, and `effects.addKeyframe` wants the clip's id,
 which only the reply to `graphics.newShape` or `timeline.place` carries — so the
 build runs, the replies are read, and the keys are written against the project
 the build just made. In the project the thumb's `motion.position` then holds two
-keys, `0` at the bar's left edge and the book's last tick at its right, linear
+keys, `0` at the bar's left edge and the book's last frame at its right, linear
 between: exactly the line `bm-video` moves it along. Its `motion.rotation` holds
-three — `0`, one turn after `spin_s`, and the book's last tick — so the angle is
-a straight line too, where `bm-video` steps a table of pre-rotated frames.
+two — `0` and the whole turns it has made by then, a revolution every `spin_s` —
+so the angle is a straight line too, where `bm-video` steps a table of
+pre-rotated frames. Both are the same rule: a straight line needs its ends and
+nothing more.
 
-A badge's reaction is keyed on **every frame that moves it by more than a
-fiftieth**, peaks included: the attack is exact, the release is a straight line
-between keys instead of a curve, and a book whose speakers are quiet between
-syllables carries a fraction of the frames rather than all of them. The badge's
-two axes move apart because `uniform_scale` is turned off — FilmCraft's `scale`
+A badge's reaction is keyed by the same rule as the rest, on the two axes it is
+drawn at: the frames where a straight line would leave the badge's own size by
+more than half a percent. A syllable moves it far more than that, so the frame
+before an attack is keyed along with its peak — the attack stays as sharp as the
+measurement, where keying a peak alone ramps into it from wherever the last key
+happened to be — and the release between two keys is a straight line instead of
+a curve. Keyed one window a chapter, six of this book's chapters carry 28,993
+keys for 50,203 frames, against 44,999 for the rule this replaces, and the line
+drawn between them sits 0.66 percent of the badge's size off the measurement
+where that rule was 8 percent out at its worst. The badge's two axes move apart because
+`uniform_scale` is turned off — FilmCraft's `scale`
 is then the height and `scale_width` the width, each a percentage of the art's
 own pixels, which is what the template's `react` asks for.
 

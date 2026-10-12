@@ -16,14 +16,6 @@ use anyhow::{Context, Result};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 
-/// How far a straight line may sit from the curve before the key is worth
-/// writing: half a pixel of movement, half a degree of turn, half a percent of a
-/// size or an opacity. All well below what an eye reads.
-const POSITION_TOL: f64 = 0.5;
-const SCALE_TOL: f64 = 0.5;
-const ROTATE_TOL: f64 = 0.5;
-const OPACITY_TOL: f64 = 0.5;
-
 /// One picture the template places: where it rests, how big it is, and what
 /// moves it.
 #[derive(Clone, Debug)]
@@ -156,19 +148,19 @@ impl Elements {
             let mut w = Writer { clip, el, fps: fps.max(1.0), total, out: Vec::new() };
             // Position is one value, so the two axes share their key times: a key
             // for `x` alone would hold `y` where FilmCraft last saw it.
-            w.channel("motion", "position", &[("x", zw), ("y", zh)], POSITION_TOL, |w, f| {
+            w.channel("motion", "position", &[("x", zw), ("y", zh)], |w, f| {
                 json!([
                     round3(w.el.cx + w.sample("x", f) * w.el.zone_w),
                     round3(w.el.cy + w.sample("y", f) * w.el.zone_h)
                 ])
             });
-            w.channel("motion", "scale", &[("scale", size)], SCALE_TOL, |w, f| {
+            w.channel("motion", "scale", &[("scale", size)], |w, f| {
                 json!(round3(w.sample("scale", f) * size))
             });
-            w.channel("motion", "rotation", &[("rotate", 1.0)], ROTATE_TOL, |w, f| {
+            w.channel("motion", "rotation", &[("rotate", 1.0)], |w, f| {
                 json!(round3(w.sample("rotate", f)))
             });
-            w.channel("opacity", "opacity", &[("opacity", 100.0)], OPACITY_TOL, |w, f| {
+            w.channel("opacity", "opacity", &[("opacity", 100.0)], |w, f| {
                 json!(round3(w.sample("opacity", f) * 100.0))
             });
             out.extend(w.out);
@@ -197,15 +189,14 @@ impl Writer<'_> {
         self.el.tracks.iter().any(|t| t.prop == prop)
     }
 
-    /// One property on the clip: its keys, decimated to `tol` — or one value at
-    /// the start when no track moves it. Each axis carries the scale its value is
-    /// drawn at, so `tol` is in the units a person sees.
+    /// One property on the clip: its keys, decimated — or one value at the
+    /// start when no track moves it. Each axis carries the scale its value is
+    /// drawn at, so the tolerance is in the units a person sees.
     fn channel(
         &mut self,
         effect: &str,
         param: &str,
         axes: &[(&str, f64)],
-        tol: f64,
         value: impl Fn(&Self, usize) -> Value,
     ) {
         let live: Vec<(&str, f64)> = axes
@@ -219,7 +210,7 @@ impl Writer<'_> {
         }
         let mut frames: Vec<usize> = live
             .iter()
-            .flat_map(|(p, unit)| self.key_frames(|w, f| w.sample(p, f) * unit, tol))
+            .flat_map(|(p, unit)| self.key_frames(|w, f| w.sample(p, f) * unit))
             .collect();
         frames.sort_unstable();
         frames.dedup();
@@ -241,29 +232,14 @@ impl Writer<'_> {
         }
     }
 
-    /// The frames worth a key: between two of them a straight line stays within
-    /// `tol` of the curve, so FilmCraft's own tween draws the eased shape.
-    fn key_frames(&self, v: impl Fn(&Self, usize) -> f64, tol: f64) -> Vec<usize> {
+    /// The frames worth a key, of the clip this writer's motion is drawn over.
+    fn key_frames(&self, v: impl Fn(&Self, usize) -> f64) -> Vec<usize> {
         // The frames a clip of this length holds, which is the length rounded
         // to the grid — and the last of them *starts* a frame before the end, so
         // the last key lands inside the clip rather than on the instant it
         // stops, where FilmCraft would clamp it.
         let frames = (self.total * self.fps).round().max(1.0) as usize;
-        let mut out = vec![0usize];
-        let mut last = 0usize;
-        let mut i = 1usize;
-        while i < frames {
-            if deviates(&|f| v(self, f), last, i, tol) {
-                let keep = if i - 1 > last { i - 1 } else { i };
-                out.push(keep);
-                last = keep;
-            }
-            i += 1;
-        }
-        if out.last() != Some(&(frames - 1)) {
-            out.push(frames - 1);
-        }
-        out
+        motion::decimate(|f| v(self, f), frames)
     }
 
     fn set(&self, effect: &str, param: &str, value: Value, time: i64) -> Step {
@@ -278,17 +254,6 @@ impl Writer<'_> {
             }),
         }
     }
-}
-
-/// Whether the segment `a`..`b` of a curve leaves the straight line between its
-/// ends by more than `tol`.
-fn deviates(v: &impl Fn(usize) -> f64, a: usize, b: usize, tol: f64) -> bool {
-    let (va, vb) = (v(a), v(b));
-    let span = (b - a) as f64;
-    (a + 1..b).any(|j| {
-        let line = va + (vb - va) * ((j - a) as f64 / span);
-        (v(j) - line).abs() > tol
-    })
 }
 
 /// FilmCraft names a track `V1`, `V2`, …: one-based, the plan's zero-based.

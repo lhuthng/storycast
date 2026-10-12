@@ -2,20 +2,6 @@ use super::*;
 use serde_json::json;
 use std::path::Path;
 
-/// A template with one sprite in the illustration zone, drawn from the repo's
-/// own art so its size is a real one.
-fn sprite_template(name: &str, motion: serde_json::Value) -> (PathBuf, PathBuf) {
-    let dir = workspace(name);
-    let path = dir.join("template.json");
-    let doc = json!({
-        "canvas": {"size": [1920, 1080], "fps": 30},
-        "zones": {"illustration": {"anchor": "top-left", "at": [0.05, 0.11], "size": [0.26, 0.46], "aspect": 1}},
-        "layers": [{"kind": "sprite", "zone": "illustration", "asset": "tmp/thumb-single.png", "motion": motion}],
-    });
-    std::fs::write(&path, doc.to_string()).unwrap();
-    (dir, path)
-}
-
 /// A plan over its own book, the template's sprites, and the steps FilmCraft
 /// would get for them.
 fn sprite_steps(
@@ -175,6 +161,85 @@ fn a_fade_in_and_a_fade_out_are_two_tracks_of_one_property() {
         json!(plan::frame_ticks(last_frame / 30.0, 30.0)),
         "held to the last frame inside the clip, not the instant it stops"
     );
+}
+
+#[test]
+fn between_two_keys_the_straight_line_holds_the_curve() {
+    // FilmCraft tweens two keys in a straight line, so the keys are only right if
+    // the line between each pair stays inside the decimation's tolerance. The
+    // other sprite tests check the keys themselves; this checks the drawing.
+    let (_dir, template) = sprite_template(
+        "sprite-tween",
+        json!({"period_s": 2.0, "tracks": [
+            {"prop": "x", "from": 0.0, "to": 0.08, "dur_s": 3.0, "ease": "in-out"},
+            {"prop": "y", "from": -0.05, "to": 0.05, "dur_s": 1.0, "ease": "in-out-sin", "repeat": 0, "pingpong": true},
+            {"prop": "rotate", "from": -8.0, "to": 8.0, "dur_s": 1.0, "ease": "in-out-sin", "repeat": 0, "pingpong": true},
+            {"prop": "opacity", "from": 0, "to": 1, "dur_s": 0.5, "ease": "out"},
+            {"prop": "opacity", "from": 1, "to": 0, "dur_s": 0.5, "ease": "in", "align": "end"}]}),
+    );
+    let (plan, sprites, steps, replies) = sprite_steps(&template, "sprite-tween-book");
+    let (fps, total) = (30.0, plan.total);
+    let moving = sprites
+        .keys(&steps, &replies, plan.sprite_track(0, 0), fps, total)
+        .unwrap();
+    let el = &sprites.list[0];
+    let ticks = |s: &plan::Step| s.params["time"].as_i64().unwrap() as f64 / filmcraft::TICKS_PER_SECOND;
+    let keys = |param: &str| -> Vec<(f64, Vec<f64>)> {
+        moving
+            .iter()
+            .filter(|s| s.id == "effects.setParam" && s.params["param"] == json!(param))
+            .map(|s| {
+                let v = &s.params["value"];
+                let nums = match v.as_array() {
+                    Some(a) => a.iter().map(|x| x.as_f64().unwrap()).collect(),
+                    None => vec![v.as_f64().unwrap()],
+                };
+                (ticks(s), nums)
+            })
+            .collect()
+    };
+    // The line FilmCraft draws, at an instant: the segment it is in, held before
+    // the first key and after the last.
+    let drawn = |ks: &[(f64, Vec<f64>)], t: f64, axis: usize| -> f64 {
+        match ks.iter().rposition(|(kt, _)| *kt <= t + 1e-9) {
+            None => ks[0].1[axis],
+            Some(i) if i + 1 >= ks.len() => ks[i].1[axis],
+            Some(i) => {
+                let (t0, v0) = (ks[i].0, ks[i].1[axis]);
+                let (t1, v1) = (ks[i + 1].0, ks[i + 1].1[axis]);
+                if (t1 - t0).abs() < 1e-12 {
+                    v1
+                } else {
+                    v0 + (v1 - v0) * ((t - t0) / (t1 - t0))
+                }
+            }
+        }
+    };
+    let frames = (total * fps).round() as usize;
+    let mut worst = [0.0f64; 3];
+    for f in 0..frames {
+        let t = f as f64 / fps;
+        let pos = keys("position");
+        let (dx, dy) = (
+            (drawn(&pos, t, 0) - (el.cx + motion::value(&el.tracks, "x", t, total, el.period) * el.zone_w)).abs(),
+            (drawn(&pos, t, 1) - (el.cy + motion::value(&el.tracks, "y", t, total, el.period) * el.zone_h)).abs(),
+        );
+        worst[0] = worst[0].max(dx);
+        worst[1] = worst[1].max(dy);
+        let rot = keys("rotation");
+        let dr = (drawn(&rot, t, 0) - motion::value(&el.tracks, "rotate", t, total, el.period)).abs();
+        worst[2] = worst[2].max(dr);
+    }
+    println!(
+        "      worst drawn-vs-curve: x {:.3} px, y {:.3} px, rotate {:.3}° over {frames} frames",
+        worst[0], worst[1], worst[2]
+    );
+    // Half a pixel and half a degree is the tolerance the keys are picked to,
+    // and the line between two of them is the segment the chord was tested
+    // against — so it sits just inside it.
+    assert!(worst[0] <= 0.51, "x wanders {:.3} px from the curve", worst[0]);
+    assert!(worst[1] <= 0.51, "y wanders {:.3} px from the curve", worst[1]);
+    assert!(worst[2] <= 0.51, "rotate wanders {:.3}°", worst[2]);
 }
 
 #[test]

@@ -2,8 +2,23 @@ use super::*;
 use serde_json::json;
 use std::path::Path;
 
+mod decimate;
 mod portraits;
 mod sprite;
+
+/// A template with one sprite in the illustration zone, drawn from the repo's
+/// own art so its size is a real one.
+fn sprite_template(name: &str, motion: serde_json::Value) -> (PathBuf, PathBuf) {
+    let dir = workspace(name);
+    let path = dir.join("template.json");
+    let doc = json!({
+        "canvas": {"size": [1920, 1080], "fps": 30},
+        "zones": {"illustration": {"anchor": "top-left", "at": [0.05, 0.11], "size": [0.26, 0.46], "aspect": 1}},
+        "layers": [{"kind": "sprite", "zone": "illustration", "asset": "tmp/thumb-single.png", "motion": motion}],
+    });
+    std::fs::write(&path, doc.to_string()).unwrap();
+    (dir, path)
+}
 
 /// A workspace with an `output/` for the fixtures to publish into.
 fn workspace(name: &str) -> PathBuf {
@@ -557,7 +572,7 @@ fn the_thumb_runs_the_bar_and_is_set_moving_in_a_second_pass() {
         })
         .collect();
     let moving = plan.animate(&steps, &replies, &plan::Portraits::default(), &element::Elements::default()).unwrap();
-    assert_eq!(moving.len(), 7, "two properties, made animated and then set");
+    assert_eq!(moving.len(), 6, "two properties, made animated and then set");
     assert_eq!(moving[0].id, "effects.addKeyframe");
     assert_eq!(
         moving[0].params,
@@ -570,28 +585,29 @@ fn the_thumb_runs_the_bar_and_is_set_moving_in_a_second_pass() {
     assert!((x(2) - 1747.2).abs() < 0.01, "to its right, over the book");
     assert_eq!(
         moving[2].params["time"],
-        json!(5_740_761_600_000_i64),
-        "the end of the book is where the disc stops"
+        json!(5_732_294_400_000_i64),
+        "the book's last frame is where the disc stops, inside the clip"
     );
     assert_eq!(
         moving[1].params["props"]["position"][1],
         json!(553.2),
         "and it travels the bar's centre line"
     );
-    // The disc turns: a whole revolution every spin_s, three keys for the book.
+    // The disc turns: a whole revolution every `spin_s`, so a constant rate is a
+    // straight line and the rule keys its two ends and nothing between.
     let turns: Vec<&serde_json::Value> = moving
         .iter()
         .filter(|s| s.params["props"].get("rotation").is_some())
         .map(|s| &s.params)
         .collect();
-    assert_eq!(turns.len(), 3, "the angle is a straight line: {turns:?}");
+    assert_eq!(turns.len(), 2, "the angle is a straight line: {turns:?}");
     assert_eq!(turns[0]["props"]["rotation"], json!(0.0));
-    assert_eq!(turns[1]["props"]["rotation"], json!(-360.0), "ccw, so it falls");
-    assert_eq!(turns[1]["time"], json!(304_819_200_000_i64), "one turn takes 1.2 s");
+    let spin = template().timeline.thumb.unwrap().spin_s;
+    let at = turns[1]["time"].as_i64().unwrap() as f64 / filmcraft::TICKS_PER_SECOND;
     assert!(
-        turns[2]["props"]["rotation"].as_f64().unwrap() < -360.0 * 18.0,
-        "and the last key is the end of the book: {}",
-        turns[2]["props"]["rotation"]
+        (turns[1]["props"]["rotation"].as_f64().unwrap() + 360.0 * at / spin).abs() < 1e-6,
+        "ccw, a whole revolution every {spin} s: {}",
+        turns[1]["props"]["rotation"]
     );
     let err = plan
         .animate(&steps, &replies[..25], &plan::Portraits::default(), &element::Elements::default())

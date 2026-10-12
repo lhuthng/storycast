@@ -8,6 +8,7 @@ use crate::element::Elements;
 use crate::filmcraft::TICKS_PER_SECOND;
 use crate::look::{BarGeom, Look, React};
 use crate::model::{Cue, Manifest};
+use crate::motion;
 use crate::portrait;
 use crate::srt;
 use anyhow::{bail, Context, Result};
@@ -113,11 +114,6 @@ const SEGMENTS_FIRST: i64 = 2;
 /// `opacity`, `time_remap`, the graphic — and a shape's carries this name. The
 /// thumb is a shape, and this is what its keyframes are asked for by.
 const GRAPHIC_SHAPE: &str = "graphic_shape";
-
-/// How far the badge's reaction must move between two keys before the key is
-/// worth writing: a fiftieth of the squash, and far below what an eye sees on a
-/// badge a few dozen pixels tall.
-const BADGE_STEP: f32 = 0.02;
 
 /// The act plate's label sits this far down the zone before the title starts,
 /// as `bm-video` lays it out: the label's own line, then a tenth of it.
@@ -763,9 +759,6 @@ impl Plan {
                 .context("FilmCraft reported no clip id for the thumb")?;
             (clip, GRAPHIC_SHAPE)
         };
-        let set = |x: f64, time: i64| {
-            thumb_prop(effect, clip, "position", json!([x, geom.cy]), time)
-        };
         let (spin, sign) = match self.look.timeline.thumb.as_ref() {
             Some(t) => (
                 t.spin_s.max(0.05),
@@ -773,40 +766,40 @@ impl Plan {
             ),
             None => (1.2, -1.0),
         };
-        let turns = (self.total / spin).max(1.0);
-        let mut out = vec![
-            Step {
-                id: "effects.addKeyframe".into(),
-                params: json!({
-                    "clip": clip,
-                    "effect": effect,
-                    "param": "position",
-                    "time": 0,
-                }),
-            },
-            set(geom.left, 0),
-            set(geom.left + geom.width, ticks(self.total)),
-            // One revolution is a straight line in angle, so three keys carry
-            // the whole book at a constant rate.
-            Step {
-                id: "effects.addKeyframe".into(),
-                params: json!({
-                    "clip": clip,
-                    "effect": effect,
-                    "param": "rotation",
-                    "time": 0,
-                }),
-            },
-            thumb_prop(effect, clip, "rotation", json!(0.0), 0),
-            thumb_prop(effect, clip, "rotation", json!(sign * 360.0), ticks(spin)),
-            thumb_prop(
-                effect,
-                clip,
-                "rotation",
-                json!(sign * 360.0 * turns),
-                ticks(self.total),
-            ),
-        ];
+        // Both are straight lines over the book — the bar's left edge to its
+        // right, and a whole revolution every `spin_s` — so the one rule keys
+        // each of them at the ends it needs, and no more.
+        let fps = self.fps.max(1.0);
+        let frames = (self.total * fps).round().max(1.0) as usize;
+        let last = (frames - 1).max(1) as f64;
+        let place = |f: usize| geom.left + geom.width * f as f64 / last;
+        let turn = |f: usize| sign * 360.0 * (f as f64 / fps) / spin;
+        let mut out = vec![Step {
+            id: "effects.addKeyframe".into(),
+            params: json!({
+                "clip": clip,
+                "effect": effect,
+                "param": "position",
+                "time": 0,
+            }),
+        }];
+        for f in motion::decimate(place, frames) {
+            let time = frame_ticks(f as f64 / fps, fps);
+            out.push(thumb_prop(effect, clip, "position", json!([place(f), geom.cy]), time));
+        }
+        out.push(Step {
+            id: "effects.addKeyframe".into(),
+            params: json!({
+                "clip": clip,
+                "effect": effect,
+                "param": "rotation",
+                "time": 0,
+            }),
+        });
+        for f in motion::decimate(turn, frames) {
+            let time = frame_ticks(f as f64 / fps, fps);
+            out.push(thumb_prop(effect, clip, "rotation", json!(turn(f)), time));
+        }
         if portraits.thumb.is_some() && portraits.thumb_pct > 0.0 {
             out.push(Step {
                 id: "effects.setParam".into(),
@@ -886,7 +879,7 @@ impl Plan {
             };
             out.push(set("uniform_scale", json!(false), 0));
             out.push(set("position", json!(at), 0));
-            let keys = self.badge_keys(win, cue);
+            let keys = self.badge_keys(win, cue, portraits.ratio, &portraits.react);
             for (k, (frame, amount)) in keys.iter().enumerate() {
                     let (width, height) = portrait::size_pct(portraits.ratio, &portraits.react, *amount);
                 let time = frame_ticks(span.start + *frame as f64 / self.fps.max(1.0), self.fps);
@@ -918,19 +911,20 @@ impl Plan {
     }
 
     /// The frames a cue's badge is keyed on: the cue's own window of its
-    /// chapter's envelope, decimated. A cue with no measurement at all gets one
-    /// key at rest, so its badge is the right size rather than its own pixels.
-    fn badge_keys(&self, win: &CueWindow, cue: &Cue) -> Vec<(usize, f32)> {
+    /// chapter's envelope, through the one keying rule. A cue with no
+    /// measurement at all gets one key at rest, so its badge is the right size
+    /// rather than its own pixels.
+    fn badge_keys(&self, win: &CueWindow, cue: &Cue, ratio: f64, react: &React) -> Vec<(usize, f32)> {
         let span = &self.spans[win.span];
         let fps = self.fps.max(1.0);
         let first = (cue.start * fps).floor().max(0.0) as usize;
         let last = (((cue.end * fps).ceil() as usize) + 1).min(span.env.len());
         let slice = span.env.get(first.min(last)..last).unwrap_or(&[]);
-        let keys = portrait::keys(slice, BADGE_STEP);
+        let keys = portrait::badge_frames(slice, ratio, react);
         if keys.is_empty() {
             return vec![(first, 0.0)];
         }
-        keys.into_iter().map(|(f, a)| (first + f, a)).collect()
+        keys.into_iter().map(|f| (first + f, slice[f])).collect()
     }
 
     /// The bar's geometry on this frame's pixels, from the acts' windows.

@@ -73,29 +73,23 @@ pub fn size_pct(ratio: f64, react: &React, amount: f32) -> (f64, f64) {
     )
 }
 
-/// The frames worth a keyframe: every peak, and wherever the release has moved
-/// the value by `step`. Between two keys FilmCraft draws a straight line and the
-/// release is a decay, so this keeps the attacks exact and the decay within
-/// `step` — a fortieth of the badge's own reaction.
-pub fn keys(amounts: &[f32], step: f32) -> Vec<(usize, f32)> {
-    let mut out: Vec<(usize, f32)> = Vec::new();
-    let mut last: Option<f32> = None;
-    for (i, a) in amounts.iter().enumerate() {
-        let next = amounts.get(i + 1).copied().unwrap_or(f32::NEG_INFINITY);
-        let before = amounts.get(i.wrapping_sub(1)).copied().unwrap_or(f32::NEG_INFINITY);
-        let peak = *a > before && *a >= next;
-        if peak || last.is_none_or(|l| (*a - l).abs() >= step) {
-            out.push((i, *a));
-            last = Some(*a);
-        }
+/// The frames a badge's reaction is keyed on: the rule every animated property
+/// here is keyed by, applied to the two axes the badge is drawn at, so the
+/// frames are the union of what each of them needs. A syllable moves the badge
+/// far more than the tolerance, so its attack is keyed; the release between two
+/// keys is a straight line, held to the same tolerance as the rest.
+pub fn badge_frames(amounts: &[f32], ratio: f64, react: &React) -> Vec<usize> {
+    if amounts.is_empty() {
+        return Vec::new();
     }
-    if let Some(last) = amounts.last() {
-        let i = amounts.len() - 1;
-        if out.last().map(|(j, _)| *j) != Some(i) {
-            out.push((i, *last));
-        }
-    }
-    out
+    let size = |f: usize| size_pct(ratio, react, amounts[f]);
+    let mut frames: Vec<usize> = crate::motion::decimate(|f| size(f).1, amounts.len())
+        .into_iter()
+        .chain(crate::motion::decimate(|f| size(f).0, amounts.len()))
+        .collect();
+    frames.sort_unstable();
+    frames.dedup();
+    frames
 }
 
 /// Per video frame, how loud the chapter is, 0..1 — what the portrait reacts to.
