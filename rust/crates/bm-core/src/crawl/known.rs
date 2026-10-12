@@ -514,4 +514,67 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn the_registry_entries_are_well_formed() {
+        // Two entries for one host would make `for_url` silently pick the first;
+        // a script that climbs out of `crawlers/` would read a path the registry
+        // never promised; a blank param key or example is not pasteable.
+        let mut seen = std::collections::HashSet::new();
+        for site in known_sites() {
+            assert!(seen.insert(site.host), "duplicate host {:?}", site.host);
+            assert!(
+                !site.host.contains(char::is_whitespace),
+                "{} has whitespace in its host",
+                site.host
+            );
+            if site.is_crawlable() {
+                assert!(site.script.starts_with("crawlers/"), "{}", site.script);
+                assert!(!site.script.contains(".."), "{}", site.script);
+                assert!(
+                    site.script.ends_with(".lua") || site.script.ends_with(".js"),
+                    "{} names an engine no interpreter runs: {}",
+                    site.host,
+                    site.script
+                );
+            }
+            for (key, example) in site.params {
+                assert!(!key.trim().is_empty(), "{} has an unnamed param", site.host);
+                assert!(
+                    !example.trim().is_empty(),
+                    "{}: param {key:?} has no example value",
+                    site.host
+                );
+            }
+            assert_eq!(
+                site.url_template.matches('{').count(),
+                site.url_template.matches('}').count(),
+                "{} has an unbalanced placeholder in {:?}",
+                site.host,
+                site.url_template
+            );
+        }
+    }
+
+    #[test]
+    fn a_pasted_url_is_reduced_to_its_host_before_matching() {
+        // Case, userinfo, a port and a subdomain all reduce to the same host.
+        for url in [
+            "HTTPS://STORYA.CLICK/x",
+            "https://user:pass@storya.click/x",
+            "https://storya.click:8443/x",
+            "https://sub.storya.click/x",
+            "storya.click",
+        ] {
+            assert!(for_url(url).is_some(), "{url:?} should match");
+        }
+        // A trailing-dot FQDN, a scheme-relative URL, and a look-alike do not.
+        for url in [
+            "https://storya.click./x",
+            "//storya.click/x",
+            "https://storya.click.example.com/x",
+        ] {
+            assert!(for_url(url).is_none(), "{url:?} matched wrongly");
+        }
+    }
 }

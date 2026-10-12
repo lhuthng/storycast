@@ -242,4 +242,6 @@ fn text_of(outcome: CrawlOutcome) -> String {
 /// behaviour" is a claim rather than a fact, and every existing workspace's
 mod epub;
 mod parity;
+mod parsers;
 mod sites;
+mod syntax;
