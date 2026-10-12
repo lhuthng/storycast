@@ -560,3 +560,98 @@ fn a_receipt_survives_its_own_spelling() {
     assert!(read_receipt(&dir.join("absent.json")).is_none());
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn a_url_setting_resolves_to_r2_and_a_repo_does_not() {
+    assert!(is_preset_url("https://presets.example.com"));
+    assert!(is_preset_url("http://localhost:9000"));
+    assert!(!is_preset_url("lhuthng/storycast"));
+    assert!(!is_preset_url(""));
+}
+
+#[test]
+fn a_latest_json_entry_yields_key_hash_and_bytes() {
+    let doc = json!({"version": "2026-10-11", "files": {
+        "models.tar.zst": {"key": "preset/models/vieneu/2026-10-11/models.tar.zst",
+                           "sha256": "abc123", "bytes": 42},
+    }});
+    let (key, hash, bytes) = preset_entry(&doc, "models.tar.zst").unwrap();
+    assert_eq!(key, "preset/models/vieneu/2026-10-11/models.tar.zst");
+    assert_eq!(hash, "abc123");
+    assert_eq!(bytes, 42);
+    assert!(
+        preset_entry(&doc, "other.tar.zst").is_err(),
+        "an unlisted file is refused, not defaulted"
+    );
+    let nohash = json!({"files": {"models.tar.zst": {"key": "k"}}});
+    assert!(
+        preset_entry(&nohash, "models.tar.zst").is_err(),
+        "an entry without a hash pins nothing"
+    );
+}
+
+#[test]
+fn a_latest_json_without_a_tree_hash_is_refused() {
+    // The box verifies the unpacked tree, so a pointer carrying only the
+    // archive hash pins nothing it checks.
+    let doc = serde_json::json!({"version": "2026-10-11", "files": {
+        "x.tar.zst": {"key": "k", "sha256": "abc", "bytes": 1},
+    }});
+    assert!(
+        preset_file("https://x", "https://x/latest.json", &doc, "x.tar.zst").is_err(),
+        "no manifest_hash, no release"
+    );
+    let doc = serde_json::json!({"version": "2026-10-11", "manifest_hash": "tree1", "files": {
+        "x.tar.zst": {"key": "k", "sha256": "abc", "bytes": 1},
+    }});
+    let f = preset_file("https://x/", "https://x/latest.json", &doc, "x.tar.zst").unwrap();
+    assert_eq!(f.url, "https://x/k");
+    assert_eq!(f.manifest_hash, "tree1");
+}
+
+#[test]
+fn a_release_repo_is_exactly_two_safe_path_segments() {
+    assert_eq!(parse_repo("owner/name").unwrap(), ("owner", "name"));
+    assert_eq!(
+        parse_repo("owner.name/repo-1_2").unwrap(),
+        ("owner.name", "repo-1_2")
+    );
+
+    // Anything that is not `owner/name` is refused, never truncated to fit.
+    for bad in [
+        "",
+        "owner",
+        "/name",
+        "owner/",
+        "owner/name/extra",
+        "owner/name/",
+        "owner/na me",
+        "own er/name",
+        "owner/name\n",
+        "owner/name\nignored",
+        "../etc",
+        "./name",
+        "owner/..",
+        "owner//name",
+        "owner/na:me",
+    ] {
+        assert!(parse_repo(bad).is_err(), "{bad:?} must be refused");
+    }
+}
+
+#[test]
+fn a_tag_is_safe_for_a_hash_that_is_empty_or_short() {
+    // The tag slices `hash[..12]`, so a short or absent hash must not panic.
+    assert_eq!(tag_for("abcd1234"), "models-vabcd1234");
+    assert_eq!(tag_for("0123456789abcdef"), "models-v0123456789ab");
+    assert_eq!(tag_for(""), "models-v");
+}
+
+#[test]
+fn a_release_repo_takes_the_github_alphabet_and_nothing_padded() {
+    assert_eq!(parse_repo("A-B_c.9/x9").unwrap(), ("A-B_c.9", "x9"));
+    // Whitespace and non-ASCII are not trimmed or folded into a valid name.
+    for bad in [" owner/name", "owner/name ", "owner/näme", "owner/n\tame"] {
+        assert!(parse_repo(bad).is_err(), "{bad:?}");
+    }
+}

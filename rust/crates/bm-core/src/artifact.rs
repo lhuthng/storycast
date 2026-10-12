@@ -51,8 +51,12 @@ pub fn parse_repo(repo: &str) -> Result<(&str, &str)> {
     let (Some(owner), Some(name), None) = (parts.next(), parts.next(), parts.next()) else {
         bail!("models release repo must be `owner/name`, got `{repo}`");
     };
+    // A dot-segment (`.`, `..`) is a path, not a repo: it would build a URL
+    // that climbs out of `/repos/` rather than naming one.
     let ok = |s: &str| {
         !s.is_empty()
+            && s != "."
+            && s != ".."
             && s.chars()
                 .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
     };
@@ -141,6 +145,130 @@ pub fn pack_tag_for(name: &str, version: &str) -> String {
 /// Where a pack release's `<name>.tar.zst` lives. The asset keeps the plain
 pub fn pack_release_url(repo: &str, tag: &str, name: &str) -> String {
     format!("https://github.com/{repo}/releases/download/{tag}/{name}.tar.zst")
+}
+
+// ---------------------------------------------------------------------------
+// R2 preset buckets (docs/R2-PRESETS.md). A setting holding a URL instead of
+// `owner/name` resolves here: latest.json is read first, and the box fetches
+// the immutable file it names, verified against the listed hash.
+
+/// The agent string every preset fetch sends: the bucket's bot protection
+/// answers known-scripting agents with 403.
+pub const PRESET_UA: &str = "storycast-preset-fetch/1.0";
+
+/// A `true` URL, not an `owner/name` repo shorthand.
+pub fn is_preset_url(value: &str) -> bool {
+    value.starts_with("https://") || value.starts_with("http://")
+}
+
+/// One file a pack's latest.json names: the direct URL, the archive hash,
+/// and the tree manifest hash the boxes verify the unpacked tree against.
+pub struct PresetFile {
+    pub version: String,
+    pub url: String,
+    pub hash: String,
+    pub bytes: u64,
+    pub manifest_hash: String,
+}
+
+/// Read a pack's latest.json and take one entry out of it. Network, unlike
+/// the GitHub path, which derives everything from the local manifest.
+pub fn preset_latest(base: &str, kind: &str, name: &str, file: &str) -> Result<PresetFile> {
+    let url = format!(
+        "{}/preset/{kind}/{name}/latest.json",
+        base.trim_end_matches('/')
+    );
+    let client = reqwest::blocking::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(20))
+        .timeout(std::time::Duration::from_secs(60))
+        .build()
+        .map_err(|e| anyhow!("preset fetch unavailable: {e}"))?;
+    let doc: Value = client
+        .get(&url)
+        .header("User-Agent", PRESET_UA)
+        .send()
+        .map_err(|e| anyhow!("{url}: {e}"))?
+        .error_for_status()
+        .map_err(|e| anyhow!("{url}: {e}"))?
+        .json()
+        .map_err(|e| anyhow!("{url}: {e}"))?;
+    preset_file(base, &url, &doc, file)
+}
+
+/// One latest.json document resolved against its base URL: the direct file
+/// URL plus both hashes. Pure, so the network stays one GET above.
+pub(crate) fn preset_file(base: &str, url: &str, doc: &Value, file: &str) -> Result<PresetFile> {
+    let (key, hash, bytes) = preset_entry(doc, file)?;
+    let manifest_hash = doc
+        .get("manifest_hash")
+        .and_then(|h| h.as_str())
+        .ok_or_else(|| {
+            anyhow!("{url}: latest.json has no manifest_hash — republish it with tools/preset-publish.sh")
+        })?
+        .to_string();
+    Ok(PresetFile {
+        version: doc
+            .get("version")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string(),
+        url: format!("{}/{key}", base.trim_end_matches('/')),
+        hash,
+        bytes,
+        manifest_hash,
+    })
+}
+
+/// One `files` entry out of a latest.json document: key, hash, byte count.
+pub(crate) fn preset_entry(doc: &Value, file: &str) -> Result<(String, String, u64)> {
+    let entry = doc
+        .get("files")
+        .and_then(|f| f.get(file))
+        .ok_or_else(|| anyhow!("latest.json names no `{file}`"))?;
+    let key = entry
+        .get("key")
+        .and_then(|k| k.as_str())
+        .ok_or_else(|| anyhow!("latest.json entry `{file}` has no key"))?
+        .to_string();
+    let hash = entry
+        .get("sha256")
+        .and_then(|h| h.as_str())
+        .ok_or_else(|| anyhow!("latest.json entry `{file}` has no sha256"))?
+        .to_string();
+    let bytes = entry.get("bytes").and_then(|b| b.as_u64()).unwrap_or(0);
+    Ok((key, hash, bytes))
+}
+
+impl ModelsRelease {
+    /// The models release an R2 preset base names: the bundle entry of the
+    /// engine's latest.json. The hash pins the unpacked tree, not the
+    /// archive; the version only logs.
+    pub fn for_r2(base: &str, engine: &str) -> Result<Self> {
+        let f = preset_latest(base, "models", engine, BUNDLE_NAME)?;
+        Ok(Self {
+            repo: base.to_string(),
+            hash: f.manifest_hash,
+            tag: f.version.clone(),
+            url: f.url,
+        })
+    }
+}
+
+impl PackRelease {
+    /// The pack release an R2 preset base names: the bundle entry of the
+    /// pack's latest.json, floating on latest rather than pinned to the
+    /// checkout pointer the GitHub path uses. Same tree-hash contract.
+    pub fn for_r2(base: &str, name: &str) -> Result<Self> {
+        let f = preset_latest(base, "sounds", name, &format!("{name}.tar.zst"))?;
+        Ok(Self {
+            repo: base.to_string(),
+            name: name.to_string(),
+            version: f.version.clone(),
+            hash: f.manifest_hash,
+            tag: f.version,
+            url: f.url,
+        })
+    }
 }
 
 /// sha256 over sorted `name + NUL + content-sha256 + NUL` lines.
