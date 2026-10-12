@@ -566,3 +566,19 @@ fn a_stamp_payload_parses_and_garbage_does_not() {
          stdout of a non-zero exit is whatever the failure wrote"
     );
 }
+
+#[test]
+fn a_payload_that_is_not_a_stamp_is_refused() {
+    // The struct has required fields, so these are all misses rather than a
+    // zeroed stamp that would read as "everything changed".
+    for bad in [
+        "{}",
+        "null",
+        "[]",
+        "0",
+        r#"{"agent_version":"v"}"#,
+        "{} trailing",
+    ] {
+        assert!(parse_stamp(bad).is_none(), "{bad}");
+    }
+}

@@ -565,4 +565,43 @@ mod tests {
             None
         );
     }
+
+    #[test]
+    fn a_console_csv_is_read_from_the_first_row_after_a_header() {
+        // A data row above the header is not the header, and does not win.
+        assert_eq!(
+            parse_access_key_csv(
+                "AKIAFIRST,secret\nAccess key ID,Secret access key\nAKIAOURS,ours\n"
+            ),
+            Some(("AKIAOURS".into(), "ours".into()))
+        );
+        // Header names are matched case-insensitively.
+        assert_eq!(
+            parse_access_key_csv("ACCESS KEY ID,SECRET ACCESS KEY\nA,s\n"),
+            Some(("A".into(), "s".into()))
+        );
+        // A data row too short for the header's columns is a refusal, not half.
+        assert_eq!(
+            parse_access_key_csv("Access key ID,Secret access key\nOnlyOne\n"),
+            None
+        );
+    }
+
+    #[test]
+    fn an_identity_payload_is_read_defensively() {
+        let id = parse_identity_json(
+            r#"{"UserId":"A","Account":" 123 ","Arn":" arn:aws:iam::123:user/x ","Extra":1}"#,
+        )
+        .unwrap();
+        assert_eq!(id.account, "123", "values are trimmed");
+        assert_eq!(id.arn, "arn:aws:iam::123:user/x");
+        for bad in [
+            "[]",
+            "null",
+            r#"{"Account":1,"Arn":"a"}"#,
+            r#"{"Account":"1","Arn":2}"#,
+        ] {
+            assert_eq!(parse_identity_json(bad), None, "{bad}");
+        }
+    }
 }
