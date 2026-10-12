@@ -1,5 +1,5 @@
 use super::graph::closure;
-use super::patch::value_hash;
+use super::patch::{parse_list_record, value_hash};
 use super::*;
 use crate::audio_pool::load_pool;
 
@@ -764,4 +764,35 @@ fn a_resolve_keeps_the_release_record_and_drops_what_left_the_tree() {
     cleared.insert("common".to_string(), String::new());
     set_release_versions(&assets, &cleared).unwrap();
     assert!(read_marker(&assets).versions.is_empty());
+}
+
+#[test]
+fn a_list_record_is_read_only_when_it_is_well_formed() {
+    assert_eq!(parse_list_record("3:abc"), Some((3, "abc")));
+    assert_eq!(parse_list_record("0:"), Some((0, "")));
+    assert_eq!(
+        parse_list_record("3:abc:def"),
+        Some((3, "abc:def")),
+        "the count is before the first colon; the rest is the hash"
+    );
+
+    for bad in [
+        "", "3", "abc:def", ":abc", "-1:abc", "1.5:abc", " 3:abc", "3 :abc",
+    ] {
+        assert_eq!(parse_list_record(bad), None, "{bad:?}");
+    }
+}
+
+#[test]
+fn a_list_record_refuses_an_overflowing_count_and_keeps_the_rest_of_the_hash() {
+    assert_eq!(parse_list_record("1::"), Some((1, ":")));
+    let top = usize::MAX.to_string();
+    assert_eq!(
+        parse_list_record(&format!("{top}:h")),
+        Some((usize::MAX, "h")),
+        "the top of usize fits"
+    );
+    let over = (usize::MAX as u128 + 1).to_string();
+    assert_eq!(parse_list_record(&format!("{over}:h")), None);
+    assert_eq!(parse_list_record("١:a"), None, "only ASCII digits count");
 }

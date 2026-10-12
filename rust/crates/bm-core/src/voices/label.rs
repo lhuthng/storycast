@@ -246,4 +246,48 @@ mod tests {
         assert_eq!(clone.key, "");
         assert!(clone.enrolled);
     }
+
+    #[test]
+    fn a_voice_name_is_read_from_any_separator_shape() {
+        assert_eq!(voice_name("Thái Sơn"), "Thái Sơn");
+        assert_eq!(voice_name("  spaced  "), "spaced", "trimmed");
+        // Both dash characters, and the first one wins.
+        assert_eq!(voice_name("Thái Sơn — Nam · Kể chuyện"), "Thái Sơn");
+        assert_eq!(voice_name("Thái Sơn – Nam"), "Thái Sơn");
+        assert_eq!(voice_name("A—B—C"), "A");
+        assert_eq!(
+            voice_name("Suneo - Nam"),
+            "Suneo",
+            "the plain-hyphen fallback"
+        );
+        assert_eq!(
+            voice_name("Suneo-Nam"),
+            "Suneo-Nam",
+            "a hyphen with no spaces is part of the name"
+        );
+        // A label that is only a separator has an empty name, never a panic.
+        assert_eq!(voice_name("—"), "");
+        assert_eq!(voice_name("— Nam · Trung"), "");
+        assert_eq!(voice_name(""), "");
+    }
+
+    #[test]
+    fn an_em_dash_is_searched_before_an_en_dash_wherever_each_sits() {
+        // The loop tries the em-dash first, so an earlier en-dash is not the
+        // seam — the em-dash decides regardless of position.
+        assert_eq!(voice_name("A–B—C"), "A–B");
+        assert_eq!(voice_name("A—B–C"), "A");
+        assert_eq!(
+            voice_name("A · B"),
+            "A · B",
+            "a middle dot is not a separator"
+        );
+        assert_eq!(voice_name("A  -  B"), "A", "the spaced hyphen trims");
+        assert_eq!(
+            voice_name("- A"),
+            "- A",
+            "an unspaced hyphen is part of the name"
+        );
+        assert_eq!(voice_name("A - "), "A");
+    }
 }

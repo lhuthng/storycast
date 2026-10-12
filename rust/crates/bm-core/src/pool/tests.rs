@@ -63,6 +63,55 @@ fn filename_tags_drop_the_take_number() {
 }
 
 #[test]
+fn filename_tags_survive_a_rough_filename() {
+    // Every separator the filename may use, and a name that is all separators.
+    assert!(parse_sample_tags("").is_empty());
+    assert!(parse_sample_tags("-_-_-  ").is_empty());
+    assert_eq!(
+        parse_sample_tags("  young  female  "),
+        vec!["young", "female"],
+        "runs of separators collapse and never yield an empty tag"
+    );
+    assert_eq!(
+        parse_sample_tags("a a a"),
+        vec!["a"],
+        "a repeated token is one tag"
+    );
+    assert_eq!(
+        parse_sample_tags("YOUNG-Female"),
+        vec!["young", "female"],
+        "tags fold to lowercase"
+    );
+    // A token with a digit in it is a tag; only an all-digit take number is not.
+    assert_eq!(parse_sample_tags("007a"), vec!["007a"]);
+    assert!(parse_sample_tags("123-456_789").is_empty());
+    assert_eq!(
+        parse_sample_tags("café-đêm"),
+        vec!["café", "đêm"],
+        "a non-ASCII stem is a tag, not a crash"
+    );
+}
+
+#[test]
+fn filename_tags_split_on_ascii_separators_only() {
+    // A tab or a non-breaking space is whitespace to a reader, not to the stem
+    // splitter: only `-`, `_` and ` ` divide a tag list.
+    assert_eq!(parse_sample_tags("young\tfemale"), vec!["young\tfemale"]);
+    assert_eq!(parse_sample_tags("a\u{a0}b"), vec!["a\u{a0}b"]);
+    assert!(parse_sample_tags("\t \t").is_empty());
+    assert_eq!(parse_sample_tags("Player-1"), vec!["player"]);
+    assert_eq!(
+        parse_sample_tags("a--b"),
+        vec!["a", "b"],
+        "empty pieces drop"
+    );
+    assert_eq!(parse_sample_tags("a-1-b"), vec!["a", "b"], "the take drops");
+    assert!(parse_sample_tags("12-34-56").is_empty());
+    assert_eq!(parse_sample_tags("ABCDEF"), vec!["abcdef"]);
+    assert_eq!(parse_sample_tags("café_ĐÊM"), vec!["café", "đêm"]);
+}
+
+#[test]
 fn young_male_cannot_take_a_young_female_sample() {
     let sample = vec!["young".to_string(), "female".to_string()];
     let has = |tags: &[&str]| tags.iter().map(|s| s.to_string()).collect::<Vec<_>>();
