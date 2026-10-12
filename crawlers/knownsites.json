@@ -25,9 +25,25 @@
       "caveat": null
     },
     {
+      "host": "wetruyen.com",
+      "script": "known/wetruyen.lua",
+      "params": [],
+      "url_template": "https://wetruyen.com/{book}/chuong-{n}.html",
+      "max_fetches": 64,
+      "max_seconds": 180,
+      "shape": "Templatable `{book}/chuong-{n}.html`, truyenfull-style `#chapter-c` prose with `<br>` separators; no index walk, a 404 past the last chapter ends the range.",
+      "language": "Vietnamese",
+      "caveat": null
+    },
+    {
       "host": "readnovelfull.com",
       "script": "known/readnovelfull.lua",
-      "params": [["book", "https://readnovelfull.com/the-sword-god-of-the-universe.html"]],
+      "params": [
+        [
+          "book",
+          "https://readnovelfull.com/the-sword-god-of-the-universe.html"
+        ]
+      ],
       "url_template": "",
       "max_fetches": 400,
       "max_seconds": 900,
@@ -38,7 +54,12 @@
     {
       "host": "webnovel.com",
       "script": "known/webnovel.lua",
-      "params": [["book", "https://www.webnovel.com/book/tu-chan-lieu-thien-quan_13320161405417805"]],
+      "params": [
+        [
+          "book",
+          "https://www.webnovel.com/book/tu-chan-lieu-thien-quan_13320161405417805"
+        ]
+      ],
       "url_template": "",
       "max_fetches": 128,
       "max_seconds": 300,
