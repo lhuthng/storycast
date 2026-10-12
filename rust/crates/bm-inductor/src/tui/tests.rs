@@ -5,8 +5,8 @@ use super::audition::AuditionLine;
 use super::draw::draw;
 use super::input::command::{busy_summary, command_key, do_command, split_args, Command, WORDS};
 use super::input::runconfig::{
-    parse_mix_config, parse_render_batch, parse_run_config, run_preview, save_app_setting,
-    save_render_batch, save_run_config,
+    parse_mix_config, parse_range, parse_render_batch, parse_run_config, run_preview,
+    save_app_setting, save_render_batch, save_run_config,
 };
 use super::input::submit::submit_text;
 use super::input::{handle_key, op_key, urlencode};
@@ -487,6 +487,7 @@ mod hints;
 mod jobs;
 mod llm;
 mod machines;
+mod malformed_input;
 mod panes;
 mod prompts;
 mod responsive;
