@@ -36,10 +36,26 @@ pub(crate) async fn cmd_provision(
     force: bool,
     release_repo: Option<String>,
 ) -> anyhow::Result<()> {
-    // The blocking SSH/rsync flow runs off the async runtime; registration
     let mut m = Machine::new(&addr, &user, port, key.clone(), "worker");
     m.tts_url = Some("http://127.0.0.1:8818".into());
     carry_task_policy(&mut m, &layout);
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()?;
+    // The run rsyncs the box under itself, so the scheduler must not hand it
+    // work while it happens: this stamp is what withholds it (a beating worker
+    // no longer lifts `provisioning`), and the registration below ends it.
+    // Best effort — no live inductor means nothing is dispatching.
+    let _ = client
+        .post(format!("http://127.0.0.1:{api_port}/api/machines/state"))
+        .json(&serde_json::json!({
+            "addr": addr,
+            "state": bm_proto::MachineState::Provisioning.as_str(),
+            "note": "provisioning (cli)",
+        }))
+        .send()
+        .await;
+    // The blocking SSH/rsync flow runs off the async runtime; registration
     let out = tokio::task::spawn_blocking({
         let (layout, addr, user) = (layout.clone(), addr.clone(), user.clone());
         move || provision_machine(&layout, &addr, &user, port, key, force, None, release_repo)
@@ -53,9 +69,6 @@ pub(crate) async fn cmd_provision(
     }
     // Register the machine so the scheduler sees it: prefer the live API,
     let api = format!("http://127.0.0.1:{api_port}/api/machines");
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(10))
-        .build()?;
     match client.post(&api).json(&m).send().await {
         Ok(r) if r.status().is_success() => println!("[{}] registered with live inductor", addr),
         _ => {

@@ -5988,6 +5988,40 @@ fn a_parked_box_outranks_even_the_state_that_has_no_opinion() {
 }
 
 #[test]
+fn a_beat_does_not_lift_a_box_that_is_being_provisioned() {
+    // The window a provision runs in: the box keeps beating with the worker it
+    // already had, and anything handed to it here is a task it is about to
+    // fail (its sidecar is being replaced). The operator reads those failures
+    // as "a lot of errors" about the one box they are already fixing.
+    let (_d, mut inner) = fixture();
+    offer_fixture(&mut inner);
+    two_ready_stages(&mut inner);
+    let beat = beat_with_load("w1", "127.0.0.1", None);
+    inner
+        .machines
+        .get_mut("127.0.0.1")
+        .unwrap()
+        .set_state(MachineState::Provisioning);
+    inner.observe(&beat);
+    assert_eq!(
+        inner.machines["127.0.0.1"].state,
+        MachineState::Provisioning,
+        "the hold outlives the beat"
+    );
+    assert!(inner.offer("w1").is_none(), "and the offer still withholds");
+    // Every other state is still refuted by a beating worker: this is a hold on
+    // a provision in flight, not a state the operator cannot clear.
+    inner
+        .machines
+        .get_mut("127.0.0.1")
+        .unwrap()
+        .set_state(MachineState::Error);
+    inner.observe(&beat);
+    assert_eq!(inner.machines["127.0.0.1"].state, MachineState::Online);
+    assert!(inner.offer("w1").is_some(), "and it takes work again");
+}
+
+#[test]
 fn offer_still_serves_a_machine_with_no_opinion_formed() {
     // `Unknown` is not "not ready", it is "never contacted": a hand-written
     let (_d, mut inner) = fixture();

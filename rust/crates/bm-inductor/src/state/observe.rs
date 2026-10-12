@@ -62,7 +62,11 @@ impl Inner {
 
         if let Some(m) = self.machines.get_mut(&addr) {
             m.last_seen = now_secs();
-            if m.state != MachineState::Online {
+            // `provisioning` is a hold, not a verdict about the box: the worker
+            // still beating is the **old** one, mid-push, and lifting the state
+            // here is what hands a box being provisioned the next task it is
+            // about to fail. Only the provision that stamped it ends it.
+            if m.state != MachineState::Online && m.state != MachineState::Provisioning {
                 // Through `set_state` so the stamp moves with it: a box that
                 m.set_state(MachineState::Online);
                 persist = true;
