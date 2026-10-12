@@ -91,11 +91,13 @@ echo "TTS-RUNTIME-OK ($(LD_LIBRARY_PATH="$D" ./bm-tts --version))"
     /// Put the baked `models/` directory on the box: from the release when one
     pub fn install_models(
         &self,
-        engine: &str,
-        src: &Path,
+        layout: &Layout,
         release: Option<&crate::artifact::ModelsRelease>,
         live: Option<&tokio::sync::mpsc::UnboundedSender<String>>,
     ) -> Result<String> {
+        let engine = layout.engine.as_str();
+        let src = layout.models_dir();
+        let src = &src;
         let rel = engine_rel(engine);
         if !src.is_dir() {
             anyhow::bail!(
@@ -110,6 +112,16 @@ echo "TTS-RUNTIME-OK ($(LD_LIBRARY_PATH="$D" ./bm-tts --version))"
                     let sums = model_checksums(src);
                     if !sums.is_empty() {
                         self.write_model_checksums(engine, &sums)?;
+                    }
+                    // A release **is the bake**, and the bake has no voice
+                    // store in it (see the manifest's DERIVED list): without
+                    // this push a box that took its weights from the release
+                    // has nothing at `models/voices.json`, and its sidecar
+                    // exits at startup with `--voices does not exist`.
+                    let store = baked_store_files(layout);
+                    if !store.is_empty() {
+                        self.rsync_push_files(&layout.root, &store)?;
+                        return Ok(format!("{line} + voice store ({} file(s))", store.len()));
                     }
                     return Ok(line);
                 }
@@ -349,6 +361,30 @@ echo stopped"#,
         ));
         Ok(log)
     }
+}
+
+/// The whole derived store, checkout-relative for `rsync_push_files`: the
+/// store file plus every clip it names on a clip-store engine. A bake leaves
+/// the store out on purpose, so this is what a release push has to add.
+pub(crate) fn baked_store_files(layout: &Layout) -> Vec<String> {
+    let names: Vec<String> = std::fs::read_to_string(layout.tts_voices())
+        .ok()
+        .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+        .and_then(|doc| {
+            doc.get("presets")
+                .and_then(|p| p.as_object())
+                .map(|p| p.keys().cloned().collect())
+        })
+        .unwrap_or_default();
+    let mut files: Vec<String> = Vec::new();
+    for name in names {
+        for file in baked_voice_files(layout, &name) {
+            if !files.contains(&file) {
+                files.push(file);
+            }
+        }
+    }
+    files
 }
 
 /// The baked files one voice owns, checkout-relative for `rsync_push_files`:

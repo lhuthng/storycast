@@ -40,6 +40,63 @@ fn voice_sync_lists_the_store_and_the_clips_file() {
 }
 
 #[test]
+fn the_derived_store_is_the_store_plus_every_clip_it_names() {
+    // A release **is** the bake, and the bake leaves `voices.json` out on
+    // purpose (its manifest's DERIVED list), so the release push adds exactly
+    // this: the store, plus one clip per voice on a clip-store engine. Nothing
+    // more (the weights came from the release), nothing less (a box with no
+    // store has a sidecar that exits at startup).
+    let dir = std::env::temp_dir().join(format!("bm-store-files-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let models = dir.join("engines/pocket/models");
+    std::fs::create_dir_all(models.join("clones")).unwrap();
+    std::fs::write(
+        models.join("voices.json"),
+        r#"{"presets":{"A":{"file":"clones/a.wav"},"B":{"file":"clones/b.wav"}}}"#,
+    )
+    .unwrap();
+    for clip in ["a.wav", "b.wav"] {
+        std::fs::write(models.join("clones").join(clip), b"RIFF").unwrap();
+    }
+    let layout = crate::Layout {
+        root: dir.clone(),
+        work: dir.clone(),
+        adapter: "default".into(),
+        engine: "pocket".into(),
+    };
+    let mut files = super::models::baked_store_files(&layout);
+    files.sort();
+    assert_eq!(
+        files,
+        vec![
+            "engines/pocket/models/clones/a.wav".to_string(),
+            "engines/pocket/models/clones/b.wav".to_string(),
+            "engines/pocket/models/voices.json".to_string(),
+        ],
+        "store plus one clip per voice: {files:?}"
+    );
+    // A preset-store engine carries no clips into the store: the file alone.
+    let mut preset = layout.clone();
+    preset.engine = "vieneu".into();
+    let models = dir.join("engines/vieneu/models");
+    std::fs::create_dir_all(&models).unwrap();
+    std::fs::write(
+        models.join("voices.json"),
+        r#"{"presets":{"A":{"file":"clones/a.wav"}}}"#,
+    )
+    .unwrap();
+    assert_eq!(
+        super::models::baked_store_files(&preset),
+        vec!["engines/vieneu/models/voices.json".to_string()]
+    );
+    // And a host with no store has nothing to give: `:prov` pushes the bake.
+    let mut nowhere = layout.clone();
+    nowhere.engine = "nowhere".into();
+    assert!(super::models::baked_store_files(&nowhere).is_empty());
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
 fn live_log_streams_a_copy_and_keeps_the_lines() {
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     let mut log = LiveLog::new(Some(tx));

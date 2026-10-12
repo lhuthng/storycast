@@ -43,7 +43,22 @@ pub fn provision(
     let repo = release_repo
         .map(str::to_string)
         .unwrap_or_else(|| crate::config::Settings::load(&layout.settings()).models_release);
-    let release = crate::artifact::ModelsRelease::resolve(&layout.models_dir(), &repo);
+    // A URL resolves against the R2 preset bucket; `owner/name` keeps the
+    // GitHub path. Either way a miss falls back to pushing the directory.
+    let release = if crate::artifact::is_preset_url(repo.trim()) {
+        match crate::artifact::ModelsRelease::for_r2(repo.trim(), &layout.engine) {
+            Ok(r) => Some(r),
+            Err(e) => {
+                log.push(format!(
+                    "[{}] preset bucket unreachable ({e:#}), the weights travel over the push",
+                    m.id
+                ));
+                None
+            }
+        }
+    } else {
+        crate::artifact::ModelsRelease::resolve(&layout.models_dir(), &repo)
+    };
     if repo.trim().is_empty() {
         log.push(format!(
             "[{}] no models release configured, the weights travel over the push",
@@ -56,6 +71,23 @@ pub fn provision(
     // A released pack is the **checkout's** profile: its tag, its manifest and
     let pack = if layout.owns_assets() {
         None
+    } else if crate::artifact::is_preset_url(settings.packs_release.trim()) {
+        // A URL floats on the pack's latest.json rather than the checkout
+        // pointer the GitHub path pins to; the pointer still names the pack.
+        let name = crate::profile::in_force(layout)
+            .ok()
+            .map(|b| b.pack.name)
+            .unwrap_or_default();
+        match crate::artifact::PackRelease::for_r2(settings.packs_release.trim(), &name) {
+            Ok(r) => Some(r),
+            Err(e) => {
+                log.push(format!(
+                    "[{}] preset bucket unreachable ({e:#}), so assets/ travels over the push",
+                    m.id
+                ));
+                None
+            }
+        }
     } else {
         crate::artifact::PackRelease::resolve(&layout.root, &settings.packs_release)
     };
@@ -190,12 +222,7 @@ pub fn provision(
             log.push(format!("[{}] models in sync (cache match)", m.id));
         } else {
             log.push(format!("[{}] pushing models/voice store", m.id));
-            match ssh.install_models(
-                &layout.engine,
-                &layout.models_dir(),
-                release.as_ref(),
-                live.as_ref(),
-            ) {
+            match ssh.install_models(layout, release.as_ref(), live.as_ref()) {
                 Ok(v) => {
                     models_pushed = true;
                     log.push(format!("[{}] {v}", m.id));
@@ -258,12 +285,7 @@ pub fn provision(
             log.push(format!("[{}] models in sync (cache match)", m.id));
         } else {
             log.push(format!("[{}] pushing models (~668 MB)", m.id));
-            match ssh.install_models(
-                &layout.engine,
-                &layout.models_dir(),
-                release.as_ref(),
-                live.as_ref(),
-            ) {
+            match ssh.install_models(layout, release.as_ref(), live.as_ref()) {
                 Ok(v) => {
                     models_pushed = true;
                     log.push(format!("[{}] {v}", m.id));
