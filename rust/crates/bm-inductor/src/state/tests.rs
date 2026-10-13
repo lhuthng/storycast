@@ -4,6 +4,8 @@ use bm_core::config::Settings;
 use bm_proto::{now_secs, Complete, Machine, MachineState, Stage, Task, TaskState};
 use serde_json::Value;
 
+mod perf;
+
 fn fixture() -> (tempfile::TempDir, Inner) {
     let d = tempfile::tempdir().unwrap();
     let layout = Layout::new(d.path());
