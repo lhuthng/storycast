@@ -46,7 +46,7 @@ GENRE_RULES = ("battle", "fight", "duel", "clash", "blade", "ambush", "war")
 MUSIC_LICENCE = "background music (music/)"
 
 
-# --- raw-text scanners, the ones rust/crates/bm-core/src/audio_pool.rs has ---
+# --- raw-text scanners, the ones backend/crates/bm-core/src/audio_pool.rs has ---
 #
 # Deliberately scanners and not parsers: the point is to recover the raw text of
 # a value, which a parsed tree has already thrown away.

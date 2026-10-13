@@ -392,7 +392,7 @@ def main():
 
     # ---- the resolved tree is now stale on purpose ------------------------------------
     print("\nassets/_extends/ changed; the live assets/ tree is now stale:")
-    print("  ./rust/target/release/bm-inductor asset resolve --dry-run")
+    print("  ./backend/target/release/bm-inductor asset resolve --dry-run")
 
 
 if __name__ == "__main__":

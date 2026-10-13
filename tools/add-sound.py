@@ -51,8 +51,8 @@ stale until the next resolve, and the *release* is what a box sees: re-cut it
 and the next provision diffs the box's receipt and sends only the delta — the
 receipt itself is never edited by hand.
 
-    ./rust/target/release/bm-inductor asset resolve --dry-run
-    ./rust/target/release/bm-inductor profile manifest <pack> --piece pack --dep
+    ./backend/target/release/bm-inductor asset resolve --dry-run
+    ./backend/target/release/bm-inductor profile manifest <pack> --piece pack --dep
 """
 
 import json
@@ -582,8 +582,8 @@ def main():
         subprocess.run([sys.executable, str(inspector), str(pack_dir)])
 
     print("\nnext, so a box ever hears it:")
-    print("  ./rust/target/release/bm-inductor asset resolve --dry-run")
-    print(f"  ./rust/target/release/bm-inductor profile manifest {pack} --piece pack --dep")
+    print("  ./backend/target/release/bm-inductor asset resolve --dry-run")
+    print(f"  ./backend/target/release/bm-inductor profile manifest {pack} --piece pack --dep")
     print("  the next provision diffs the box's receipt and pushes only these files")
 
 

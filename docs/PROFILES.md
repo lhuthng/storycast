@@ -516,7 +516,7 @@ a pack is. Neither tree may share a directory with the workspace's own: a
 book's `work/crawl/` is its own crawlers, and `profile load` replaces the
 adapter wholesale. The text is the
 artifact: a prompt edit becomes visible when a release is cut, and the suite
-builds its own stubs under `rust/fixtures/`, so nothing here is needed to test.
+builds its own stubs under `backend/fixtures/`, so nothing here is needed to test.
 
 Two things the `xianxia-en-US` pair settles that the Vietnamese pair never had
 to:

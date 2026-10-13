@@ -10,7 +10,7 @@ import pathlib
 import sys
 
 root = pathlib.Path(
-    sys.argv[1] if len(sys.argv) > 1 else "rust/vendor/sea-g2p"
+    sys.argv[1] if len(sys.argv) > 1 else "backend/vendor/sea-g2p"
 ).resolve()
 if not (root / "Cargo.toml").is_file():
     sys.exit(f"not a crate: {root}")

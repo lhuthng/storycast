@@ -8,7 +8,7 @@
 -- the pipeline's hardcoded Rust crawler meant moving the site's rules here, and
 -- this is where they landed.
 --
--- The pipeline's old URL crawl *was* a Rust function. `rust/fixtures/crawl/`
+-- The pipeline's old URL crawl *was* a Rust function. `backend/fixtures/crawl/`
 -- holds the pages it was tested against and the exact bytes it produced for
 -- each, and `script_tests.rs` asserts this script still reproduces every one of
 -- them byte for byte. That is what makes the migration an identity rather than

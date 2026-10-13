@@ -92,10 +92,10 @@ bundle=""
 # build is the fallback, then `cargo run`, and `BM_INDUCTOR` overrides all three.
 inductor() {
   if [ -n "${BM_INDUCTOR:-}" ]; then "$BM_INDUCTOR" --root "$root" "$@"; return; fi
-  for b in "$root/rust/target/debug/bm-inductor" "$root/rust/target/release/bm-inductor"; do
+  for b in "$root/backend/target/debug/bm-inductor" "$root/backend/target/release/bm-inductor"; do
     if [ -x "$b" ]; then "$b" --root "$root" "$@"; return; fi
   done
-  (cd "$root/rust" && cargo run --quiet -p bm-inductor -- --root "$root" "$@")
+  (cd "$root/backend" && cargo run --quiet -p bm-inductor -- --root "$root" "$@")
 }
 
 # The trees a release carries, relative to the checkout root — and therefore the

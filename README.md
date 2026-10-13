@@ -119,9 +119,9 @@ already working or optional until you need it.
 
 | In the repo | What it is |
 | --- | --- |
-| **`rust/`** (five crates) | Pipeline: scheduler, workers, TUI, provisioning, plus `bm-tts`, the local Vieneu TTS sidecar |
+| **`backend/`** (five crates) | Pipeline: scheduler, workers, TUI, provisioning, plus `bm-tts`, the local Vieneu TTS sidecar |
 | **`python/`** | Voice enrollment only (the old sidecar is retired; serving never needs Python) |
-| **`prompts/script.txt`** | The staging contract the automatic digest renders after speakers are fixed: text and TTS performance. Your main edit for another language or genre. Ships with the profile; the tracked copy is `rust/fixtures/profile/prompts/` |
+| **`prompts/script.txt`** | The staging contract the automatic digest renders after speakers are fixed: text and TTS performance. Your main edit for another language or genre. Ships with the profile; the tracked copy is `backend/fixtures/profile/prompts/` |
 | `prompts/analyze.txt` | Chapter-attribution template used by the automatic first pass; its legacy raw-chapter rendering remains the manual digest manager (`D`) path |
 | `prompts/sound.txt` | The chapter-level sound pass — the English `scene` place, the `music` token and the `sound_after`/`stop_after` seams — rendered once over every staged line. The single home of sound rules 8–10: the by-hand staging pass renders the same text inline |
 | `prompts/sound-cues.json` | Rule 10's cue phrases, in the source language, for the deterministic gate that refuses a chapter whose prose stages a sound and whose script places none |
@@ -238,7 +238,7 @@ You need these before anything runs:
 
 | Dependency | Why | How to check |
 | --- | --- | --- |
-| **Rust** 1.88 or newer | every program in `rust/` | `cargo --version` |
+| **Rust** 1.88 or newer | every program in `backend/` | `cargo --version` |
 | **Python 3** | once, to prepare the voices and to record your own | `python3 --version` |
 | **ffmpeg** | merge: joins the segments and writes the mp3 | `ffmpeg -version` |
 | **sh**, **ssh**, **rsync** | provisioning, and the tunnel back from a box | `command -v sh ssh rsync` |
@@ -636,7 +636,7 @@ at top).
 
 | Path | What it is |
 | --- | --- |
-| `prompts/script.txt`, `prompts/analyze.txt`, `prompts/sound.txt`, `prompts/sound-cues.json` | **Digest prompt templates + the sound gate's cue list.** Profile tree (git-ignored; tracked copy in `rust/fixtures/profile/prompts/`). The automatic digest renders `analyze.txt` for attribution, `script.txt` for staging, then `sound.txt` once for the whole chapter's sound; the manual manager sounds inline from the same `sound.txt`. |
+| `prompts/script.txt`, `prompts/analyze.txt`, `prompts/sound.txt`, `prompts/sound-cues.json` | **Digest prompt templates + the sound gate's cue list.** Profile tree (git-ignored; tracked copy in `backend/fixtures/profile/prompts/`). The automatic digest renders `analyze.txt` for attribution, `script.txt` for staging, then `sound.txt` once for the whole chapter's sound; the manual manager sounds inline from the same `sound.txt`. |
 | `assets/*` | Clips, pools, scene map, licenses (tracked) |
 | `voices.default.json` | Catalogue voices (tracked) |
 | `output/Ch.N - Title.mp3` | **Finished chapters** |

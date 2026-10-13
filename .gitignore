@@ -6,7 +6,7 @@ __pycache__/
 
 # Live profile tree (assets/ + prompts/), workspaces, and the profile download
 # cache: machine-local state. Shipped profiles live as GitHub releases
-# (`tools/profile.sh fetch <name>`); only the fixture in rust/fixtures/ is
+# (`tools/profile.sh fetch <name>`); only the fixture in backend/fixtures/ is
 # tracked, so the suite never needs the network.
 #
 # The crawlers are no longer under `assets/` and no longer an adapter's: they are
@@ -25,7 +25,7 @@ __pycache__/
 # analyze/script prompts. Machine-local for the same reason the live `prompts/`
 # tree is: the text is the artifact, shipped as a release bundle, and cutting a
 # release is where a prompt edit becomes visible. The suite builds its own stubs
-# under rust/fixtures/, so nothing here is needed to test.
+# under backend/fixtures/, so nothing here is needed to test.
 #
 # Adapters ship **no crawlers** — those are the global `crawlers/` tree below.
 #
@@ -74,18 +74,18 @@ __pycache__/
 .DS_Store
 
 # Rust build output
-rust/target/
+backend/target/
 **/target/
 
 # Release staging: what the `Stage the binaries` step of .github/workflows
 # collects before it archives. Only ever produced by running those steps.
-rust/dist/
+backend/dist/
 
 # The sea-g2p phoneme dictionary: 60 MB, and byte-identical to upstream at the
-# pinned commit (hash in rust/vendor/sea-g2p/VENDORED.md). It is a runtime
+# pinned commit (hash in backend/vendor/sea-g2p/VENDORED.md). It is a runtime
 # artifact the bake step fetches, not source — committing it would put 60 MB of
 # binary in every clone for a file that is verifiable by hash instead.
-/rust/vendor/sea-g2p/python/
+/backend/vendor/sea-g2p/python/
 
 # The engine trees. `engines/<name>/` holds each engine's own files — its
 # `models/` weights (the dictionary included), its `bm-tts` binary, its runtime

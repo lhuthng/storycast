@@ -5,9 +5,9 @@ publishes: the merged `output/Ch.N - Title.mp3` files and their
 `Ch.N - Title.cues.json` sidecars.
 
 It is an **out-of-tree plugin**. It is not a member of the Rust workspace under
-`rust/`, nothing in the pipeline depends on it, and it depends on nothing in the
+`backend/`, nothing in the pipeline depends on it, and it depends on nothing in the
 pipeline — it reads files and writes a video. `cargo build --workspace` and
-`make test` in `rust/` do not build, test or lint it. It has its own workspace
+`make test` in `backend/` do not build, test or lint it. It has its own workspace
 root here, its own `Cargo.lock` and its own `target/`.
 
 It replaced `tools/video.py`, with the same template

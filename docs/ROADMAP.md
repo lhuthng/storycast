@@ -80,9 +80,9 @@ endpoint and the key's placement, by three fixture-server tests in
 `digest/llm.rs` plus two wiring tests in `config.rs` (no API keys, no network:
 loopback only).
 
-Files: `rust/crates/bm-core/src/config.rs`,
-`rust/crates/bm-core/src/digest/llm.rs`, `rust/crates/bm-proto/src/lib.rs`,
-`rust/crates/bm-inductor/src/main.rs`, `llm.default.json`.
+Files: `backend/crates/bm-core/src/config.rs`,
+`backend/crates/bm-core/src/digest/llm.rs`, `backend/crates/bm-proto/src/lib.rs`,
+`backend/crates/bm-inductor/src/main.rs`, `llm.default.json`.
 
 ## 2. AWS: workers on EC2 (`done`)
 

@@ -4,7 +4,7 @@
 // engine is a working example rather than a claim: same contract, same host
 // functions, same output. Point `crawl.script` at this file to run the Storya
 // crawl on QuickJS instead of Lua — the parity test asserts both engines
-// reproduce the bytes in `rust/fixtures/crawl/` exactly.
+// reproduce the bytes in `backend/fixtures/crawl/` exactly.
 //
 // Like the Lua crawler, everything site-specific is in `SITE` below: the host
 // knows nothing about Storya. `crawl` may be `async`, but every host function

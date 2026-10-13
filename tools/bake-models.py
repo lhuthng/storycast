@@ -66,7 +66,7 @@ CODEC_FILES = [
 
 # Not from HF: the G2P dictionary and the voice roster.
 DICT = pathlib.Path(
-    "rust/vendor/sea-g2p/python/sea_g2p/sea_g2p.bin"
+    "backend/vendor/sea-g2p/python/sea_g2p/sea_g2p.bin"
 )
 DICT_FALLBACKS = [
     pathlib.Path(".venv/lib/python3.12/site-packages/sea_g2p/sea_g2p.bin"),
@@ -167,7 +167,7 @@ def main() -> int:
     if dict_src is None:
         sys.exit(
             "no sea_g2p.bin found. Install sea-g2p==0.9.1, or fetch it from the "
-            "pinned upstream commit (hash in rust/vendor/sea-g2p/VENDORED.md)."
+            "pinned upstream commit (hash in backend/vendor/sea-g2p/VENDORED.md)."
         )
     plan.append((dict_src, "sea_g2p.bin"))
     plan.append((ROOT / STORE, "voices.json"))

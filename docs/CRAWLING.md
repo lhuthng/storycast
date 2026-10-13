@@ -183,7 +183,7 @@ whole `crawl` block keep the bundled scripted crawler, byte-identically: that
 migration is the identity.
 
 That the port is a *port* rather than a rewrite is checked, not claimed.
-`rust/fixtures/crawl/` keeps the pages the Rust extractor was tested against
+`backend/fixtures/crawl/` keeps the pages the Rust extractor was tested against
 beside its byte-exact output for each, and a test runs both bundled crawlers
 over all of them and demands the same bytes back.
 
@@ -434,7 +434,7 @@ Then tune by evidence, not by reading code: run it, and let the outputs argue.
   chapter list row (`34. Chương 34: …`) sits above the real `<h1>`, drop the
   numbered copy in the script, the host's boundary drops the common shapes, but
   your page may have a fifth.
-* Save the wrong page beside `rust/fixtures/crawl/` and diff: the failure is a
+* Save the wrong page beside `backend/fixtures/crawl/` and diff: the failure is a
   selector, not a mystery.Put a site nobody has written down yet in the workspace,
 `workspaces/<name>/crawl/mysite.lua`, not in the global `crawlers/` tree: it is
 then per-book, survives profile switches, syncs to every worker with the next
@@ -470,7 +470,7 @@ says ignored; `git check-ignore crawlers/known/storya.lua` says nothing.)
 
 The last three templates are not illustrations. Each is written against a page
 captured from the live site, and each is tested against that capture in
-`rust/fixtures/crawl/`, `truyencom-chapter.{html,txt}`,
+`backend/fixtures/crawl/`, `truyencom-chapter.{html,txt}`,
 `readnovelfull-chapter.{html,txt}`, `webnovel-chapter.{html,txt}`, plus the
 listing pages, so "the template works" is checked against a real page rather
 than against the author's idea of one. `cloudflare-403.html` is a real
@@ -772,7 +772,7 @@ here costs an afternoon.
 ### If the URL is one we already have a crawler for
 
 `check` also looks the host up in the **known-sites registry**
-(`bm_core::crawl::known`, `rust/crates/bm-core/src/crawl/known.rs`) and prints
+(`bm_core::crawl::known`, `backend/crates/bm-core/src/crawl/known.rs`) and prints
 the crawler written for it, with a settings block ready to paste:
 
 ```
@@ -836,7 +836,7 @@ The registry is a list, not a resolver: it never decides anything, and a site
 that is missing from it is not a site that cannot be crawled, it is a site
 nobody has written down yet. Add one with `check` on a real chapter URL, a
 template copied from `truyencom.lua`, and a captured page in
-`rust/fixtures/crawl/`.
+`backend/fixtures/crawl/`.
 
 ### Then the in-app probe
 
@@ -865,7 +865,7 @@ Debug from a shell the same way: `bm-agent run --root <root> --stage crawl
 --chapter 34` runs one chapter standalone and prints the outcome, the verdict,
 and every `log()` line the script wrote on the way.
 
-`rust/fixtures/crawl/` is the other half of that: the pages the bundled
+`backend/fixtures/crawl/` is the other half of that: the pages the bundled
 Storya crawler is tested against, and the bytes it must produce for each. Save
 the page that came back wrong beside them, run the crawler over it, and the
 difference is a selector rather than a mystery.

@@ -26,9 +26,9 @@
 #   KEY        API key for `digest-assistant` (required there; never written to .env)
 #   MODEL      the model to answer with  (required there)
 
-RUST_DIR := rust
-BIN := $(RUST_DIR)/target/debug
-RELEASE_BIN := $(RUST_DIR)/target/release
+BACKEND_DIR := backend
+BIN := $(BACKEND_DIR)/target/debug
+RELEASE_BIN := $(BACKEND_DIR)/target/release
 # `cargo` is not always on PATH — a rustup shim lives in ~/.cargo/bin, which a
 # non-login shell may not have. Fall back to it rather than failing obscurely.
 CARGO := $(shell command -v cargo 2>/dev/null || echo $(HOME)/.cargo/bin/cargo)
@@ -54,7 +54,7 @@ TASK_PORT ?= 8917
 .PHONY: build build-inductor build-inductor-release tui tui-release serve agent digest-assistant provision link test
 
 build:
-	$(CARGO) build --workspace --manifest-path $(RUST_DIR)/Cargo.toml
+	$(CARGO) build --workspace --manifest-path $(BACKEND_DIR)/Cargo.toml
 
 # The dashboard and the inductor never touch the TTS sidecar binary, so
 # they must not wait on it: `bm-tts` links C++ system libraries, and a
@@ -62,7 +62,7 @@ build:
 # Rust crates are fine. Building only what these commands run keeps
 # `make tui` working through it.
 build-inductor:
-	$(CARGO) build -p bm-inductor -p bm-agent --manifest-path $(RUST_DIR)/Cargo.toml
+	$(CARGO) build -p bm-inductor -p bm-agent --manifest-path $(BACKEND_DIR)/Cargo.toml
 
 tui: build-inductor
 	$(BIN)/bm-inductor tui --api $(API)
@@ -71,7 +71,7 @@ tui: build-inductor
 # sidecar decodes an order of magnitude slower per step, so a machine that
 # both renders and merges must run release throughout, not just the TUI.
 build-inductor-release:
-	$(CARGO) build --release -p bm-inductor -p bm-agent --manifest-path $(RUST_DIR)/Cargo.toml
+	$(CARGO) build --release -p bm-inductor -p bm-agent --manifest-path $(BACKEND_DIR)/Cargo.toml
 
 tui-release: build-inductor-release
 	$(RELEASE_BIN)/bm-inductor tui --api $(API)
@@ -144,8 +144,8 @@ BOX ?= box-1
 KEY ?=
 
 test:
-	$(CARGO) test --workspace --manifest-path $(RUST_DIR)/Cargo.toml
-	$(CARGO) clippy --all-targets --manifest-path $(RUST_DIR)/Cargo.toml -- -D warnings
+	$(CARGO) test --workspace --manifest-path $(BACKEND_DIR)/Cargo.toml
+	$(CARGO) clippy --all-targets --manifest-path $(BACKEND_DIR)/Cargo.toml -- -D warnings
 
 # ── the TTS sidecar: its runtime, and its binary ────────────────────────────
 #
@@ -170,9 +170,9 @@ ORT_URL := https://github.com/microsoft/onnxruntime/releases/download/v$(ORT_VER
 # Absolute: `ort-sys` resolves this relative to the *crate* directory, not to
 # wherever make was invoked from, so a relative path fails with "Failed to read
 # contents of … (does it exist?)".
-ORT_DIR := $(CURDIR)/$(RUST_DIR)/target/ort-linux-x64
+ORT_DIR := $(CURDIR)/$(BACKEND_DIR)/target/ort-linux-x64
 TTS_TARGET := x86_64-unknown-linux-gnu
-TTS_BIN := $(RUST_DIR)/target/$(TTS_TARGET)/release/bm-tts
+TTS_BIN := $(BACKEND_DIR)/target/$(TTS_TARGET)/release/bm-tts
 
 # The sidecar's cargo features, from the active workspace's engine. `pocket` is
 # default-off in bm-tts, so a build without it produces a sidecar that boots,
@@ -214,6 +214,6 @@ tts: runtime
 	PATH="$(CARGO_BIN_DIR):$$PATH" ORT_LIB_LOCATION="$(ORT_DIR)" ORT_PREFER_DYNAMIC_LINK=1 \
 		$(CARGO) zigbuild --release --target $(TTS_TARGET) -p bm-tts --bin bm-tts \
 		$(TTS_FEATURES) \
-		--manifest-path $(RUST_DIR)/Cargo.toml
+		--manifest-path $(BACKEND_DIR)/Cargo.toml
 	@echo "  engine $(or $(ACTIVE_ENGINE),none) -> features '$(or $(TTS_FEATURES),none)'"
 	@ls -l "$(TTS_BIN)" | awk '{printf "  %d bytes  %s\n", $$5, $$NF}'

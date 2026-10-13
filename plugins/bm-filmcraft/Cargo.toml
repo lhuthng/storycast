@@ -2,7 +2,7 @@
 name = "bm-filmcraft"
 version = "0.1.0"
 edition = "2021"
-# Mirrored from rust/Cargo.toml's workspace floor, on purpose: the plugin is a
+# Mirrored from backend/Cargo.toml's workspace floor, on purpose: the plugin is a
 # separate build, and it should not silently need a newer compiler than the
 # pipeline does.
 rust-version = "1.88"
@@ -10,7 +10,7 @@ license = "MIT"
 description = "Build a Storycast book's acts into a FilmCraft project — an out-of-tree plugin"
 
 # Its own workspace root. This is the decoupling: `cargo build --workspace` and
-# `make test` under rust/ must not build, test or lint the plugin, so it cannot
+# `make test` under backend/ must not build, test or lint the plugin, so it cannot
 # be a member there and it cannot inherit that workspace's deps either.
 [workspace]
 

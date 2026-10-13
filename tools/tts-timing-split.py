@@ -117,7 +117,7 @@ if not WORK.is_dir():
 (WORK / "texts.json").write_text(json.dumps(TEXTS))
 
 base = [
-    str(ROOT / "rust/target/release/bm-tts-render"), BB,
+    str(ROOT / "backend/target/release/bm-tts-render"), BB,
     "--codec", CD, "--dict", str(DICT), "--voices", str(STORE),
     "--voice", VOICE, "--temp", "0",
 ]

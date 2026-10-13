@@ -2,7 +2,7 @@
 """Audit a workspace's scripts against their source chapters.
 
 The digest source gate (`validate_source_alignment` in
-`rust/crates/bm-core/src/digest.rs`) refuses a chapter where a character speaks
+`backend/crates/bm-core/src/digest.rs`) refuses a chapter where a character speaks
 a source span that is not quoted dialogue — "narration must be Narrator". The
 scripts written *before* that gate existed were never checked, so this walks
 them and reports exactly what the gate would now reject.

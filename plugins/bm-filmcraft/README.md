@@ -6,9 +6,9 @@ captions and act titles, as a timeline you can open in
 then export through FilmCraft's own H.264 encoder.
 
 It is an **out-of-tree plugin**. It is not a member of the Rust workspace under
-`rust/`, nothing in the pipeline depends on it, and it depends on nothing in the
+`backend/`, nothing in the pipeline depends on it, and it depends on nothing in the
 pipeline — it reads files and drives another program. `cargo build --workspace`
-and `make test` in `rust/` do not build, test or lint it. It has its own
+and `make test` in `backend/` do not build, test or lint it. It has its own
 workspace root here, its own `Cargo.lock` and its own `target/`.
 
 It does not replace [bm-video](../bm-video/README.md), which renders the book's
@@ -281,7 +281,7 @@ captions.
 - **H.264 only.** The export path sets `format: h264`; FilmCraft's other delivery
   formats are not wired up to a flag yet.
 - **FilmCraft must be installed.** This plugin cannot be part of `make test` in
-  `rust/`, and its checks are run by hand, like the pipeline's other live-backend
+  `backend/`, and its checks are run by hand, like the pipeline's other live-backend
   checks.
 - **No MCP client.** The plugin talks to `filmcraft-cli`, so it needs the CLI on
   disk; the MCP server is a separate door into the same engine, not a

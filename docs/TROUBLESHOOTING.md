@@ -66,7 +66,7 @@ Common causes per stage:
     `workspaces/<name>/settings.json`). If a
     stale name still shows up, that box is running an agent from before the fix:
     re-run `make provision BOX=…`. The agent is re-pushed **only when the
-    workspace version in `rust/Cargo.toml` changed**, an unchanged version
+    workspace version in `backend/Cargo.toml` changed**, an unchanged version
     reports "already configured" and pushes nothing, so bump it first, or force
     the push with `P` / `:reprov` (`provision … --force`). Either way the **push
     does not replace the running worker**: nothing kills `bm-agent`, and

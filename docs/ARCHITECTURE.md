@@ -883,7 +883,7 @@ older than `crates/bm-{agent,core,proto}/src`, so what would be pushed is never
 stale), while the *push* half is version-only. Remedy: `P` / `:reprov`
 ("forcing past the skip-if-configured check"), or
 `bm-inductor provision --addr <ip> --user thang --force`, or bump the version
-in `rust/Cargo.toml`, which is the route `docs/TROUBLESHOOTING.md` names from
+in `backend/Cargo.toml`, which is the route `docs/TROUBLESHOOTING.md` names from
 the operator's side.
 
 **And a push does not restart the worker.** Provisioning kills the TTS sidecar

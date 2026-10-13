@@ -23,7 +23,7 @@ import subprocess
 import sys
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
-RUST_BIN = ROOT / "rust/target/debug/bm-tts-check"
+RUST_BIN = ROOT / "backend/target/debug/bm-tts-check"
 WORK = pathlib.Path("/tmp/bm-audio-utils")
 
 HF = pathlib.Path.home() / ".cache/huggingface/hub"
