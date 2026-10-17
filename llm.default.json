@@ -24,6 +24,12 @@
       "base_url": "http://localhost:11434",
       "api_key": "",
       "model": ""
+    },
+    "lmstudio": {
+      "kind": "openai",
+      "base_url": "http://localhost:1234/v1",
+      "api_key": "",
+      "model": ""
     }
   }
 }

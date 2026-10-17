@@ -129,8 +129,9 @@ pub(crate) fn activate(app: &App, provider: &str) -> Result<String, String> {
         return Err("no repo root — restart the TUI from a checkout".into());
     }
     let mut cfg = bm_core::config::LlmConfig::load(&app.layout.root);
-    // The keyless kind is read off the entry, not the id: any local service
-    let keyless = cfg.kind_of(provider) == bm_core::config::LlmKind::Ollama;
+    // Gemini needs a key; OpenAI-compatible servers (LM Studio, …) and
+    // Ollama do not.
+    let keyless = cfg.kind_of(provider) != bm_core::config::LlmKind::Gemini;
     let entry = cfg.providers.entry(provider.to_string()).or_default();
     if entry.model.trim().is_empty() {
         return Err(format!(
@@ -177,7 +178,7 @@ fn new_provider_prompt() -> Screen {
         "New provider",
         "your own gateway: `<name> <url> [kind]` — e.g. \
          `my-gateway https://tokenharbor.ai/v1`; kind is openai (the default), \
-         gemini or ollama",
+         gemini or ollama — lmstudio is just openai without a key",
         "",
     ))
 }
@@ -340,7 +341,7 @@ pub(crate) async fn key_llm(
                 );
                 return Flow::KeepRunning;
             }
-            if !e.has_key() && cfg.kind_of(&id) != bm_core::config::LlmKind::Ollama {
+            if !e.has_key() && cfg.kind_of(&id) == bm_core::config::LlmKind::Gemini {
                 app.screen = Screen::Llm(v);
                 app.set_status(
                     Level::Warn,

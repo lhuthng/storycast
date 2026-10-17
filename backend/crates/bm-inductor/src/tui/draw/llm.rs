@@ -24,7 +24,7 @@ pub(crate) fn draw_llm(f: &mut ratatui::Frame, app: &mut App, v: &LlmView) {
         let cursor = if i == v.cursor { "▸" } else { " " };
         let is_active = active.as_deref() == Some(id.as_str());
         let mark = if is_active { "●" } else { "○" };
-        let key_ok = e.has_key() || cfg.kind_of(id) == bm_core::config::LlmKind::Ollama;
+        let key_ok = e.has_key() || cfg.kind_of(id) != bm_core::config::LlmKind::Gemini;
         let key = if e.has_key() { "key:set" } else { "key:—" };
         let key_style = if key_ok {
             Style::default().fg(Color::Green)
@@ -120,7 +120,7 @@ pub(crate) fn draw_llm(f: &mut ratatui::Frame, app: &mut App, v: &LlmView) {
                 Style::default()
             },
         ),
-        Span::styled(" — a name and a URL, then `k` its key", dim),
+        Span::styled(" — a name and a URL, then `k` its key (if it has one)", dim),
     ]));
     if active.is_none() {
         lines.push(Line::from(""));

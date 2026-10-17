@@ -331,7 +331,9 @@ impl LlmConfig {
         if e.model.trim().is_empty() {
             return None;
         }
-        if !matches!(kind, LlmKind::Ollama) && !e.has_key() {
+        // Gemini needs a key; OpenAI-compatible servers (LM Studio, vLLM, …)
+        // and Ollama do not.
+        if kind == LlmKind::Gemini && !e.has_key() {
             return None;
         }
         Some(ResolvedLlm {

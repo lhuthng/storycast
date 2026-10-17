@@ -154,12 +154,20 @@ async fn generate_openrouter(
     settings: &Settings,
 ) -> Result<(String, Backend), GenError> {
     let key = std::env::var("OPENROUTER_API_KEY").map_err(|_| missing_key("OPENROUTER_API_KEY"))?;
+    // Some OpenAI-compatible servers (LM Studio, vLLM) reject `json_object`,
+    // so the first body carries it and we retry without it on that 400.
     let body = json!({
         "model": settings.openrouter_model,
         "messages": [{"role": "user", "content": prompt}],
         "temperature": 0,
         "max_tokens": 16384,
         "response_format": {"type": "json_object"},
+    });
+    let body_plain = json!({
+        "model": settings.openrouter_model,
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": 0,
+        "max_tokens": 16384,
     });
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(600))
@@ -178,19 +186,31 @@ async fn generate_openrouter(
         normalize_base(&settings.openrouter_url)
     );
     let resp = client
-        .post(url)
+        .post(&url)
         .header("Authorization", format!("Bearer {key}"))
         .json(&body)
         .send()
         .await
         .map_err(|e| GenError::Fatal(anyhow!("cannot reach {who} ({e})")))?;
-    let status = resp.status();
+    let mut status = resp.status();
     let retry_after = resp
         .headers()
         .get("retry-after")
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.parse::<f64>().ok());
-    let text = resp.text().await.unwrap_or_default();
+    let mut text = resp.text().await.unwrap_or_default();
+    // Some servers reject `response_format: json_object`; retry once without it.
+    if status.as_u16() == 400 && text.contains("response_format") {
+        let retry_resp = client
+            .post(&url)
+            .header("Authorization", format!("Bearer {key}"))
+            .json(&body_plain)
+            .send()
+            .await
+            .map_err(|e| GenError::Fatal(anyhow!("cannot reach {who} ({e})")))?;
+        status = retry_resp.status();
+        text = retry_resp.text().await.unwrap_or_default();
+    }
     // 429 is quota; 502/503/529 is the provider at peak demand — both are
     if matches!(status.as_u16(), 429 | 502 | 503 | 529) {
         let delay = retry_after.map(|d| d + 2.0).unwrap_or(60.0);
