@@ -47,7 +47,19 @@ pub fn provision(
     // GitHub path. Either way a miss falls back to pushing the directory.
     let release = if crate::artifact::is_preset_url(repo.trim()) {
         match crate::artifact::ModelsRelease::for_r2(repo.trim(), &layout.engine) {
-            Ok(r) => Some(r),
+            // Only this host's own bake: every box is verified against the
+            // checksum list this host writes, so a bucket that has moved on
+            // without the host is a fetch that would land and then fail.
+            Ok(r) if r.is_bake(&layout.models_dir()) => Some(r),
+            Ok(r) => {
+                log.push(format!(
+                    "[{}] the preset bucket publishes {} ({}), not this host's bake — the weights travel over the push",
+                    m.id,
+                    r.tag,
+                    crate::artifact::tag_for(&r.hash)
+                ));
+                None
+            }
             Err(e) => {
                 log.push(format!(
                     "[{}] preset bucket unreachable ({e:#}), the weights travel over the push",

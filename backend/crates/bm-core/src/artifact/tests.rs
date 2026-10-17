@@ -120,6 +120,27 @@ fn a_self_consistent_bundle_for_another_bake_is_still_refused() {
     assert!(verify_dir(&dir, &its_own).is_ok());
 }
 
+/// A release that is not the bake here is never fetched: the checksum list
+/// provisioning writes comes from this host, so the box would take bytes and
+/// then fail its own verification. The host pushes its directory instead.
+#[test]
+fn a_release_is_fetched_only_when_it_is_the_bake_here() {
+    let dir = tstdir("is-bake");
+    std::fs::create_dir_all(&dir).unwrap();
+    let doc = json!({"files": {"one.bin": {"sha256": sha_of(b"one"), "bytes": 3}}});
+    std::fs::write(dir.join("manifest.json"), doc.to_string()).unwrap();
+
+    let here = ModelsRelease::for_repo("o/n", &bake_hash(&dir).unwrap()).unwrap();
+    assert!(here.is_bake(&dir));
+
+    // Same repo, a bake this host does not have.
+    let elsewhere = ModelsRelease::for_repo("o/n", &sha_of(b"another bake")).unwrap();
+    assert!(!elsewhere.is_bake(&dir));
+
+    // And a host with no bake at all matches nothing.
+    assert!(!here.is_bake(Path::new("/nonexistent")));
+}
+
 /// The whole point of the exercise, end to end and offline: pack a bundle
 #[test]
 fn a_bundle_lands_and_replaces_what_was_there() {
@@ -129,11 +150,16 @@ fn a_bundle_lands_and_replaces_what_was_there() {
     std::fs::create_dir_all(&stage).unwrap();
     let doc = json!({"files": {
         "backbone.data": {"sha256": sha_of(b"weights"), "bytes": 7},
-        "tts.onnx": {"sha256": sha_of(b"graph"), "bytes": 5}
+        "tts.onnx": {"sha256": sha_of(b"graph"), "bytes": 5},
+        // A component in its own subtree, the way the judge rides the bake:
+        // the unpack has to make the parents it was never sent as entries.
+        "laya/tokenizer/tokenizer.json": {"sha256": sha_of(b"tok"), "bytes": 3}
     }});
     std::fs::write(stage.join("manifest.json"), doc.to_string()).unwrap();
     std::fs::write(stage.join("backbone.data"), b"weights").unwrap();
     std::fs::write(stage.join("tts.onnx"), b"graph").unwrap();
+    std::fs::create_dir_all(stage.join("laya/tokenizer")).unwrap();
+    std::fs::write(stage.join("laya/tokenizer/tokenizer.json"), b"tok").unwrap();
     let want = manifest_hash(&doc).unwrap();
 
     let bundle = root.join(BUNDLE_NAME);
@@ -145,9 +171,13 @@ fn a_bundle_lands_and_replaces_what_was_there() {
     std::fs::write(dest.join("voices.json"), b"{\"live\":true}").unwrap();
 
     let landed = land(&bundle, &dest, &want).unwrap();
-    assert_eq!(landed.files, 2);
+    assert_eq!(landed.files, 3);
     assert_eq!(landed.tag, tag_for(&want));
     assert_eq!(std::fs::read(dest.join("tts.onnx")).unwrap(), b"graph");
+    assert_eq!(
+        std::fs::read(dest.join("laya/tokenizer/tokenizer.json")).unwrap(),
+        b"tok"
+    );
     // The bundle is the manifest plus the weights, and the voice store is
     assert!(!dest.join("voices.json").exists());
     // Nothing left lying about.

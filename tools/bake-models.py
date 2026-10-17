@@ -102,13 +102,18 @@ DERIVED = {"voices.json"}
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 
 
-def snapshot(repo: str) -> pathlib.Path:
+def snapshot(repo: str) -> pathlib.Path | None:
+    """The newest revision of `repo`, or `None` when the cache does not hold it.
+
+    `None` is not an error: a machine that only has a bake (not the HF cache it
+    came from) can still grow that bake — see the keep rule in `main`.
+    """
     d = HF / repo / "snapshots"
     if not d.is_dir():
-        sys.exit(f"no snapshots for {repo}; download the model first")
+        return None
     revs = sorted(p for p in d.iterdir() if p.is_dir())
     if not revs:
-        sys.exit(f"{d} is empty")
+        return None
     if len(revs) > 1:
         print(f"  note: {len(revs)} revisions of {repo}, using {revs[-1].name[:8]}")
     return revs[-1]
@@ -160,18 +165,20 @@ def main() -> int:
 
     bb = snapshot(BACKBONE)
     cd = snapshot(CODEC)
+    if bb is None or cd is None:
+        print("  note: no HF cache for the backbone/codec here — keeping what the bake already holds")
     out.mkdir(parents=True, exist_ok=True)
 
-    plan: list[tuple[pathlib.Path, str]] = []
+    plan: list[tuple[pathlib.Path | None, str]] = []
     for rel in BACKBONE_SUB:
-        plan.append((bb / rel, pathlib.Path(rel).name))
+        plan.append((bb / rel if bb else None, pathlib.Path(rel).name))
     for rel in CODEC_FILES:
-        plan.append((cd / rel, rel))
+        plan.append((cd / rel if cd else None, rel))
 
     dict_src = ROOT / DICT
     if not dict_src.is_file():
         dict_src = next((ROOT / p for p in DICT_FALLBACKS if (ROOT / p).is_file()), None)
-    if dict_src is None:
+    if dict_src is None and not (out / "sea_g2p.bin").is_file():
         sys.exit(
             "no sea_g2p.bin found. Install sea-g2p==0.9.1, or fetch it from the "
             "pinned upstream commit (hash in backend/vendor/sea-g2p/VENDORED.md)."
@@ -194,14 +201,28 @@ def main() -> int:
             sys.exit(f"--laya holds no files: {laya}")
         plan.extend(found)
 
+    # What this bake already records. A source that has disappeared does not
+    # erase a file that is present and recorded — an operator growing a bake
+    # with `--laya` has no HF cache — and `--check` is what proves the bytes.
+    prev: dict = json.loads(manifest_path.read_text()) if manifest_path.is_file() else {}
+    recorded: dict[str, dict] = prev.get("files", {})
+
     files: dict[str, dict] = {}
     total = 0
     for src, name in plan:
-        if not src.is_file():
+        if src is None or not src.is_file():
+            if (out / name).is_file() and name in DERIVED:
+                print(f"  keep      {name} (derived, source gone)")
+                continue
+            if (out / name).is_file() and name in recorded:
+                files[name] = recorded[name]
+                total += recorded[name]["bytes"]
+                print(f"  {recorded[name]['bytes'] / 1048576:8.1f} MB  {name}  (kept, source gone)")
+                continue
             # Optional: the encoder and denoiser are only needed for cloning, and
             # a missing one should not stop a preset-only bake.
             optional = name in ("speaker_encoder.onnx", "denoiser.onnx", "codec_browser_onnx_meta.json")
-            print(f"  {'skip' if optional else 'MISSING'} {name} ({src})")
+            print(f"  {'skip' if optional else 'MISSING'} {name}{f' ({src})' if src else ''}")
             if not optional:
                 return 1
             continue
@@ -227,8 +248,8 @@ def main() -> int:
             "directory but is deliberately absent from `files`: it is derived "
             "state, not a bake output (see DERIVED in the script)."
         ),
-        "backbone_rev": bb.name,
-        "codec_rev": cd.name,
+        "backbone_rev": bb.name if bb else prev.get("backbone_rev", ""),
+        "codec_rev": cd.name if cd else prev.get("codec_rev", ""),
         "total_bytes": total,
         "files": files,
     }

@@ -90,7 +90,11 @@ curl -s -o /dev/null -w "%{http_code} %{size_download}\n" \
 - `models_release` / `packs_release` take either `owner/name` (GitHub, as
   before) or an `https://` base URL (R2). A URL resolves through the pack's
   `latest.json` at provision time; a miss falls back to pushing over the
-  uplink, exactly like an unreachable GitHub release.
+  uplink, exactly like an unreachable GitHub release. A **models** bundle that
+  is not the bake the inductor holds counts as a miss: every box is verified
+  against the checksum list that inductor writes, so a foreign bake would land
+  and then fail its own check. Publish from the machine that bakes, or expect
+  the push.
 - The box still fetches one URL with one hash (`fetch-artifact --expect`):
   the indirection stays inductor-side, and every fetch sends the
   `storycast-preset-fetch/1.0` agent string the bucket's bot protection

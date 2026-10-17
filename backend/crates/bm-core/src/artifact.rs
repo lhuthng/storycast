@@ -28,8 +28,16 @@ impl ModelsRelease {
         if repo.is_empty() {
             return None;
         }
-        let hash = manifest_hash(&read_manifest(models_dir).ok()?).ok()?;
+        let hash = bake_hash(models_dir)?;
         Self::for_repo(repo, &hash).ok()
+    }
+
+    /// Whether this release *is* the bake at `models_dir`. A bundle published
+    /// from somewhere else is not fetched: provisioning writes this host's own
+    /// checksum list onto every box, so a foreign bake would land and then fail
+    /// its own verification. The host pushes its directory instead.
+    pub fn is_bake(&self, models_dir: &Path) -> bool {
+        bake_hash(models_dir).is_some_and(|here| here == self.hash)
     }
 
     /// The same, from parts a caller already has. Validates the repo shape
@@ -298,6 +306,11 @@ fn read_manifest(models_dir: &Path) -> Result<Value> {
     let text =
         std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
     serde_json::from_str(&text).with_context(|| format!("parsing {}", path.display()))
+}
+
+/// The manifest hash of the bake at `models_dir`, or `None` when there is none.
+pub fn bake_hash(models_dir: &Path) -> Option<String> {
+    manifest_hash(&read_manifest(models_dir).ok()?).ok()
 }
 
 fn hex(bytes: &[u8]) -> String {
