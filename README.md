@@ -325,6 +325,12 @@ come from Hugging Face a single time and are converted into plain files by
 `python3 tools/bake-models.py` (`--check` re-verifies them). From then on the
 machines that speak need no internet connection at all, and no Python either.
 
+A bake may also carry the **declared-sound judge**, a small ONNX decision model
+the digest asks about each non-verbal tag it was given:
+`python3 tools/bake-models.py --laya <dir>` copies `<dir>` into `models/laya/`.
+Leave the flag out and every box simply answers no verdicts — nothing else
+changes.
+
 ### Your novel (required)
 
 Chapters arrive one of two ways.

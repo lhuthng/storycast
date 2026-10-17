@@ -1,3 +1,4 @@
+use crate::assemble::Planned;
 use super::attribution::attribution_view;
 use super::attribution::build_attribution_prompt;
 use super::attribution::replace_or_miss;
@@ -8,14 +9,13 @@ use super::excerpt::excerpt_rule;
 use super::excerpt::previous_excerpts;
 use super::gate::corrected_source;
 use super::gate::source_text_matches;
-use super::gate::source_without_written_sound;
 use super::gate::validate_source_alignment;
 use super::json::json_failure;
 use super::json::parse_json_repaired;
 use super::json::strip_fences;
 use super::manual::vocabulary;
 use super::parse::attach_fixed_speakers;
-use super::parse::collapse_redundant_sounds;
+use super::parse::resolve_nonverbals;
 use super::parse::lift_thought_stingers;
 use super::parse::merge_rounds;
 use super::parse::not_speech_ids;
@@ -1961,102 +1961,12 @@ fn the_attribution_view_offers_the_retraction() {
     assert!(note.contains("`thought_events` id"), "{note}");
 }
 
+/// The code never writes a non-verbal sound. The answer *declares* one — the
+/// engine's key and the words it stands for — the text keeps the source's own
+/// words, and `Planned` is where a tag comes into being, for the render and the
+/// merge both.
 #[test]
-fn a_written_sound_is_collapsed_rather_than_left_beside_its_tag() {
-    let mut data = json!({"segments": [
-        {"source_id": "e0001", "speaker": "Narrator", "text": "[hắng giọng] Khụ khụ khụ, ban đầu ta cầm bảo đao."},
-        {"source_id": "e0002", "speaker": "Narrator", "text": "Khụ khụ khụ, ban đầu ta cầm bảo đao."},
-        {"source_id": "e0003", "speaker": "Narrator", "text": "Hắn lật trang sách."},
-    ]});
-    collapse_redundant_sounds(&mut data, "vieneu");
-    // The tag and the words it stands for are spoken as one cough, and the
-    for i in [0, 1] {
-        assert_eq!(
-            data["segments"][i]["text"], "[hắng giọng] ban đầu ta cầm bảo đao.",
-            "segment {i}"
-        );
-    }
-    assert_eq!(data["segments"][2]["text"], "Hắn lật trang sách.");
-}
-
-#[test]
-fn written_laughter_is_recognized_wherever_it_sits_in_the_line() {
-    // The engine counts `haha`, one word, and a laugh in the middle of a
-    assert_eq!(
-        retag_text("Vài ngày nữa trời lạnh, haha, vừa sạch sẽ.", "vieneu"),
-        Some("Vài ngày nữa trời lạnh, [cười] vừa sạch sẽ.".into())
-    );
-    assert_eq!(
-        retag_text("Khụ khụ khụ, ban đầu ta cầm bảo đao.", "vieneu"),
-        Some("[hắng giọng] ban đầu ta cầm bảo đao.".into())
-    );
-    // Ignoring written sound is symmetric now: the stripper runs on both
-    assert_eq!(
-        source_without_written_sound("…cho mình, haha, vừa sạch sẽ.", "vieneu"),
-        source_without_written_sound("…cho mình, [cười] vừa sạch sẽ.", "vieneu")
-    );
-}
-
-#[test]
-fn vietnamese_sigh_quantifiers_normalize_like_the_engine_tag() {
-    for (written, tagged) in [
-        (
-            "Bành Anh thở dài một tiếng, nói:",
-            "Bành Anh [thở dài] nói:",
-        ),
-        (
-            "Bành Anh thở dài một hơi rồi mới cất lời:",
-            "Bành Anh [thở dài] mới cất lời:",
-        ),
-    ] {
-        let mut data = json!({"segments": [
-            {"source_id": "e0015", "speaker": "Bành Anh", "text": written}
-        ]});
-        collapse_redundant_sounds(&mut data, "vieneu");
-        assert_eq!(data["segments"][0]["text"], json!(tagged));
-        assert!(
-            source_text_matches(written, &[tagged.to_string()], "vieneu"),
-            "source gate must accept the engine tag as the written sigh: {written}"
-        );
-    }
-
-    let mut model_shape = json!({"segments": [
-        {"source_id": "e0015", "speaker": "Bành Anh", "text": "Bành Anh [thở dài] một tiếng, nói:"}
-    ]});
-    collapse_redundant_sounds(&mut model_shape, "vieneu");
-    assert_eq!(
-        model_shape["segments"][0]["text"],
-        json!("Bành Anh [thở dài] nói:")
-    );
-}
-
-/// The sentence's own period, which went with the sound on the way in.
-#[test]
-fn a_period_beside_an_engine_tag_is_not_a_source_change() {
-    let expected = "Cũng may, cũng may không bị trượt tay, [cười]";
-    assert!(
-        source_text_matches(
-            expected,
-            &["Cũng may, cũng may không bị trượt tay, [cười].".to_string()],
-            "vieneu"
-        ),
-        "the tag's own period must not read as a change"
-    );
-    assert!(source_text_matches(
-        "Hắn gầm lên, [hắng giọng]",
-        &["Hắn gầm lên, [hắng giọng]!".to_string()],
-        "vieneu"
-    ));
-    // The tag *and* the words it stands for is still the error it is: only
-    assert!(!source_text_matches(
-        expected,
-        &["Cũng may, cũng may không bị trượt tay, [cười] ha ha.".to_string()],
-        "vieneu"
-    ));
-}
-
-#[test]
-fn source_gate_names_a_leftover_written_sound() {
+fn a_declared_sound_keeps_the_text_and_reaches_the_plan_as_a_tag() {
     let prepared = prepare_chapter(
         "Chương 1: Một chuyến gặp\n\n\"Khụ khụ khụ, ban đầu ta cầm bảo đao.\" Thanh Sơn lão tổ nói.",
     );
@@ -2065,35 +1975,144 @@ fn source_gate_names_a_leftover_written_sound() {
         .iter()
         .find(|e| e.kind == "dialogue")
         .expect("the cough line is prepared");
-    let tail = prepared
+
+    // What the source gate expects is the source's own words: no tag, no guess.
+    assert_eq!(corrected_source(dialogue, &[]), dialogue.text);
+
+    let answer = answer_declaring(
+        &prepared,
+        "Thanh Sơn lão tổ",
+        json!({"key": "throat", "replaces": "Khụ khụ khụ"}),
+    );
+    validate_source_alignment_no_retractions(&answer, &prepared).unwrap();
+
+    // The script keeps the words; the staging parse fills the declaration with
+    // the engine's own tag, and the plan is what the engine speaks.
+    let mut answer = answer;
+    resolve_nonverbals(&mut answer, "vieneu");
+    assert_eq!(answer["segments"][0]["text"], json!(dialogue.text));
+    let planned = Planned::plan(answer["segments"].as_array().unwrap());
+    assert_eq!(
+        planned.speech[0]["text"],
+        json!("[hắng giọng], ban đầu ta cầm bảo đao.")
+    );
+}
+
+/// An answer for `prepared` with every event once, the spoken line declaring
+/// `sound`. Narration declares none.
+fn answer_declaring(prepared: &PreparedChapter, speaker: &str, sound: Value) -> Value {
+    let segments = prepared
         .events
         .iter()
-        .find(|e| e.kind == "narration")
-        .expect("its tag is prepared");
-    assert!(corrected_source(dialogue, &[], "vieneu").starts_with("[hắng giọng]"));
+        .map(|e| {
+            let who = if e.kind == "narration" {
+                "Narrator"
+            } else {
+                speaker
+            };
+            let mut seg = json!({"source_id": e.id.as_str(), "speaker": who, "text": e.text});
+            if e.kind != "narration" {
+                seg["nonverbal"] = sound.clone();
+            }
+            seg
+        })
+        .collect::<Vec<_>>();
+    json!({"segments": segments, "fixes": []})
+}
 
-    let answer = |cough: &str| {
-        json!({"segments": [
-            {"source_id": dialogue.id, "speaker": "Thanh Sơn lão tổ", "text": cough},
-            {"source_id": tail.id, "speaker": "Narrator", "text": tail.text},
-        ], "fixes": []})
-    };
+/// The narrator reads the line as written: narration declares no sound, and a
+/// tag written into any text is refused by name.
+#[test]
+fn narration_reads_its_sound_as_words_and_a_written_tag_is_refused() {
+    let prepared = prepare_chapter(
+        "Chương 1: Gặp gỡ\n\nDịch Phong thở dài một tiếng. \"Khụ khụ khụ, ban đầu ta cầm bảo đao.\" Thanh Sơn lão tổ nói.",
+    );
+    let sigh = prepared
+        .events
+        .iter()
+        .find(|e| e.kind == "narration" && e.text.contains("thở dài"))
+        .expect("the narrator's sigh is prepared");
 
-    // Hoisting the tag to the head of the line and keeping the words is
-    let hoisted = answer("[hắng giọng] Khụ khụ khụ, ban đầu ta cầm bảo đao.");
-    let err = validate_source_alignment_no_retractions(&hoisted, &prepared).unwrap_err();
-    assert!(err.to_string().contains("written sound"), "{err}");
+    // The narrator's sound is words, and the code never rewrites them.
+    assert_eq!(corrected_source(sigh, &[]), sigh.text);
 
-    // The same answer passes once it comes through `retag_text`, which is
-    let mut collapsed = hoisted.clone();
-    collapse_redundant_sounds(&mut collapsed, "vieneu");
-    validate_source_alignment_no_retractions(&collapsed, &prepared).unwrap();
+    // Declaring one on a narration line is refused.
+    let on_narration = json!({"segments": prepared.events.iter().map(|e| {
+        let who = if e.kind == "narration" { "Narrator" } else { "Thanh Sơn lão tổ" };
+        let mut seg = json!({"source_id": e.id.as_str(), "speaker": who, "text": e.text});
+        if e.id == sigh.id {
+            seg["nonverbal"] = json!({"key": "sigh", "replaces": "thở dài một tiếng"});
+        }
+        seg
+    }).collect::<Vec<_>>(), "fixes": []});
+    let err = validate_source_alignment_no_retractions(&on_narration, &prepared).unwrap_err();
+    assert!(err.to_string().contains("narration"), "{err}");
 
-    // A genuine change keeps the honest generic message: the hint fires
-    let rewritten = answer("Đêm ấy trời trở gió.");
-    let err = validate_source_alignment_no_retractions(&rewritten, &prepared).unwrap_err();
-    assert!(err.to_string().contains("changed"), "{err}");
-    assert!(!err.to_string().contains("written sound"), "{err}");
+    // And a tag handed to the narrator is refused by name.
+    let tagged = json!({"segments": [
+        {"source_id": sigh.id.as_str(), "speaker": "Narrator", "text": "Dịch Phong [thở dài] một tiếng."},
+    ]});
+    let err = validate_inline_tags(&tagged, "vieneu").unwrap_err();
+    assert!(err.to_string().contains("narration"), "{err}");
+}
+
+/// What the code *can* check about a declared sound: the engine declared the key,
+/// and the words it stands for sit in the line exactly once. Whether "Ài..." is
+/// really a sigh is a judgement about meaning, and no code here makes one.
+#[test]
+fn a_declared_sound_is_checked_against_the_engine_and_the_line() {
+    // ch346: the interjection the engine's spellings never covered, declared as
+    // the sound it is. Nothing in the code knows what "Ài..." means.
+    let ch346 = prepare_chapter("Chương 346: Gặp lại\n\n\"Ài..., rồi im.\" Thanh Sơn lão tổ nói.");
+    let ok = answer_declaring(
+        &ch346,
+        "Thanh Sơn lão tổ",
+        json!({"key": "sigh", "replaces": "Ài..."}),
+    );
+    validate_source_alignment_no_retractions(&ok, &ch346).unwrap();
+
+    let bad_key = answer_declaring(
+        &ch346,
+        "Thanh Sơn lão tổ",
+        json!({"key": "cười", "replaces": "Ài..."}),
+    );
+    let err = validate_source_alignment_no_retractions(&bad_key, &ch346).unwrap_err();
+    assert!(err.to_string().contains("not a non-verbal key"), "{err}");
+
+    let missing = answer_declaring(
+        &ch346,
+        "Thanh Sơn lão tổ",
+        json!({"key": "sigh", "replaces": "Ơi..."}),
+    );
+    let err = validate_source_alignment_no_retractions(&missing, &ch346).unwrap_err();
+    assert!(err.to_string().contains("appears 0 times"), "{err}");
+
+    // A stretch the line holds twice is ambiguous, not a declaration.
+    let twice = prepare_chapter("Chương 1: Gặp gỡ\n\n\"Ha ha, Ha ha, thật à.\" Thanh Sơn lão tổ nói.");
+    let ambiguous = answer_declaring(
+        &twice,
+        "Thanh Sơn lão tổ",
+        json!({"key": "laugh", "replaces": "Ha ha"}),
+    );
+    let err = validate_source_alignment_no_retractions(&ambiguous, &twice).unwrap_err();
+    assert!(err.to_string().contains("appears 2 times"), "{err}");
+
+    // An engine that voices nothing has no key to name.
+    let err = validate_source_alignment(&ok, &ch346, &HashSet::new(), "gemini").unwrap_err();
+    assert!(err.to_string().contains("voices no non-verbal sounds"), "{err}");
+}
+
+/// Whitespace is not a change and a different word is: that is the whole of the
+/// source gate's text rule, now that the code writes nothing.
+#[test]
+fn source_text_matches_ignores_whitespace_and_nothing_else() {
+    assert!(source_text_matches(
+        "Hắn đứng đợi. Ài...",
+        &["Hắn đứng đợi.  Ài...".into()]
+    ));
+    assert!(source_text_matches("Hắn đi.", &["Hắn ".into(), "đi.".into()]));
+    assert!(!source_text_matches("Hắn đi.", &["Hắn đi và về.".into()]));
+    assert!(!source_text_matches("Ài...", &["Ơi...".into()]));
 }
 
 /// The ch51 shape: right person, the chapter's spelling. It used to cost
@@ -2700,14 +2719,18 @@ fn shipped_prompts_render_every_placeholder() {
         assert!(!p.contains(ph), "placeholder leaked: {ph}");
     }
 
-    // The non-verbal vocabulary is VieNeu's, so its tags render — and an
-    assert!(p.contains("[cười] [thở dài] [hắng giọng]"), "{p}");
+    // The non-verbal vocabulary is VieNeu's, so its keys render — and a tag is
+    // never taught: the answer declares a key and the plan places the tag.
+    for key in ["laugh", "sigh", "throat"] {
+        assert!(p.contains(key), "the {key} key must be offered: {p}");
+    }
+    assert!(!p.contains("[cười]"), "a tag must never be taught: {p}");
     let none = build_script_prompt(&layout, "gemini", &bible, &context, &text).unwrap();
     assert!(
         !none.contains("NON-VERBAL"),
         "another engine must not be taught the rule at all: {none}"
     );
-    assert!(!none.contains("[cười]"), "{none}");
+    assert!(!none.contains("laugh"), "{none}");
     assert!(!none.contains("{tag_"), "placeholder leaked: {none}");
 
     // The sound vocabulary moved to its own layer (`sound.txt`), so it renders
@@ -3450,6 +3473,7 @@ fn the_parts_checkpoint_resumes_what_matches_and_forgets_what_does_not() {
         chunk_sentences: 4,
         chunk_chars: 0,
         answer_tokens: 0,
+        judge: crate::config::JudgeSettings::default(),
     };
     let other = plan_windows(&prepared, &chunkier);
     assert_ne!(other.len(), windows.len());
@@ -3875,3 +3899,4 @@ fn the_chapter_budget_refuses_rather_than_spending_forever() {
     assert!(why.contains("budget"), "{why}");
     assert_eq!(calls.spent, allowed, "the refused call is not counted");
 }
+

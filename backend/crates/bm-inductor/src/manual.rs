@@ -127,8 +127,10 @@ pub(crate) async fn ask(
         match bm_core::digest::generate(prompt, analyzer, settings).await {
             Ok((text, _backend)) => return Ok(text),
             Err(GenError::RateLimited(msg)) => {
-                let wait = bm_core::digest::parse_retry_delay(&msg)
-                    .unwrap_or_else(|| (30.0 * 2f64.powi(attempt)).min(300.0));
+                let wait = bm_core::digest::retry_wait(
+                    bm_core::digest::parse_retry_delay(&msg),
+                    30.0 * 2f64.powi(attempt),
+                );
                 eprintln!("rate-limited, sleeping {wait:.0}s");
                 tokio::time::sleep(std::time::Duration::from_secs_f64(wait)).await;
                 last = msg;

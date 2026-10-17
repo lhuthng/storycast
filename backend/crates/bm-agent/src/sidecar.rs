@@ -201,11 +201,20 @@ impl Sidecar {
         layout: &Layout,
         desired_threads: Option<u32>,
     ) -> Result<()> {
+        // The judge is part of what a sidecar is started *with*, and nothing else
+        // notices it: a box whose bake grew one, or a sidecar the provision
+        // started without it, would answer `404` for the rest of its life. So it
+        // is reconciled like the thread count — and by asking the process, since
+        // a sidecar someone else started has no bookkeeping entry here.
+        let want_judge = layout.models_dir().join("laya").is_dir();
         if self.serving_current().await {
-            if self.applied_threads == desired_threads {
+            if self.applied_threads == desired_threads
+                && (!want_judge || self.tts().judge_present().await)
+            {
                 return Ok(());
             }
-            // The count changed (or a value was pushed where the box had
+            // The count or the judge changed, so this process is not the one
+            // this box wants: stop it and start the one it does.
             self.reap_all().await;
         }
         // Not ready, but two different things can be in the way, and they want

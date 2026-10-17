@@ -183,6 +183,15 @@ fn a_characters_own_name_beats_another_characters_alias_for_it() {
 }
 
 #[test]
+fn resolve_entry_folds_diacritics_and_aliases_onto_the_bible_spelling() {
+    let bible = bible_with("Thủy Hành", &["Thủy Hành", "Hành lão"]);
+    // The other Vietnamese tone order — the spelling the operator sees elsewhere.
+    assert_eq!(resolve_entry(&bible, "Thuỷ Hành").as_deref(), Some("Thủy Hành"));
+    assert_eq!(resolve_entry(&bible, "Hành lão").as_deref(), Some("Thủy Hành"));
+    assert_eq!(resolve_entry(&bible, "Nobody"), None);
+}
+
+#[test]
 fn canonicalize_script_rewrites_roster_and_speakers() {
     let bible = bible_with("Mao Ý", &["Mao Ý", "Mao Ý (thanh niên mặc hoa phục)"]);
     let mut data = json!({

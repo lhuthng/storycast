@@ -2362,6 +2362,61 @@ fn merge_folds_a_named_pair_with_no_canon_match() {
 }
 
 #[test]
+fn merge_folds_a_cast_only_duplicate_onto_the_bible_survivor() {
+    // The real shape: the bible's canonical `Thủy hành` and a cast-only
+    // duplicate `Thủy Hành` (a different voice) differ only in case, and the
+    // operator's survivor spelling differs again in diacritics. The gate
+    // resolves it; the surgery must fold the duplicate rather than collapse it
+    // onto the survivor and call it a self-merge.
+    let (_d, mut inner) = fixture();
+    let layout = inner.layout.clone();
+    std::fs::write(
+        layout.bible(),
+        serde_json::to_string(&serde_json::json!({"characters": [
+            {"name": "Thủy hành", "personality": "", "voice_hint": "adult male",
+             "proper_aliases": ["Thủy hành"], "first_seen": "289", "chapters_seen": ["289"]}
+        ]}))
+        .unwrap(),
+    )
+    .unwrap();
+    std::fs::write(
+        layout.cast("vieneu"),
+        r#"{"Thủy hành":"old-male-11","Thủy Hành":"young-female-6"}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        layout.script(288),
+        r#"{"roster":["Thủy Hành"],"segments":[{"speaker":"Thủy Hành","text":"Ừ."}]}"#,
+    )
+    .unwrap();
+    std::fs::write(layout.final_mp3(288), vec![0u8; 2000]).unwrap();
+
+    let msg = inner
+        .apply_reconcile(&[("Thuỷ Hành".into(), vec!["Thủy Hành".into()])], true)
+        .unwrap();
+    assert!(msg.contains("Thủy hành <= Thủy Hành"), "{msg}");
+
+    let bible: Value = bm_core::read_json(&layout.bible()).unwrap();
+    let chars = bible["characters"].as_array().unwrap();
+    assert_eq!(chars.len(), 1);
+    assert_eq!(chars[0]["name"], serde_json::json!("Thủy hành"));
+    assert!(chars[0]["proper_aliases"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|a| a == "Thủy Hành"));
+
+    let cast = bm_core::cast::read_cast("vieneu", &layout.cast("vieneu"));
+    assert_eq!(cast["Thủy hành"], "old-male-11", "survivor keeps its voice");
+    assert!(!cast.contains_key("Thủy Hành"), "the female duplicate goes");
+
+    // The fold's audio work: the stale mix goes and the chapter comes back
+    // as render + merge work, so the name is re-spoken as the survivor.
+    assert!(!layout.final_mp3(288).exists(), "stale product goes away");
+    assert_eq!(inner.tasks["merge:288"].state, TaskState::Pending);
+}
+
+#[test]
 fn merge_refuses_unknown_names_and_the_narrator() {
     let (_d, mut inner) = fixture();
     let layout = inner.layout.clone();

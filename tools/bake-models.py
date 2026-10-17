@@ -126,6 +126,13 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", default="engines/vieneu/models")
     ap.add_argument("--check", action="store_true")
+    ap.add_argument(
+        "--laya",
+        default="",
+        help="Directory holding the declared-sound judge: the ONNX graph, its "
+        ".data beside it, and a tokenizer/ tree. Baked under laya/ and verified "
+        "with the rest; omit it and the boxes simply answer no verdicts.",
+    )
     args = ap.parse_args()
     out = (ROOT / args.out).resolve()
 
@@ -172,6 +179,21 @@ def main() -> int:
     plan.append((dict_src, "sea_g2p.bin"))
     plan.append((ROOT / STORE, "voices.json"))
 
+    if args.laya:
+        laya = pathlib.Path(args.laya).expanduser().resolve()
+        if not laya.is_dir():
+            sys.exit(f"--laya is not a directory: {laya}")
+        # Under its own tree: the graph's basename would otherwise have to dodge
+        # the backbone's, and the tokenizer is a directory of its own.
+        found = [
+            (p, str(pathlib.Path("laya") / p.relative_to(laya)))
+            for p in sorted(laya.rglob("*"))
+            if p.is_file()
+        ]
+        if not found:
+            sys.exit(f"--laya holds no files: {laya}")
+        plan.extend(found)
+
     files: dict[str, dict] = {}
     total = 0
     for src, name in plan:
@@ -184,6 +206,8 @@ def main() -> int:
                 return 1
             continue
         dst = out / name
+        if dst.parent != out:
+            dst.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(src, dst)
         size = dst.stat().st_size
         if name in DERIVED:

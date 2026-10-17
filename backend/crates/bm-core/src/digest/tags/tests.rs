@@ -130,33 +130,36 @@ fn inline_tags_accept_the_engine_three_and_nothing_else() {
 
     let tagged = |text: &str| {
         json!({
-            "segments": [{"speaker": "Narrator", "text": text, "direction": "Say calm in Vietnamese: x"}],
+            "segments": [{"speaker": "Thanh Sơn lão tổ", "text": text, "direction": "Say calm in Vietnamese: x"}],
             "roster": ["Narrator"]
         })
     };
-    let ok = |t: &str| {
-        let d = tagged(t);
-        validate_inline_tags(&d, "vieneu")
-    };
-    ok("Hắn [cười].").unwrap();
-    ok("Nàng [CƯỜI].").unwrap();
-    ok("Hắn [sigh].").unwrap();
-    let err = ok("Dừng [pause] lại.").unwrap_err();
-    assert!(err.to_string().contains("[pause]"), "{err}");
-    // Invented tags are read aloud downstream — that is why they fail here.
-    let err = ok("Hắn [khóc].").unwrap_err();
-    assert!(err.to_string().contains("voice tag"), "{err}");
+    // Every bracket is refused now — the engine's own tag, a case variant, an
+    // alias, an invented one — and the message names what to write instead. A
+    // tag in the text is the old shape, where the code had to work out which
+    // words it stood for; the declaration says so.
+    for text in [
+        "Hắn [cười].",
+        "Nàng [CƯỜI].",
+        "Hắn [sigh].",
+        "Dừng [pause] lại.",
+        "Hắn [khóc].",
+    ] {
+        let err = validate_inline_tags(&tagged(text), "vieneu").unwrap_err();
+        assert!(err.to_string().contains("nonverbal"), "{text}: {err}");
+    }
 }
 
-/// The tag vocabulary is the engine's, not the code's: a checkpoint that
-/// voices no tags refuses one, and converts no written sound into a tag either.
+/// The tag vocabulary is the engine's, not the code's: a checkpoint that voices
+/// no tags refuses one, and the declaration names the engine's keys.
 #[test]
 fn a_tagless_engine_refuses_tags_and_converts_no_written_sound() {
     let tagged = json!({
-        "segments": [{"speaker": "Narrator", "text": "Nắng [cười] lên."}],
+        "segments": [{"speaker": "Thanh Sơn lão tổ", "text": "Nắng [cười] lên."}],
         "roster": ["Narrator"]
     });
-    validate_inline_tags(&tagged, "vieneu").unwrap();
+    let err = validate_inline_tags(&tagged, "vieneu").unwrap_err();
+    assert!(err.to_string().contains("nonverbal"), "{err}");
     let err = validate_inline_tags(&tagged, "gemini").unwrap_err();
     assert!(err.to_string().contains("voices no tags"), "{err}");
 

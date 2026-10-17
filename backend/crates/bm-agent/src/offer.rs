@@ -98,6 +98,24 @@ pub(crate) async fn run_offer(
             let mut digest_settings = settings.with_analyzer_settings(&offer.analyzer_settings);
             // The id rides the offer; the overlay carries model, endpoint and
             digest_settings.analyzer = analyzer.clone();
+            // **The judge lives in the sidecar**, so a digest that will ask it
+            // has to start one. Best effort, and only when the box's policy
+            // already keeps a sidecar: a judge is not worth overriding the
+            // operator's memory policy, and a sidecar that will not start costs
+            // the verdicts, never the chapter.
+            if digest_settings.digest.judge.mode != "off" {
+                if !keep_sidecar {
+                    eprintln!(
+                        "digest ch{n}: this box's policy keeps no sidecar, so the judge \
+                         is not asked — set `digest.judge.mode` to \"off\" to stop this line"
+                    );
+                } else if let Err(e) = sidecar.ensure(layout, tts_threads).await {
+                    eprintln!(
+                        "digest ch{n}: the judge's sidecar did not start ({e:#}) — \
+                         digesting without verdicts"
+                    );
+                }
+            }
             let (delta, script) = run_digest(
                 layout,
                 n,

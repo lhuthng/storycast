@@ -32,6 +32,7 @@ impl Planned {
     pub fn plan(segments: &[Value]) -> Planned {
         let mut out = Planned::default();
         for (i, seg) in drop_headline(segments).iter().enumerate() {
+            let seg = &speak_as_declared(seg);
             if crate::util::is_sound_item(seg) {
                 match out.fires.last_mut() {
                     Some(f) => f.push(seg.clone()),
@@ -111,6 +112,30 @@ impl Planned {
 
 pub(crate) fn seg_text(seg: &Value) -> &str {
     seg.get("text").and_then(|t| t.as_str()).unwrap_or("")
+}
+
+/// The line as the engine will speak it: a declared non-verbal sound becomes the
+/// engine's own tag here and nowhere else. The script keeps the source's words —
+/// so the narrator reads them, and the reviewer sees them — and the render and the
+/// merge, which both plan, get the tag. `replaces` was checked against the text at
+/// the gate, so the first occurrence is the one.
+fn speak_as_declared(seg: &Value) -> Value {
+    let (Some(text), Some(sound)) = (seg.get("text").and_then(Value::as_str), seg.get("nonverbal"))
+    else {
+        return seg.clone();
+    };
+    let (Some(replaces), Some(tag)) = (
+        sound.get("replaces").and_then(Value::as_str),
+        sound.get("tag").and_then(Value::as_str),
+    ) else {
+        return seg.clone();
+    };
+    if replaces.is_empty() || !text.contains(replaces) {
+        return seg.clone();
+    }
+    let mut out = seg.clone();
+    out["text"] = Value::String(text.replacen(replaces, tag, 1));
+    out
 }
 
 /// True when a segment is an embedded chapter headline (`Chương 12: …` or

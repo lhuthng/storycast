@@ -101,6 +101,21 @@ impl Tts {
         resp.json().await.context("parsing /policy")
     }
 
+    /// Whether the process on this port carries the declared-sound judge. The
+    /// sidecar answers `404` when it has none; any other answer — 422 for a body
+    /// it will not parse, say — means the endpoint is served, which is all this
+    /// asks. Not an error channel: a box with no judge is a normal box.
+    pub async fn judge_present(&self) -> bool {
+        let resp = self
+            .http
+            .post(format!("{}/judge", self.base))
+            .timeout(Duration::from_secs(5))
+            .json(&json!({}))
+            .send()
+            .await;
+        matches!(resp, Ok(r) if r.status().as_u16() != 404)
+    }
+
     /// Render one utterance to WAV bytes at the engine's native sample rate.
     pub async fn infer(
         &self,

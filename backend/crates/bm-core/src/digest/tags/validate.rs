@@ -23,16 +23,13 @@ pub(crate) fn inline_tags(text: &str) -> Vec<String> {
     out
 }
 
-/// The engine's non-verbal tags, bracketed: the declared tag and the other
-/// spellings its checkpoint accepts. An engine that voices none refuses every
-/// bracket, which is what keeps a tag out of a tagless chapter.
+/// The engine's non-verbal tags must be *declared*, never written into the text.
+/// A tag in the text is the old shape, where the code had to work out which words
+/// it stood for; the declaration says so, and the plan places the tag. An engine
+/// that voices none refuses the bracket outright, which keeps a tag out of a
+/// tagless chapter.
 pub(crate) fn validate_inline_tags(data: &Value, engine: &str) -> Result<()> {
     let decls = crate::voices::nonverbals(engine);
-    let mut allowed: Vec<String> = Vec::new();
-    for n in decls {
-        allowed.push(n.tag.trim_matches(['[', ']']).to_lowercase());
-        allowed.extend(n.aliases.iter().map(|a| a.to_lowercase()));
-    }
     let Some(segments) = data.get("segments").and_then(Value::as_array) else {
         return Ok(());
     };
@@ -41,18 +38,25 @@ pub(crate) fn validate_inline_tags(data: &Value, engine: &str) -> Result<()> {
             continue;
         }
         let text = s.get("text").and_then(|t| t.as_str()).unwrap_or("");
-        for tag in inline_tags(text) {
-            if allowed.contains(&tag.to_lowercase()) {
-                continue;
-            }
-            let named = decls.iter().map(|n| n.tag).collect::<Vec<_>>().join("/");
-            let only = if named.is_empty() {
-                "this engine voices no tags".to_string()
-            } else {
-                format!("{named} only")
-            };
-            anyhow::bail!("segment {i}: [{tag}] is not a voice tag ({only})");
+        let tags = inline_tags(text);
+        let Some(tag) = tags.first() else {
+            continue;
+        };
+        if s.get("speaker").and_then(|v| v.as_str()) == Some("Narrator") {
+            anyhow::bail!(
+                "segment {i}: narration is read exactly as written and never carries a voice tag, \
+                 so [{tag}] must be the words the source wrote"
+            );
         }
+        if decls.is_empty() {
+            anyhow::bail!("segment {i}: [{tag}] is not a voice tag (this engine voices no tags)");
+        }
+        let keys = decls.iter().map(|n| n.key).collect::<Vec<_>>().join("/");
+        anyhow::bail!(
+            "segment {i}: [{tag}] is written into the text — write the source's own words and \
+             declare the sound beside them, e.g. \"nonverbal\": {{\"key\": \"{keys}\", \"replaces\": \
+             \"<the words the sound stands for>\"}}"
+        );
     }
     Ok(())
 }

@@ -49,6 +49,10 @@ impl Inner {
                     if i < skip {
                         continue;
                     }
+                    // The narrator reads the line as written, so a sound in it stays words.
+                    if s.get("speaker").and_then(|v| v.as_str()) == Some("Narrator") {
+                        continue;
+                    }
                     let old = s
                         .get("text")
                         .and_then(|t| t.as_str())

@@ -222,7 +222,7 @@ pub(crate) fn parse_sound_script(
             })?;
             halves.push(half.to_string());
         }
-        if !source_text_matches(text, &halves, &vocab.engine) {
+        if !source_text_matches(text, &halves) {
             return Err(format!(
                 "sound line {id}: the parts do not spell the line exactly — the halves, in order, \
                  must reproduce {:?}",

@@ -378,9 +378,36 @@ impl Inner {
     ) -> anyhow::Result<String> {
         let engine = self.settings.engine.clone();
         let path = self.layout.bible();
-        if manual {
-            // A named pair that folds nothing must refuse, not silently pass:
+        // Manual names are surface spellings — "Thuỷ Hành" for a bible's
+        // "Thủy Hành" — so resolve them onto the entries' own names first,
+        // the same fold the ask-time gate uses. Automatic folds already name
+        // entries exactly.
+        let resolved: Vec<bm_core::digest::BibleMerge>;
+        let merges: &[bm_core::digest::BibleMerge] = if manual {
             let bible: Value = bm_core::read_json(&path).unwrap_or(json!({"characters": []}));
+            let cast = bm_core::cast::read_cast(&engine, &self.layout.cast(&engine));
+            resolved = merges
+                .iter()
+                .map(|(canonical, absorbs)| {
+                    let canonical = bm_core::digest::resolve_entry(&bible, canonical)
+                        .unwrap_or_else(|| canonical.clone());
+                    let absorbs = absorbs
+                        .iter()
+                        .map(|n| {
+                            // An exact cast key is the thing being removed —
+                            // fold it, never collapse it onto the survivor.
+                            if cast.contains_key(n) {
+                                n.clone()
+                            } else {
+                                bm_core::digest::resolve_entry(&bible, n)
+                                    .unwrap_or_else(|| n.clone())
+                            }
+                        })
+                        .collect();
+                    (canonical, absorbs)
+                })
+                .collect();
+            // A named pair that folds nothing must refuse, not silently pass:
             let names: Vec<&str> = bible
                 .get("characters")
                 .and_then(|c| c.as_array())
@@ -390,8 +417,7 @@ impl Inner {
                         .collect()
                 })
                 .unwrap_or_default();
-            let cast = bm_core::cast::read_cast(&engine, &self.layout.cast(&engine));
-            for (canonical, absorbs) in merges {
+            for (canonical, absorbs) in &resolved {
                 if canonical == "Narrator" || absorbs.iter().any(|a| a == "Narrator") {
                     anyhow::bail!("merge refuses the Narrator — it is a voice, not a character");
                 }
@@ -412,7 +438,10 @@ impl Inner {
                     }
                 }
             }
-        }
+            &resolved
+        } else {
+            merges
+        };
         // Pre-mutation snapshot: one reconcile rewrites bible, cast and
         {
             let snap = self

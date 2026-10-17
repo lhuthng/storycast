@@ -73,6 +73,7 @@ async fn the_single_call_path_truncates_a_long_chapter() -> anyhow::Result<()> {
         chunk_chars: 0,
         // The escape hatch the split ships with: exactly the digest of every
         answer_tokens: 0,
+        ..Default::default()
     };
     let mut progress = |f: f32, s: String| println!("  [{:.0}%] {s}", f * 100.0);
     let analyzer = settings.analyzer.clone();

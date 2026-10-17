@@ -177,6 +177,14 @@ impl Layout {
             args.push("--threads".into());
             args.push(threads.to_string());
         }
+        // The judge rides the bake's own directory, so a box gets it with the
+        // models or not at all — and a box without it still renders, since the
+        // sidecar answers `404` and the digest asks nothing.
+        let judge = models.join("laya");
+        if judge.is_dir() {
+            args.push("--judge".into());
+            args.push(judge.display().to_string());
+        }
         (self.sidecar_binary(), args)
     }
 

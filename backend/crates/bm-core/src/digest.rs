@@ -13,6 +13,7 @@ use std::time::Duration;
 use window::{plan_windows, tokens, weight, Window};
 
 mod canon;
+mod judge;
 mod llm;
 mod reconcile;
 mod tags;
@@ -30,10 +31,10 @@ pub use quotes::{quote_findings, QuoteFinding};
 pub use run::{analyze_chapter, digest_chapter, Complaint, Round};
 
 pub use canon::{
-    apply_merges, canon_key, canonicalize_script, merge_bible, resolve_speaker,
+    apply_merges, canon_key, canonicalize_script, merge_bible, resolve_entry, resolve_speaker,
     scrub_ambiguous_aliases, BibleMerge,
 };
-pub use llm::{fetch_models, generate, parse_retry_delay, GenError};
+pub use llm::{fetch_models, generate, parse_retry_delay, retry_wait, GenError};
 pub use reconcile::{cast_only_folds, parse_reconcile_merges, reconcile_plan, ReconcilePlan};
 pub use tags::{
     apply_tag_aliases, discard_unknown_effect_tags, retag_text, tags_of, validate_context,
@@ -47,6 +48,9 @@ mod tests;
 
 #[cfg(test)]
 mod quote_gate_tests;
+
+#[cfg(test)]
+mod judge_tests;
 
 #[cfg(test)]
 mod repair_template_tests;

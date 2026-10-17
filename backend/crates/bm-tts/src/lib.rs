@@ -22,6 +22,7 @@ pub mod codec;
 pub mod engine;
 pub mod f32le;
 pub mod framecap;
+pub mod judge;
 pub mod npz;
 // Gated on the `pocket` feature: the module is the only thing in this crate
 // that needs Candle, and a VieNeu-only build should not compile it at all.

@@ -2,6 +2,7 @@
 
 use crate::codec::to_wav_bytes;
 use crate::engine::Request;
+use crate::judge::Judge;
 #[cfg(feature = "pocket")]
 use crate::pocket::Pocket;
 use crate::sample::{Rng, Sampling};
@@ -32,6 +33,9 @@ pub struct Server {
 
 struct Inner {
     backend: Backend,
+    /// The declared-sound judge, when this box has its model. Absent is the
+    /// normal case on a box that only renders.
+    judge: Option<tokio::sync::Mutex<Judge>>,
 }
 
 /// The two engines the one HTTP surface serves. The contract — `/infer` in,
@@ -67,8 +71,11 @@ impl Server {
     }
 
     /// Install the loaded model. Once; a later call is ignored.
-    pub fn fill(&self, backend: Backend) {
-        let _ = self.inner.set(Inner { backend });
+    pub fn fill(&self, backend: Backend, judge: Option<Judge>) {
+        let _ = self.inner.set(Inner {
+            backend,
+            judge: judge.map(tokio::sync::Mutex::new),
+        });
     }
 
     /// The loaded state, or `None` while the model is still loading.
@@ -356,6 +363,40 @@ fn seed() -> u64 {
         .unwrap_or(0)
 }
 
+/// One declared non-verbal sound, asked about. The caller owns the vocabulary:
+/// it names the sound, and the two spellings of the line.
+#[derive(Deserialize)]
+struct JudgeBody {
+    /// The line exactly as the source wrote it.
+    raw: String,
+    /// The same line with the tag applied where the sound stands.
+    tagged: String,
+    /// The exact words the tag stands for.
+    replaces: String,
+    /// What the engine calls the sound, e.g. `clearing of the throat`.
+    sound: String,
+}
+
+/// `P(yes)`: is this sound the right one for those words? A box with no judge
+/// answers 404 so the caller can tell "nothing to ask" from "the judge failed".
+async fn judge(State(s): State<Arc<Server>>, Json(body): Json<JudgeBody>) -> Response {
+    let Some(inner) = s.inner() else {
+        return loading();
+    };
+    let Some(judge) = inner.judge.as_ref() else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "no judge on this box"})),
+        )
+            .into_response();
+    };
+    let mut judge = judge.lock().await;
+    match judge.p_yes(&body.raw, &body.tagged, &body.replaces, &body.sound) {
+        Ok(p_yes) => Json(serde_json::json!({"p_yes": p_yes})).into_response(),
+        Err(e) => failed(e),
+    }
+}
+
 pub fn router(server: Arc<Server>) -> Router {
     Router::new()
         .route("/health", get(health))
@@ -364,6 +405,7 @@ pub fn router(server: Arc<Server>) -> Router {
         .route("/policy", get(policy))
         .route("/infer", post(infer))
         .route("/preview", post(preview))
+        .route("/judge", post(judge))
         .route("/shutdown", post(shutdown))
         .with_state(server)
 }

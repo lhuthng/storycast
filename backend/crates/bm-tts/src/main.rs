@@ -28,6 +28,10 @@ struct Args {
     /// The preset voice store (`voices_v3_turbo.json`).
     #[arg(long)]
     voices: PathBuf,
+    /// The declared-sound judge's directory: its ONNX graph and `tokenizer/`.
+    /// Absent is the normal case — the box then answers no verdicts.
+    #[arg(long)]
+    judge: Option<PathBuf>,
     #[arg(long, default_value_t = 8818)]
     port: u16,
     #[arg(long, default_value = "0.0.0.0")]
@@ -37,8 +41,21 @@ struct Args {
     threads: usize,
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+/// sea-g2p's path/technical branch (fancy_regex plus its syllable tables) wants
+/// several MB of stack; the 2 MiB thread default aborts the whole sidecar on a
+/// chapter with a path-like token, taking every in-flight render with it.
+const STACK_SIZE: usize = 32 * 1024 * 1024;
+
+fn main() -> Result<()> {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .thread_stack_size(STACK_SIZE)
+        .enable_all()
+        .build()
+        .context("building the tokio runtime")?;
+    runtime.block_on(serve())
+}
+
+async fn serve() -> Result<()> {
     let args = Args::parse();
 
     for (what, p) in [("models", &args.models), ("voices", &args.voices)] {
@@ -133,10 +150,23 @@ async fn main() -> Result<()> {
     .await
     .context("the model-load task panicked")??;
 
-    server.fill(backend);
+    let judge = match args.judge.as_deref() {
+        Some(dir) => match bm_tts::judge::Judge::from_dir(dir) {
+            Ok(j) => j,
+            // A judge that will not load must not take the renderer with it.
+            Err(e) => {
+                eprintln!("judge: not loaded ({e:#}) — this box answers no verdicts");
+                None
+            }
+        },
+        None => None,
+    };
+    let judging = judge.is_some();
+    server.fill(backend, judge);
     eprintln!(
-        "loaded {voices} preset voices (default {default:?}) in {:.1?} — now serving on {addr}",
-        started.elapsed()
+        "loaded {voices} preset voices (default {default:?}) in {:.1?} — now serving on {addr}{}",
+        started.elapsed(),
+        if judging { ", judge loaded" } else { "" }
     );
 
     // Two ways to end: the serve task failing, or a `POST /shutdown`. Returning

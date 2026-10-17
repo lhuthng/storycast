@@ -71,6 +71,17 @@ pub fn parse_retry_delay(s: &str) -> Option<f64> {
     None
 }
 
+/// How long a rate-limited call may be parked before it retries. A provider's
+/// `Retry-After` is a hint, not a promise: one that says "an hour" must not hold
+/// a worker for an hour, and the retry ladder would multiply it.
+pub const RETRY_WAIT_CAP: f64 = 300.0;
+
+/// The pause before a rate-limited retry: the provider's hint when it gives one,
+/// else `default`, never above [`RETRY_WAIT_CAP`].
+pub fn retry_wait(hint: Option<f64>, default: f64) -> f64 {
+    hint.unwrap_or(default).min(RETRY_WAIT_CAP)
+}
+
 /// The error for a provider key this process does not hold.
 fn missing_key(var: &str) -> GenError {
     GenError::Fatal(anyhow!(
@@ -313,7 +324,7 @@ async fn try_gemini_model(prompt: &str, key: &str, base: &str, model: &str) -> M
             404 => return ModelNext::Skip(format!("{status} ({})", head_chars(text.trim(), 120))),
             _ if text.contains("PerDay") => return ModelNext::Skip("day quota spent".to_string()),
             429 => {
-                let wait = parse_retry_delay(&text).map(|d| d + 2.0).unwrap_or(30.0);
+                let wait = retry_wait(parse_retry_delay(&text).map(|d| d + 2.0), 30.0);
                 last = format!("429, retry in {wait:.0}s");
                 eprintln!(
                     "gemini {model} attempt {}/3 rate-limited, sleeping {:.0}s",
@@ -995,5 +1006,16 @@ mod tests {
         ] {
             assert_eq!(parse_retry_delay(bad), None, "{bad:?}");
         }
+    }
+
+    #[test]
+    fn a_retry_hint_is_capped_so_no_worker_is_parked_for_hours() {
+        // A provider `Retry-After: 3600` becomes "retry in 3602s": honored, but
+        // never for the whole hour it asks.
+        assert_eq!(retry_wait(Some(3602.0), 60.0), RETRY_WAIT_CAP);
+        assert_eq!(retry_wait(Some(10.0), 60.0), 10.0);
+        assert_eq!(retry_wait(None, 45.0), 45.0);
+        // The default backoff is capped too, whatever the attempt number.
+        assert_eq!(retry_wait(None, 9999.0), RETRY_WAIT_CAP);
     }
 }

@@ -99,6 +99,38 @@ pub struct DigestSettings {
     pub chunk_chars: u32,
     /// The answer budget for one call, in tokens. **`0` means never split.**
     pub answer_tokens: u32,
+    /// What the declared-sound judge is allowed to do: `off`, `advise` or
+    /// `refuse`. See [`JudgeSettings`].
+    #[serde(default)]
+    pub judge: JudgeSettings,
+}
+
+/// The declared-sound judge: an AI asked whether each declared non-verbal sound
+/// is the right one, because the code cannot know (see `digest::judge`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct JudgeSettings {
+    /// `off` never asks; `advise` writes the verdict into the log; `refuse`
+    /// makes a low verdict a staging complaint, so the model is asked again.
+    pub mode: String,
+    /// Refuse below this `P(yes)`. The judge's own answers overlap end to end —
+    /// a correct tag can score 0.01 and a wrong one 0.99 — so this is a dial on
+    /// how many correct tags get bounced, not a separator between right and
+    /// wrong. 0.10 refuses ~14% of correct declarations and ~36% of wrong ones;
+    /// 0.50 refuses ~57% and ~81%. Raise it only with that price in mind.
+    pub threshold: f32,
+    /// Where the sidecar's judge answers. The sidecar's port, nothing else.
+    pub url: String,
+}
+
+impl Default for JudgeSettings {
+    fn default() -> Self {
+        JudgeSettings {
+            mode: "refuse".into(),
+            threshold: 0.10,
+            url: "http://127.0.0.1:8818/judge".into(),
+        }
+    }
 }
 
 impl Default for DigestSettings {
@@ -108,6 +140,7 @@ impl Default for DigestSettings {
             chunk_chars: 0,
             // Under the 16384 every backend enforces, with room for a model
             answer_tokens: DEFAULT_ANSWER_TOKENS,
+            judge: JudgeSettings::default(),
         }
     }
 }

@@ -94,7 +94,9 @@ fn render_nonverbal(body: &mut String, engine: &str, missed: &mut Vec<String>) {
     }
     *body = body.replace("{voice_tags}", &vocabulary_block(tags));
     for n in tags {
-        *body = body.replace(&format!("{{tag_{}}}", n.key), n.tag);
+        // The placeholder names are the rule's, but what the answer writes is the
+        // *key*: a tag is the engine's spelling and never reaches a segment.
+        *body = body.replace(&format!("{{tag_{}}}", n.key), n.key);
     }
 }
 
@@ -127,10 +129,11 @@ fn strip_section(body: &mut String, start_marker: &str, ends: &[&str]) -> bool {
 const NONVERBAL_PLACEHOLDERS: [&str; 4] =
     ["{voice_tags}", "{tag_laugh}", "{tag_sigh}", "{tag_throat}"];
 
-/// The concept/tag list the rule renders: the gloss, then the exact token.
+/// The key list the rule renders: the key to name, then what sound it stands for.
+/// The answer declares a key — which tag that key renders to is the engine's.
 fn vocabulary_block(tags: &[crate::voices::Nonverbal]) -> String {
     tags.iter()
-        .map(|n| format!("  {:<15}{}", n.gloss, n.tag))
+        .map(|n| format!("  {:<8}{}", n.key, n.gloss))
         .collect::<Vec<_>>()
         .join("\n")
 }

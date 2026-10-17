@@ -9,7 +9,7 @@ CAST
 CHARACTERS
 {bible_json}
 
-7. NON-VERBAL SOUNDS. The tags this engine voices:
+7. NON-VERBAL SOUNDS. The keys this engine voices:
 {voice_tags}
 {tag_laugh} {tag_sigh} {tag_throat}
 

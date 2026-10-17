@@ -241,6 +241,7 @@ mod tests {
             chunk_sentences: sentences,
             chunk_chars: chars,
             answer_tokens: tokens,
+            judge: crate::config::JudgeSettings::default(),
         }
     }
 

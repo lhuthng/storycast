@@ -125,7 +125,50 @@ pub(crate) async fn run_g(
             }
         };
         match judged {
-            Ok(value) => return Ok(value),
+            Ok(value) => {
+                // The code has checked the shape; the judge is the one check it
+                // cannot make, and it is asked on a chapter that otherwise passed.
+                if round == Round::Staging {
+                    let judged = judge::check(
+                        &value,
+                        &ctx.settings.engine,
+                        &ctx.settings.digest.judge,
+                    )
+                    .await;
+                    if let Some(why) = &judged.skipped {
+                        ctx.report(to, format!("{}{why} (no verdict)", part_prefix(ctx.part)));
+                    }
+                    for doubt in &judged.doubts {
+                        ctx.report(to, format!("{}{doubt}", part_prefix(ctx.part)));
+                    }
+                    if let Some(c) = judged.complaint {
+                        // **One repair, then the chapter goes through.** A model
+                        // that scores 0.01 on tags the code already accepted
+                        // cannot be allowed to hold a chapter hostage, and the
+                        // model has nothing left to change the second time.
+                        if attempt == 0 {
+                            ctx.report(
+                                to,
+                                format!(
+                                    "{}{} judge said {c}, asking for one repair",
+                                    part_prefix(ctx.part),
+                                    round.as_str(),
+                                ),
+                            );
+                            complaint = Some(c);
+                            continue;
+                        }
+                        ctx.report(
+                            to,
+                            format!(
+                                "{}{c}; the judge is not holding the chapter for it",
+                                part_prefix(ctx.part)
+                            ),
+                        );
+                    }
+                }
+                return Ok(value);
+            }
             Err(c) => match route(c.blame, round, attempt) {
                 // Someone else's fault: the answer is dropped without a second
                 Route::Back => {
@@ -771,8 +814,7 @@ async fn generate_retrying(
                 return Ok(t);
             }
             Err(GenError::RateLimited(msg)) => {
-                let wait = parse_retry_delay(&msg)
-                    .unwrap_or_else(|| (30.0 * 2f64.powi(attempt)).min(300.0));
+                let wait = retry_wait(parse_retry_delay(&msg), 30.0 * 2f64.powi(attempt));
                 progress(
                     (from + 0.05 * attempt as f32).min(to),
                     format!("rate-limited, sleeping {wait:.0}s"),

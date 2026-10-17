@@ -314,45 +314,22 @@ impl Inner {
     /// The ask-time half of a merge: the bible checks `apply_reconcile`
     fn validate_merge(&self, survivor: &str, absorbed: &[String]) -> anyhow::Result<()> {
         let bible = bm_core::digest::load_bible(&self.layout.bible());
-        let survivor = bm_core::digest::resolve_speaker(&bible, survivor);
-        let entry = bible
-            .get("characters")
-            .and_then(|c| c.as_array())
-            .into_iter()
-            .flatten()
-            .find(|c| {
-                c.get("name")
-                    .and_then(|n| n.as_str())
-                    .map(|n| bm_core::util::fold(n) == bm_core::util::fold(&survivor))
-                    .unwrap_or(false)
-            });
-        if entry.is_none() {
-            anyhow::bail!("survivor {survivor:?} is not in the bible");
+        if bm_core::digest::resolve_entry(&bible, survivor).is_none() {
+            anyhow::bail!(
+                "survivor {:?} is not in the bible",
+                bm_core::digest::resolve_speaker(&bible, survivor)
+            );
         }
+        let cast = bm_core::cast::read_cast(
+            &self.settings.engine,
+            &self.layout.cast(&self.settings.engine),
+        );
         for a in absorbed {
-            let a = bm_core::digest::resolve_speaker(&bible, a);
-            let known = bible
-                .get("characters")
-                .and_then(|c| c.as_array())
-                .into_iter()
-                .flatten()
-                .any(|c| {
-                    let name_matches = c
-                        .get("name")
-                        .and_then(|n| n.as_str())
-                        .map(|n| bm_core::util::fold(n) == bm_core::util::fold(&a))
-                        .unwrap_or(false);
-                    let alias_matches = c
-                        .get("proper_aliases")
-                        .and_then(|p| p.as_array())
-                        .into_iter()
-                        .flatten()
-                        .filter_map(|x| x.as_str())
-                        .any(|x| bm_core::util::fold(x) == bm_core::util::fold(&a));
-                    name_matches || alias_matches
-                });
-            if !known {
-                anyhow::bail!("{a:?} is neither a bible entry nor a cast voice");
+            if bm_core::digest::resolve_entry(&bible, a).is_none() && !cast.contains_key(a) {
+                anyhow::bail!(
+                    "{:?} is neither a bible entry nor a cast voice",
+                    bm_core::digest::resolve_speaker(&bible, a)
+                );
             }
         }
         Ok(())

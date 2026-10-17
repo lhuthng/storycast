@@ -162,7 +162,7 @@ front end implements) to everything a caller otherwise hardcodes:
 
 | Field | What it answers | Who reads it |
 | --- | --- | --- |
-| `nonverbal` | sounds it voices as tags, and the written forms each replaces | `digest::render_nonverbal`, `validate_inline_tags`, the source gate, `retag_text` |
+| `nonverbal` | the non-verbal sounds it voices, one key each — the answer declares a key and the plan places the engine's tag | `digest::render_nonverbal`, `validate_inline_tags`, the source gate, `assemble::plan` |
 | `languages` | BCP-47 tags it can voice | `voices_language` (the gate is the adapter manifest's job — see below) |
 | `cloning` | whether a reference clip means anything to it | `roster add-sample` refuses when it is `false` |
 | `dict` | its G2P lexicon, if any | `Layout::tts_dict`, `start_tts` |
@@ -528,10 +528,10 @@ to:
   one row per engine (`EngineDecl { name, nonverbal }`); `voices::nonverbals()`
   answers for whatever name is bound, and a name nothing declares answers
   "none". **Adding an engine is adding a row**, not editing every reader. The
-  gates read the same row: which `[...]` tags a script may carry, which written
-  sounds a staging answer may replace with a tag, and whether the retag pass runs
-  at all are the declaration's, so a tagless engine refuses a tag and converts no
-  text rather than another checkpoint's. A test
+  gates read the same row: which keys a staging answer may declare, and whether
+  the non-verbal rule renders at all, are the declaration's, so a tagless engine
+  has no key to name and refuses a bracketed tag rather than another
+  checkpoint's. A test
   keeps that table equal to the catalogue's engine list, so adding one without
   the other is a build failure rather than a silent half-addition.
 
@@ -543,6 +543,25 @@ to:
   `{tag_throat}`, and the rule is bounded by its own heading (`7. NON-VERBAL
   SOUNDS.` through `8. MUSIC:`), so the section mechanism that rewrites rules
   1–3 for the automatic path is what takes this one out.
+
+- **The last check is not code, because it cannot be.** Whether a declared sound
+  is the *right* one for those words is a judgement about meaning. The code proves
+  a key is declared, the words are in the line and the line is not narration, and
+  it knows nothing beyond that. So the staging round asks a small ONNX decision
+  model — the **declared-sound judge**, `bm-tts`'s `/judge` — about every
+  declaration, showing it both spellings of the line (the source's words, and the
+  line with the tag applied) and taking `P(yes)`. Its weights ride the bake in
+  `models/laya/` (`--laya`, see [ARTIFACTS](ARTIFACTS.md)); a box without them
+  answers `404` and nothing is asked.
+
+  What the verdict may do is a setting (`digest.judge` in `settings.json`): `off`
+  never asks, `advise` writes each verdict into the run's log, `refuse` turns a low
+  one into the ordinary one repair. `threshold` is a **price, not a separator** —
+  on 21 real pairs the lowest score on a correct tag was 0.01 and the highest on a
+  wrong one 0.99, so right and wrong overlap end to end. At 0.10 it refuses roughly
+  14% of correct declarations and catches roughly 36% of wrong ones; at 0.50 that
+  is 57% and 81%. A refusal costs one repair and never the chapter, and it is never
+  the reason one fails.
 
 - **`en-US` reads English; it does not translate.** Chapter text, `mentions`
   keys, segment text and title are all English, and nothing in either prompt is

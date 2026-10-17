@@ -193,6 +193,29 @@ pub fn resolve_speaker(bible: &Value, name: &str) -> String {
     name.to_string()
 }
 
+/// The bible entry a surface name belongs to: exact name or alias, the same
+/// after case/title folding, then after diacritic folding. `None` when
+/// nothing matches, so the caller keeps the spelling it was given.
+pub fn resolve_entry(bible: &Value, name: &str) -> Option<String> {
+    let key = crate::util::fold(&resolve_speaker(bible, name));
+    bible
+        .get("characters")
+        .and_then(|c| c.as_array())
+        .into_iter()
+        .flatten()
+        .find_map(|c| {
+            let n = c.get("name").and_then(|x| x.as_str())?;
+            let owns = c
+                .get("proper_aliases")
+                .and_then(|a| a.as_array())
+                .into_iter()
+                .flatten()
+                .filter_map(|x| x.as_str())
+                .any(|x| crate::util::fold(x) == key);
+            (crate::util::fold(n) == key || owns).then(|| n.to_string())
+        })
+}
+
 /// Rewrite a digest's roster + segment speakers to canonical bible names, in
 pub fn canonicalize_script(data: &mut Value, bible: &Value) -> usize {
     let mut changed = 0;

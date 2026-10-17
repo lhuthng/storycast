@@ -75,6 +75,14 @@ upstream HuggingFace commits (`backbone_rev`, `codec_rev`) and a vendored
 sea-g2p hash. Given those pins, the bytes are fully determined. They change when
 you re-bake, which is a deliberate act.
 
+A bake can carry **the declared-sound judge** as well (`--laya <dir>`): its graph
+and `tokenizer/` land under `models/laya/` and are recorded in the manifest like
+any other weight. Its bytes are not pinned to an upstream commit — the directory
+the operator points at is the source — so the manifest hash is the only record of
+what a box is running, and `--laya` is what makes it reproducible. The judge is
+optional: without it the sidecar loads no judge, `/judge` answers `404`, and the
+digest asks nothing.
+
 **`models/voices.json` is the cluster's voice roster**, and it is rewritten by
 enrollment. It is why `voice_store_covers` and `remote_voice_store_complete`
 exist in the first place: a box holding an incomplete roster answers

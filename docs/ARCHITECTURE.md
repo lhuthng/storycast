@@ -635,6 +635,12 @@ of a pipeline where it is expensive to notice.
   splits**, which is the escape hatch back to the single-call digest — usable as
   a bisect, because one number is the difference.
 
+  The staging round has one further gate that is not code: a small ONNX
+  decision model on the box is asked whether each declared non-verbal sound is the
+  right one for its line, because that is a judgement about meaning and the code
+  has none. It is `digest.judge` in the same settings block, it can only ever cost
+  one repair, and [PROFILES](PROFILES.md) has the numbers and the price.
+
   Two things make the parts *one* digest rather than several:
 
   * **`summary`.** Each part's attribution answer ends with 2–4 sentences on

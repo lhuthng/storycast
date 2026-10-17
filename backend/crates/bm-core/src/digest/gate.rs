@@ -2,8 +2,14 @@ use super::parse::effective_kind;
 use super::prompts::PreparedChapter;
 use super::prompts::PreparedEvent;
 use super::*;
-/// Apply the answer's explicitly declared grammar fixes to one source event.
-pub(crate) fn corrected_source(event: &PreparedEvent, fixes: &[Value], engine: &str) -> String {
+
+/// The source event's own text with the answer's declared grammar fixes applied.
+///
+/// The gate rewrites the *source* and nothing else. Which words stand for a
+/// non-verbal sound is a judgement about meaning, and the code does not get to
+/// make one: a segment says the source's words, and the answer *declares* the
+/// sound it wants spoken instead (see `validate_nonverbal`).
+pub(crate) fn corrected_source(event: &PreparedEvent, fixes: &[Value]) -> String {
     let mut text = event.text.clone();
     for fix in fixes {
         let (Some(before), Some(after)) = (
@@ -16,79 +22,65 @@ pub(crate) fn corrected_source(event: &PreparedEvent, fixes: &[Value], engine: &
             text = text.replace(before, after);
         }
     }
-    // The prompt permits the engine's voice tags to replace a written sound,
-    // and an engine that voices none keeps the text as it is.
-    retag_text(&text, engine).unwrap_or(text)
-}
-fn normalized_source(text: &str, engine: &str) -> String {
-    let mut out = text.to_string();
-    for n in crate::voices::nonverbals(engine) {
-        let tag = n.tag;
-        // The tag, *and the punctuation it swallowed when it took the sound's
-        for punct in [",", ";", ":", ".", "…", "!", "?"] {
-            out = out.replace(&format!("{tag}{punct}"), " ");
-            out = out.replace(&format!("{punct}{tag}"), " ");
-        }
-        out = out.replace(tag, " ");
-    }
-    crate::util::squeeze_ws(&out)
+    text
 }
 
-/// Text with every *written* non-verbal sound, and every tag standing in for
-pub(crate) fn source_without_written_sound(text: &str, engine: &str) -> String {
-    let mut out = text.to_lowercase();
-    for n in crate::voices::nonverbals(engine) {
-        // Longest spelling first, so a phrase is removed before its prefix.
-        for sound in std::iter::once(n.tag).chain(n.written.iter().copied()) {
-            for punct in [",", ";", ":", ".", "…", "!", "?"] {
-                out = out.replace(&format!("{sound}{punct}"), " ");
-            }
-            out = out.replace(sound, " ");
-        }
-    }
-    crate::util::squeeze_ws(&out)
+/// Whether the segment's own words are the source event's words, in order. The
+/// two spellings of a split — the halves touching, or one space between them —
+/// are the same words; whitespace is not a change.
+pub(crate) fn source_text_matches(expected: &str, actual: &[String]) -> bool {
+    let expected = crate::util::squeeze_ws(expected);
+    crate::util::squeeze_ws(&actual.concat()) == expected
+        || crate::util::squeeze_ws(&actual.join(" ")) == expected
 }
 
-pub(crate) fn source_text_matches(expected: &str, actual: &[String], engine: &str) -> bool {
-    let expected = normalized_source(expected, engine);
-    let joined = actual
-        .iter()
-        .map(|s| normalized_source(s, engine))
-        .collect::<Vec<_>>();
-    normalized_source(&joined.concat(), engine) == expected
-        || normalized_source(&joined.join(" "), engine) == expected
-        || source_without_written_sound(&expected, engine)
-            == normalized_source(&joined.concat(), engine).to_lowercase()
-        || source_without_written_sound(&expected, engine)
-            == normalized_source(&joined.join(" "), engine).to_lowercase()
-}
-
-/// The tag whose written sound is still sitting in the text, as the corpus
-fn leftover_written_sound(text: &str, engine: &str) -> Option<(&'static str, &'static str)> {
-    let lower = text.to_lowercase();
-    for n in crate::voices::nonverbals(engine) {
-        if !lower.contains(n.tag) {
-            continue;
-        }
-        if let Some(spelling) = n.written.iter().find(|spelling| lower.contains(**spelling)) {
-            return Some((n.tag, spelling));
-        }
+/// The non-verbal sound a segment declares, checked against the only things the
+/// code can know: the engine's own keys, and the one stretch of the line the
+/// sound stands for. Whether those words really *are* that sound is a judgement
+/// about meaning — the answer's to make, not this function's.
+fn validate_nonverbal(
+    segment: &Value,
+    i: usize,
+    id: &str,
+    kind: &str,
+    text: &str,
+    engine: &str,
+) -> Result<()> {
+    let Some(sound) = segment.get("nonverbal") else {
+        return Ok(());
+    };
+    let decls = crate::voices::nonverbals(engine);
+    let key = sound.get("key").and_then(Value::as_str).unwrap_or("");
+    if !decls.iter().any(|n| n.key == key) {
+        let allowed = if decls.is_empty() {
+            "this engine voices no non-verbal sounds".to_string()
+        } else {
+            format!(
+                "key must be one of {}",
+                decls.iter().map(|n| n.key).collect::<Vec<_>>().join("/")
+            )
+        };
+        anyhow::bail!("segment {i}: {key:?} is not a non-verbal key — {allowed}");
     }
-    None
-}
-
-/// Explain a mismatch that is *only* about written non-verbal sound.
-fn written_sound_hint(expected: &str, actual: &str, engine: &str) -> Option<String> {
-    let (tag, literal) = leftover_written_sound(actual, engine)?;
-    if source_without_written_sound(expected, engine) != source_without_written_sound(actual, engine)
-    {
-        return None;
+    if kind == "narration" {
+        anyhow::bail!(
+            "source {id:?} is narration: the narrator reads the line as written, so it declares no \
+             non-verbal sound"
+        );
     }
-    Some(format!(
-        "text still contains the written sound {literal:?} that {tag} stands for; the tag goes \
-         exactly where the sound was and its words are deleted — never both, and never moved to \
-         the start of the line"
-    ))
+    let replaces = sound.get("replaces").and_then(Value::as_str).unwrap_or("");
+    if replaces.trim().is_empty() {
+        anyhow::bail!(
+            "segment {i}: `nonverbal.replaces` is empty — name the words the sound stands for"
+        );
+    }
+    match text.matches(replaces).count() {
+        1 => Ok(()),
+        n => anyhow::bail!(
+            "segment {i}: `nonverbal.replaces` {replaces:?} appears {n} times in the text — it must \
+             be the one stretch the sound stands for"
+        ),
+    }
 }
 
 /// Check the source contract independently of the LLM's interpretation.
@@ -184,6 +176,7 @@ pub(crate) fn validate_source_alignment(
         {
             anyhow::bail!("source {id:?}: quote delimiters must not be merged into segment {i}");
         }
+        validate_nonverbal(segment, i, id, kind, text, engine)?;
     }
 
     for event in &prepared.events {
@@ -191,11 +184,8 @@ pub(crate) fn validate_source_alignment(
             anyhow::bail!("source event {:?} was dropped", event.id);
         }
         let actual = by_id.get(event.id.as_str()).cloned().unwrap_or_default();
-        let expected = corrected_source(event, &fixes, engine);
-        if !source_text_matches(&expected, &actual, engine) {
-            if let Some(hint) = written_sound_hint(&expected, &actual.concat(), engine) {
-                anyhow::bail!("source event {:?}: {hint}", event.id);
-            }
+        let expected = corrected_source(event, &fixes);
+        if !source_text_matches(&expected, &actual) {
             anyhow::bail!(
                 "source event {:?} was changed, duplicated, or split out of order (expected {:?}, got {:?})",
                 event.id,

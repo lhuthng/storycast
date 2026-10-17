@@ -408,7 +408,7 @@ pub(crate) fn parse_staged_script(
         &thoughts,
     )
     .map_err(theirs)?;
-    collapse_redundant_sounds(&mut data, &vocab.engine);
+    resolve_nonverbals(&mut data, &vocab.engine);
     lift_thought_stingers(&mut data, vocab.thought_stinger.as_deref());
     validate_script(&data, bible, context, &vocab.palette).map_err(mine)?;
     validate_inline_tags(&data, &vocab.engine).map_err(mine)?;
@@ -418,20 +418,27 @@ pub(crate) fn parse_staged_script(
     Ok(data)
 }
 
-/// Collapse a written non-verbal sound the answer left beside its tag.
-pub(crate) fn collapse_redundant_sounds(data: &mut Value, engine: &str) {
+/// Fill each declared sound in with the engine's own tag. The code knows the
+/// engine's keys and their spellings and copies the one the answer chose; it
+/// never chooses one itself, and the tag lands in the plan (see
+/// `assemble::plan::Planned`), not in the script's text.
+pub(crate) fn resolve_nonverbals(data: &mut Value, engine: &str) {
+    let decls = crate::voices::nonverbals(engine);
     let Some(segments) = data.get_mut("segments").and_then(Value::as_array_mut) else {
         return;
     };
     for segment in segments.iter_mut() {
-        if crate::util::is_sound_item(segment) {
-            continue;
-        }
-        let Some(text) = segment.get("text").and_then(Value::as_str) else {
+        let Some(key) = segment
+            .get("nonverbal")
+            .and_then(|n| n.get("key"))
+            .and_then(Value::as_str)
+            .map(str::to_string)
+        else {
             continue;
         };
-        if let Some(collapsed) = retag_text(text, engine) {
-            segment["text"] = json!(collapsed);
+        let decl = decls.iter().find(|n| n.key == key.as_str());
+        if let (Some(decl), Some(sound)) = (decl, segment.get_mut("nonverbal").and_then(Value::as_object_mut)) {
+            sound.insert("tag".to_string(), json!(decl.tag));
         }
     }
 }
