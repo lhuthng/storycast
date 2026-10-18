@@ -108,7 +108,11 @@ pub(crate) fn not_speech_ids(data: &Value) -> Result<HashSet<String>> {
 }
 
 /// Validate the complete source-id to speaker map against the preparer's
-fn normalize_attribution_metadata(data: &mut Value, bible: &Value, prepared: &PreparedChapter) {
+fn normalize_attribution_metadata(
+    data: &mut Value,
+    bible: &Value,
+    prepared: &PreparedChapter,
+) -> Vec<String> {
     let mut roster: Vec<String> = data
         .get("roster")
         .and_then(Value::as_array)
@@ -203,6 +207,7 @@ fn normalize_attribution_metadata(data: &mut Value, bible: &Value, prepared: &Pr
             .any(|c| c.get("name").and_then(Value::as_str) == Some(name))
             || resolve_speaker(bible, name) != name
     };
+    let mut undescribed: Vec<String> = Vec::new();
     for name in roster.clone() {
         if name == "Narrator"
             || is_anonymous_speaker(&name)
@@ -211,12 +216,16 @@ fn normalize_attribution_metadata(data: &mut Value, bible: &Value, prepared: &Pr
         {
             continue;
         }
+        undescribed.push(name.clone());
         new_names.insert(name.clone());
         new_characters.push(json!({
             "name": name,
             "personality": "",
-            "voice_hint": "adult male",
-            "tags": ["male"],
+            // A roster speaker the model did not describe: say "unknown", not
+            // "male". The gender is resolved from the text later; a wrong male
+            // voice baked here outlived every correction.
+            "voice_hint": "unknown",
+            "tags": [],
             "proper_aliases": [name]
         }));
     }
@@ -254,6 +263,7 @@ fn normalize_attribution_metadata(data: &mut Value, bible: &Value, prepared: &Pr
     data["roster"] = json!(roster);
     data["mentions"] = Value::Object(mentions);
     data["new_characters"] = Value::Array(new_characters);
+    undescribed
 }
 
 /// `split` says the answer is for one part of a chapter staged in windows,
@@ -265,13 +275,32 @@ pub(crate) fn parse_attribution(
     prepared: &PreparedChapter,
     split: bool,
 ) -> Result<Value, Complaint> {
+    parse_attribution_gated(raw, bible, prepared, split, true)
+}
+
+/// The lenient entry point's gated twin: `tolerate` false refuses an answer
+/// that leaves a roster speaker undescribed, so the run loop can spend its one
+/// repair asking for the description instead of synthesizing a silent one.
+pub(crate) fn parse_attribution_gated(
+    raw: &str,
+    bible: &Value,
+    prepared: &PreparedChapter,
+    split: bool,
+    tolerate: bool,
+) -> Result<Value, Complaint> {
     // Everything here is the attribution answer's own doing, so the blame is
     let mine = |e: anyhow::Error| Complaint::new(Round::Attribution, e);
     let cleaned = strip_fences(raw);
     let mut data = parse_json_repaired(cleaned)
         .with_context(|| "attribution is not valid JSON".to_string())
         .map_err(mine)?;
-    normalize_attribution_metadata(&mut data, bible, prepared);
+    let undescribed = normalize_attribution_metadata(&mut data, bible, prepared);
+    if !tolerate && !undescribed.is_empty() {
+        return Err(mine(anyhow::anyhow!(
+            "roster names {undescribed:?} have no new_characters entry — describe each (name, \
+             personality, and a voice_hint head) or drop it from roster"
+        )));
+    }
     // Unambiguous aliases are corrected here, before a single check runs, and
     for fix in canonicalize_aliases(&mut data, bible) {
         eprintln!("attribution alias corrected: {fix}");

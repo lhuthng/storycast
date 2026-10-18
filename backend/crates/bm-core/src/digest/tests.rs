@@ -20,6 +20,7 @@ use super::parse::lift_thought_stingers;
 use super::parse::merge_rounds;
 use super::parse::not_speech_ids;
 use super::parse::parse_attribution;
+use super::parse::parse_attribution_gated;
 use super::parse::parse_staged_script;
 use super::parse::ANONYMOUS_SPEAKER;
 use super::parse::EXCERPT_CHARS;
@@ -574,6 +575,18 @@ fn attribution_normalizes_optional_cast_metadata_without_touching_speakers() {
         json!("adult male: young adult male: reserved")
     );
     assert!(data["new_characters"][0]["tags"].is_array());
+    // A hint the text gives no gender for is `unknown`, never stamped male…
+    assert!(
+        data["new_characters"][1]["voice_hint"]
+            .as_str()
+            .unwrap()
+            .starts_with("unknown"),
+        "{}",
+        data["new_characters"][1]["voice_hint"]
+    );
+    // …and a roster speaker the model left out is synthesized the same way.
+    assert_eq!(data["new_characters"][2]["voice_hint"], json!("unknown"));
+    assert_eq!(data["new_characters"][2]["tags"], json!([]));
     assert!(data["new_characters"][1]["proper_aliases"]
         .as_array()
         .unwrap()
@@ -589,6 +602,32 @@ fn attribution_normalizes_optional_cast_metadata_without_touching_speakers() {
         "an unused anonymous placeholder is metadata, not a cast decision"
     );
     assert_eq!(data["speakers"]["e0003"], json!("Hệ thống"));
+}
+
+#[test]
+fn an_undescribed_roster_speaker_is_sent_back_once() {
+    let prepared = prepare_chapter("Chương 1: Tiếng gọi\n\n\"Mở cửa!\"");
+    let raw = json!({
+        "title": "Tiếng Gọi",
+        "atmosphere": "Quiet.",
+        "roster": ["Narrator", "Vân mẫu"],
+        "mentions": {},
+        "new_characters": [],
+        "speakers": {"e0001": "Vân mẫu"}
+    })
+    .to_string();
+    let bible = json!({"characters": []});
+    // The gate names the gap so the one repair can ask for a description…
+    let err = parse_attribution_gated(&raw, &bible, &prepared, false, false)
+        .expect_err("an undescribed roster speaker must be asked for");
+    assert!(err.to_string().contains("Vân mẫu"), "{err:#}");
+    // …and the repair's own answer is tolerated, synthesized as `unknown`.
+    let ok = parse_attribution_gated(&raw, &bible, &prepared, false, true).unwrap();
+    assert!(ok["new_characters"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|c| c["name"] == "Vân mẫu" && c["voice_hint"] == json!("unknown")));
 }
 
 /// The excerpt is **soft**: whitespace and length are cleaned, never

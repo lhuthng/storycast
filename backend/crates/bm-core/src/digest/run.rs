@@ -4,7 +4,7 @@ use super::excerpt::previous_excerpts;
 use super::manual::vocabulary;
 use super::manual::Vocabulary;
 use super::parse::merge_rounds;
-use super::parse::parse_attribution;
+use super::parse::parse_attribution_gated;
 use super::parse::parse_staged_script;
 use super::parts::merge_contexts;
 use super::parts::merge_scripts;
@@ -110,9 +110,15 @@ pub(crate) async fn run_g(
         };
         dump_raw(ctx.layout, &dump, &raw);
         let judged = match round {
-            Round::Attribution => {
-                parse_attribution(&raw, ctx.bible, ctx.slice, ctx.continuity.is_some())
-            }
+            Round::Attribution => parse_attribution_gated(
+                &raw,
+                ctx.bible,
+                ctx.slice,
+                ctx.continuity.is_some(),
+                // The first answer gets the gate's one ask; the repair's answer
+                // is tolerated, so an unnamed-gender speaker never kills it.
+                attempt > 0,
+            ),
             Round::Staging => parse_staged_script(
                 &raw,
                 ctx.bible,

@@ -1,13 +1,16 @@
 use super::*;
 
-/// The gender/age prefixes a `voice_hint` is allowed to start with.
-const VOICE_HEADS: [&str; 6] = [
+/// The gender/age prefixes a `voice_hint` is allowed to start with. `unknown`
+/// is the one honest answer for a speaker whose gender the text does not give:
+/// it rolls from the neutral pool, never a guessed male one.
+const VOICE_HEADS: [&str; 7] = [
     "adult male",
     "adult female",
     "boy",
     "girl",
     "elderly male",
     "elderly female",
+    "unknown",
 ];
 
 /// Bracketed spans in segment text, without the brackets.

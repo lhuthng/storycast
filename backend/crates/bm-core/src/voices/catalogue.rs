@@ -90,8 +90,9 @@ impl EngineRoster {
         let female = self.pool("female");
         let mut neutral = self.pool("neutral");
         if neutral.is_empty() {
-            // Kept deliberately: VieNeu declares no neutral preset, and an
-            neutral = male.clone();
+            // No neutral preset is declared: an unknown speaker rolls the whole
+            // catalogue rather than the male half. Never guess a gender.
+            neutral = male.iter().chain(female.iter()).cloned().collect();
         }
         VoicePolicy {
             engine: engine.to_string(),
@@ -126,7 +127,7 @@ impl EngineRoster {
         ] {
             for name in pool {
                 if out.iter().any(|v| v.name == *name) {
-                    continue; // the neutral pool aliases the male pool for VieNeu
+                    continue; // the neutral pool aliases the whole catalogue for VieNeu
                 }
                 let declared = self.voices.iter().find(|v| &v.name == name);
                 let (accent, style) = match declared {

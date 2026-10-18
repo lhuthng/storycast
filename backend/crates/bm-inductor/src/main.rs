@@ -11,6 +11,7 @@ use crate::commands::cmd_provision;
 use crate::commands::cmd_retag;
 use crate::commands::cmd_roster_add_sample;
 use crate::commands::cmd_roster_migrate_cast;
+use crate::commands::cmd_roster_repair_gender;
 use crate::preset::workspace_cmd;
 use crate::provision::check_bins;
 use crate::serve::cmd_serve;
@@ -243,6 +244,9 @@ async fn main() -> anyhow::Result<()> {
         }
         Cmd::Roster { cmd } => match cmd {
             RosterCmd::MigrateCast { dry_run } => cmd_roster_migrate_cast(&layout, dry_run),
+            RosterCmd::RepairGender { dry_run } => {
+                cmd_roster_repair_gender(&layout, dry_run)
+            }
             RosterCmd::AddSample { path, tags, name } => {
                 cmd_roster_add_sample(&layout, &path, tags, name)
             }

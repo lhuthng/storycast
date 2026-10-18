@@ -360,6 +360,14 @@ pub(crate) enum RosterCmd {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Swap every cast voice that contradicts the gender its bible entry — or
+    /// the adapter's own `gender.json` words — states. A placeholder states
+    /// nothing, so the lexicon repairs it rather than the stamp being trusted.
+    RepairGender {
+        /// Report the swaps and write nothing.
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Add a sample clip to the voice pool: copies it under `refs/`, takes its
     AddSample {
         /// Clip to add (mp3/wav/m4a/ogg/flac).

@@ -281,7 +281,7 @@ pub(crate) fn build_attribution_prompt(
         &mut body,
         "2. new_characters",
         "3. TITLE:",
-        "2. `new_characters` and `new_aliases` are for established proper identities only.\n   A quote whose speaker cannot be identified is an anonymous dialogue speaker, not\n   a new character. Never create a Bible character for a pronoun, generic role, or\n   anonymous passer-by.\n",
+        "2. `new_characters` and `new_aliases` are for established identities. A quote\n   whose speaker cannot be identified at all is an anonymous dialogue speaker, not\n   a new character: never create one for a pronoun or for a role that never speaks.\n   A fixed label the dialogue or narration actually uses as a speaker — `Vân mẫu`,\n   `Mẹ Vân`, `Nữ tử áo đen`, `Lão giả` — is a speaking identity, so describe it in\n   `new_characters` (or report the form in `new_aliases` if it is an existing\n   character) rather than leaving it out. Every speaker in `roster` other than\n   `Narrator` and `Anonymous` must have an entry in `new_characters` or already be\n   in INPUT 1.\n",
     ) {
         missed.push("rule 2 (new_characters)".into());
     }
@@ -300,9 +300,9 @@ Return ONE strict JSON object, never markdown or commentary:
   "mentions": {"exact name-bearing source form": "canonical character name"},
   "new_characters": [{
     "name": "canonical proper name",
-    "personality": "optional English trait",
-    "voice_hint": "optional free-form English description",
-    "tags": ["optional lowercase single tokens"],
+    "personality": "English, 1 sentence voice-relevant trait",
+    "voice_hint": "REQUIRED. MUST start with a gender/age head: adult male | adult female | boy | girl | elderly male | elderly female | unknown — then an optional trait. Read the head from the text: a kinship noun, honorific, pronoun or description decides it. Use `unknown` only when the text truly gives nothing, never as a default.",
+    "tags": ["lowercase single tokens"],
     "proper_aliases": []
   }],
   "new_aliases": {},
@@ -422,9 +422,12 @@ no narration ids, no invented ids, no dropped line.
   which costs the whole round: a rejected answer is re-asked from scratch, so
   copying the chapter's spelling is slower than reading the bible.
 - Correctness priority is `speakers` first, title second, and cast metadata last.
-  A named speaker omitted from `new_characters` is synthesized by code. Never emit
-  a nameless character object. `mentions` is optional evidence; omit uncertain
-  rows rather than inventing an owner. Free-form `voice_hint` text is accepted.
+  Give every named speaker in `roster` a `new_characters` entry (unless it is
+  already in INPUT 1) with a `voice_hint` whose head is the gender/age read from
+  the text; a named speaker left out is synthesized as `unknown` and rolls an
+  arbitrary voice, so describing them is the cheaper answer. Never emit a nameless
+  character object. `mentions` is optional evidence; omit uncertain rows rather
+  than inventing an owner. A free-form trait may follow the head after the head.
 "#;
     let contract = contract
         .replace("{content_language}", &content_language)

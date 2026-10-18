@@ -331,6 +331,16 @@ fn validate_ignores_direction_and_rejects_a_bad_voice_hint() {
 }
 
 #[test]
+fn a_voice_hint_may_say_unknown() {
+    // The honest answer for a speaker the text never genders, so it must pass.
+    let data = json!({
+        "roster": ["Narrator", "Vân mẫu"],
+        "new_characters": [{"name": "Vân mẫu", "voice_hint": "unknown", "tags": []}]
+    });
+    validate_context(&data, &json!({"characters": []})).unwrap();
+}
+
+#[test]
 fn validate_accepts_a_well_formed_digest() {
     let data = json!({
         "atmosphere": "A market at dawn.",

@@ -143,8 +143,9 @@ pub(crate) fn canonical_voice_hint(hint: &str) -> String {
     } else if male {
         "adult male"
     } else {
-        // A system voice or an under-described newcomer still needs a speakable
-        "adult male"
+        // No gender word: say so. Stamping "adult male" made "we did not read
+        // it" indistinguishable from "male" and rolled a male voice forever.
+        "unknown"
     };
     if hint.is_empty() {
         head.to_string()

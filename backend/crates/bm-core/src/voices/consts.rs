@@ -375,9 +375,12 @@ impl VoicePolicy {
 pub fn vieneu_policy() -> VoicePolicy {
     let male: Vec<String> = VIENEU_MALE.iter().map(|s| s.to_string()).collect();
     let female: Vec<String> = VIENEU_FEMALE.iter().map(|s| s.to_string()).collect();
+    // No unisex preset ships, so an unknown speaker rolls the whole catalogue
+    // rather than the male half: no signal is not the same as "male".
+    let neutral: Vec<String> = male.iter().chain(female.iter()).cloned().collect();
     VoicePolicy {
         engine: "vieneu".into(),
-        neutral: male.clone(), // legacy behaviour: unknown gender -> male pool
+        neutral,
         male,
         female,
         // The cast is the operator's, not the catalogue's: character names are
@@ -461,6 +464,15 @@ mod tests {
         assert_eq!(p.pool_for_hint("adult male, stern"), &p.male);
         assert_eq!(p.pool_for_hint("giọng nữ trẻ"), &p.female);
         assert_eq!(p.pool_for_hint(""), &p.neutral);
+    }
+
+    #[test]
+    fn an_unknown_speaker_is_not_sent_to_the_male_pool() {
+        // No gender read must not silently mean male: neutral spans both halves.
+        let p = vieneu_policy();
+        assert_eq!(p.pool_for_hint("unknown"), &p.neutral);
+        assert!(p.neutral.iter().any(|v| p.female.contains(v)));
+        assert!(p.neutral.iter().any(|v| p.male.contains(v)));
     }
     /// The declarations answer for their engine, and nothing else does.
     #[test]

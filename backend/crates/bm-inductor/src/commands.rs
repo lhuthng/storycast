@@ -166,3 +166,94 @@ pub(crate) fn cmd_roster_migrate_cast(layout: &Layout, dry_run: bool) -> anyhow:
     }
     Ok(())
 }
+
+/// Swap every cast voice that contradicts a stated gender, then write back the
+/// bible hints that stated the wrong one. The bible's real hint and the
+/// adapter's own `gender.json` are the only sources — the old `adult male`
+/// placeholder states nothing, so the lexicon repairs it rather than the stamp.
+pub(crate) fn cmd_roster_repair_gender(layout: &Layout, dry_run: bool) -> anyhow::Result<()> {
+    let settings = bm_core::config::Settings::load(&layout.settings());
+    let engine = settings.engine.clone();
+    let policy = bm_core::cast::policy_for_bible(&engine, layout);
+    let bible_path = layout.bible();
+    let mut bible: serde_json::Value = bm_core::read_json(&bible_path)
+        .unwrap_or_else(|_| serde_json::json!({"characters": []}));
+    let cast = bm_core::cast::read_cast(&engine, &layout.cast(&engine));
+    let pool = bm_core::pool::load_pool(&layout.voice_pool());
+    let lexicon = bm_core::gender::load_lexicon(layout.adapter_home().as_deref());
+    let fixes = bm_core::gender::plan(&bible, &cast, &policy, &pool, &lexicon);
+
+    if fixes.is_empty() {
+        println!("gender repair: every cast voice agrees with a stated gender");
+        return Ok(());
+    }
+    for fix in &fixes {
+        let to = fix.new_voice.as_deref().unwrap_or("<no free voice>");
+        let note = if fix.new_hint.is_some() {
+            " (bible hint corrected)"
+        } else {
+            ""
+        };
+        println!(
+            "{}: {} -> {to} ({}){note}",
+            fix.character, fix.old_voice, fix.gender
+        );
+    }
+    if dry_run {
+        println!("[dry run] {} swap(s); nothing written", fixes.len());
+        return Ok(());
+    }
+
+    // The swaps go through the same op the TUI uses: cast write, segment
+    // invalidation and re-render queue in one move.
+    let mut inner = crate::state::Inner::new(layout.clone(), settings);
+    inner.load_ledger();
+    inner.adopt_render_plans();
+    let mut swapped = 0;
+    for fix in &fixes {
+        let Some(voice) = fix.new_voice.as_deref() else {
+            println!(
+                "  {}: no free {} voice — left alone",
+                fix.character, fix.gender
+            );
+            continue;
+        };
+        match inner.op_swap_voice(&fix.character, voice) {
+            Ok(msg) => {
+                println!("  {msg}");
+                swapped += 1;
+            }
+            Err(e) => println!("  {}: refused: {e}", fix.character),
+        }
+    }
+
+    // A placeholder the lexicon settled is written back, so the next digest
+    // reads a real gender instead of re-deriving the old one.
+    let mut corrected = 0;
+    if let Some(chars) = bible.get_mut("characters").and_then(|c| c.as_array_mut()) {
+        for fix in &fixes {
+            let Some(hint) = fix.new_hint.as_deref() else {
+                continue;
+            };
+            let Some(entry) = chars.iter_mut().find(|c| {
+                c.get("name").and_then(|n| n.as_str()) == Some(fix.character.as_str())
+            }) else {
+                continue;
+            };
+            entry["voice_hint"] = serde_json::json!(hint);
+            if let Some(tags) = entry.get_mut("tags").and_then(|t| t.as_array_mut()) {
+                for tag in tags.iter_mut() {
+                    if matches!(tag.as_str(), Some("male" | "female")) {
+                        *tag = serde_json::json!(fix.gender);
+                    }
+                }
+            }
+            corrected += 1;
+        }
+    }
+    if corrected > 0 {
+        bm_core::write_json(&bible_path, &bible)?;
+    }
+    println!("gender repair: {swapped} swap(s), {corrected} bible hint(s) corrected");
+    Ok(())
+}
