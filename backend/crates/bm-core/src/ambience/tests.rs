@@ -131,6 +131,7 @@ fn sound(tags: &[&str], files: &[&str], level: Option<f64>) -> ClipPool {
     p.insert(
         "x".into(),
         crate::audio_pool::Sound {
+            id: None,
             tags: tags.iter().map(|t| t.to_string()).collect(),
             files: files.iter().map(|f| f.to_string()).collect(),
             looped: true,
@@ -168,6 +169,7 @@ fn effect_usage_reaches_by_tag_not_by_name() {
         pool.insert(
             name.into(),
             crate::audio_pool::Sound {
+                id: None,
                 tags: tags.iter().map(|t| t.to_string()).collect(),
                 files: vec![format!("effects/{name}-1.mp3")],
                 looped: true,
@@ -217,6 +219,7 @@ fn music_usage_names_the_palette_value_that_reaches_it() {
         pool.insert(
             name.into(),
             crate::audio_pool::Sound {
+                id: None,
                 tags: tags.iter().map(|t| t.to_string()).collect(),
                 files: vec![format!("music/{name}-1.mp3")],
                 looped: true,
@@ -321,6 +324,7 @@ fn a_sound_nothing_names_has_no_usage_and_one_the_map_reaches_does() {
         pool.insert(
             name.into(),
             crate::audio_pool::Sound {
+                id: None,
                 tags,
                 files: vec![format!("effects/{name}-1.mp3")],
                 looped: true,
@@ -805,6 +809,7 @@ fn music_pool() -> ClipPool {
         p.insert(
             name.into(),
             audio_pool::Sound {
+                id: None,
                 tags: tags.iter().map(|s| s.to_string()).collect(),
                 files: files.iter().map(|s| s.to_string()).collect(),
                 looped: true,
@@ -964,6 +969,7 @@ fn two_moods_that_name_the_same_tags_are_one_run_when_one_sound_answers() {
     cfg.music_palette.insert(
         "warm".into(),
         PaletteEntry {
+            id: None,
             tags: vec!["soft".into(), "calm".into()],
             note: String::new(),
         },
@@ -972,6 +978,7 @@ fn two_moods_that_name_the_same_tags_are_one_run_when_one_sound_answers() {
     pool.insert(
         "soft".into(),
         audio_pool::Sound {
+            id: None,
             tags: vec!["soft".into(), "calm".into()],
             files: vec!["music/soft-bg-1.mp3".into()],
             looped: true,
@@ -997,12 +1004,47 @@ fn two_moods_that_name_the_same_tags_are_one_run_when_one_sound_answers() {
 }
 
 #[test]
+fn a_renamed_mood_with_its_id_plays_the_same_take() {
+    let mut palette = MusicPalette::new();
+    for key in ["quiet", "serene"] {
+        palette.insert(
+            key.into(),
+            PaletteEntry {
+                id: Some("quiet".into()),
+                tags: vec!["soft".into()],
+                note: String::new(),
+            },
+        );
+    }
+    let mut pool = ClipPool::new();
+    for key in ["soft-a", "soft-b"] {
+        pool.insert(
+            key.into(),
+            audio_pool::Sound {
+                id: None,
+                tags: vec!["soft".into()],
+                files: vec![format!("music/{key}.mp3")],
+                looped: true,
+                dur_s: None,
+                mode: None,
+                hold: None,
+                level: None,
+            },
+        );
+    }
+    let before = plan_music(&[slot("quiet", 0.0, 10.0)], &[], 7, &pool, &palette);
+    let after = plan_music(&[slot("serene", 0.0, 10.0)], &[], 7, &pool, &palette);
+    assert_eq!(before[0].file, after[0].file, "the seed is the id, not the key");
+}
+
+#[test]
 fn two_moods_that_name_the_same_tags_can_still_split() {
     // What seeding from the palette *value* actually buys. Two values naming
     let mut cfg = scene_map();
     cfg.music_palette.insert(
         "warm".into(),
         PaletteEntry {
+            id: None,
             tags: vec!["soft".into(), "calm".into()],
             note: String::new(),
         },

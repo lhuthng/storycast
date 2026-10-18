@@ -1,0 +1,13 @@
+{
+	"extends": "$app/tsconfig",
+	"compilerOptions": {
+		"strict": true,
+		// The same aliases the package.json `imports` field declares: kit hands
+		// them to Vite, and TypeScript needs its own copy to resolve them.
+		"paths": {
+			"#lib": ["./src/lib/index.ts"],
+			"#lib/*": ["./src/lib/*"]
+		}
+	},
+	"include": ["src", "vite.config.ts"]
+}

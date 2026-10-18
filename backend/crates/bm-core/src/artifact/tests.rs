@@ -513,7 +513,7 @@ fn a_language_release_is_not_a_profile_pack() {
     assert!(err.is_err(), "a language is not a profile");
 }
 
-/// The pack half of `tools/models.sh`, through the same two binaries the
+/// The pack half of the models build, through the same two binaries the
 fn pack(bundle: &Path, stage: &Path, doc: &Value, extra: &[&str]) {
     let mut names = vec!["manifest.json".to_string()];
     let mut keys: Vec<&String> = doc["files"].as_object().unwrap().keys().collect();

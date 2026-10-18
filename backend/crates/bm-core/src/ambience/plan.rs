@@ -142,7 +142,7 @@ pub fn plan_music(
         if entry.tags.is_empty() {
             continue;
         }
-        let key = [mood.to_string()];
+        let key = [entry.id(mood).to_string()];
         let Some(picked) = audio_pool::pick(pool, &entry.tags, audio_pool::seed(chapter, 0, &key))
         else {
             let msg = format!("{mood} (no pooled clip for [{}])", entry.tags.join(", "));

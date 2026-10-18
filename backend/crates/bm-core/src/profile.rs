@@ -529,6 +529,31 @@ pub fn write_pointer(root: &Path, pointer: &Pointer) -> Result<()> {
     write_binding(root, &binding)
 }
 
+/// Re-stamp the pack piece from the live tree, silently.
+///
+/// [`verify_binding`] does the same thing and calls it *drift*, which is the
+/// right word for a tree that moved behind the operator's back and the wrong
+/// one for a tree a command just moved on purpose — `profile update` replaces
+/// dependencies and folds them in, so it is the update that owes the checkout a
+/// binding that matches what it left behind. Without this the first run after
+/// an update reports the update itself as drift, adopts it, and only then is
+/// the checkout true.
+///
+/// `None` when there is nothing to re-stamp: no `.bm/profile` (a plain pack is
+/// run by path, not by pointer) or a binding that names no pack.
+pub fn restamp_binding(root: &Path) -> Result<Option<Pointer>> {
+    if !pointer_path(root).is_file() {
+        return Ok(None);
+    }
+    let mut binding = read_binding(root)?;
+    if binding.pack.name.is_empty() {
+        return Ok(None);
+    }
+    binding.pack.hash = manifest_hash(&hash_live(root)?);
+    write_binding(root, &binding)?;
+    Ok(Some(binding.pack))
+}
+
 /// The load gate: the pointer must exist. A drifted live tree (hand edit,
 pub fn verify(root: &Path) -> Result<Pointer> {
     verify_binding(root, None).map(|b| b.pack)

@@ -85,6 +85,17 @@ pub struct Sound {
     /// Optional trim for this sound alone. `None` is 1.0.
     #[serde(default)]
     pub level: Option<f64>,
+    /// Identity across a rename: the key when absent. Never serialized, so
+    /// introducing one does not move the design stamp.
+    #[serde(default, skip_serializing)]
+    pub id: Option<String>,
+}
+
+impl Sound {
+    /// What a rename must not change: the id, or the key for a pack without one.
+    pub fn id<'a>(&'a self, key: &'a str) -> &'a str {
+        self.id.as_deref().unwrap_or(key)
+    }
 }
 
 fn loops() -> bool {
@@ -344,7 +355,14 @@ fn parses_as(raw: &str, sound: &Sound) -> bool {
 /// One entry, in the field order its layer's file uses.
 fn render_entry(sound: &Sound, kind: PoolKind, expand: bool) -> Result<String> {
     use serde_json::json;
-    let mut fields: Vec<(&str, serde_json::Value)> = vec![("tags", json!(sound.tags))];
+    let mut fields: Vec<(&str, serde_json::Value)> = Vec::new();
+    // Identity first, and written even though `serde` skips it: the file is the
+    // one place it must survive, or an edit through this writer would silently
+    // undo a rename and move the design stamp.
+    if let Some(id) = &sound.id {
+        fields.push(("id", json!(id)));
+    }
+    fields.push(("tags", json!(sound.tags)));
     if !sound.files.is_empty() {
         fields.push(("files", json!(sound.files)));
     }
@@ -454,6 +472,9 @@ pub fn candidates<'a>(pool: &'a ClipPool, tags: &[String]) -> Vec<(&'a str, &'a 
         }
         cands.push((name.as_str(), sound));
     }
+    // By identity, not by key: a rename keeps the pick where it was, and a
+    // pack with no ids sorts exactly as the registry did.
+    cands.sort_by(|a, b| a.1.id(a.0).cmp(b.1.id(b.0)));
     cands
 }
 

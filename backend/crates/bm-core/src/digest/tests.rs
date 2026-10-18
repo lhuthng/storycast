@@ -2540,6 +2540,7 @@ fn the_sound_gate_reads_its_cues_from_the_adapter() {
 fn sound_design_gap_catches_an_empty_and_an_unclosed_design() {
     use crate::audio_pool::{ClipPool, Sound};
     let mk = |looped: bool| Sound {
+        id: None,
         tags: vec![],
         files: vec!["injects/x.mp3".into()],
         looped,
@@ -3528,6 +3529,7 @@ fn the_parts_checkpoint_resumes_what_matches_and_forgets_what_does_not() {
 fn the_gate_names_the_part_that_owes_an_answer() {
     use crate::audio_pool::{ClipPool, Sound};
     let mk = |looped: bool| Sound {
+        id: None,
         tags: vec![],
         files: vec!["injects/x.mp3".into()],
         looped,

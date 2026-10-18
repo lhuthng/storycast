@@ -39,6 +39,17 @@ pub struct PaletteEntry {
     /// Shown to the analyzer in the prompt. Not read by the mix.
     #[serde(default)]
     pub note: String,
+    /// Identity across a rename: the key when absent. Never serialized, so the
+    /// design stamp and the pick seed survive a rename.
+    #[serde(default, skip_serializing)]
+    pub id: Option<String>,
+}
+
+impl PaletteEntry {
+    /// What a rename must not change: the id, or the key for a pack without one.
+    pub fn id<'a>(&'a self, key: &'a str) -> &'a str {
+        self.id.as_deref().unwrap_or(key)
+    }
 }
 
 /// Mood -> what it sounds like. Closed by construction: a script value that is

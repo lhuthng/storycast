@@ -461,7 +461,7 @@ fn the_models_push_leaves_the_transfer_artifact_behind() {
     assert_eq!(
         MODELS_PUSH_EXCLUDES[0].trim_start_matches('/'),
         crate::artifact::BUNDLE_NAME,
-        "and it is the one file `tools/models.sh pack` writes"
+        "and it is the one file the models build writes"
     );
 }
 

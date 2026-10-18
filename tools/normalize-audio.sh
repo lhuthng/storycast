@@ -67,7 +67,7 @@ tmp=$(mktemp -d "$dest/.norm.XXXXXX")
 # only ever `rmdir`'d: a whole-run `rm -rf` of a directory holding a minute of
 # wav per clip is exactly the shape a bulk-delete guard exists to stop, and the
 # script should not need anyone to approve its own cleanup.
-trap 'rm -f "$tmp"/* 2>/dev/null; rmdir "$tmp" 2>/dev/null; true' EXIT
+trap 'rm -rf "$tmp" 2>/dev/null || true' EXIT
 # bash's here-strings and ffmpeg's own scratch both default to $TMPDIR, which
 # on a laptop is the system volume — the one that is full when you notice.
 export TMPDIR="$tmp"

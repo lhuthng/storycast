@@ -185,24 +185,24 @@ track answering none of them is never heard.
 
 | track | tags | prompt |
 | --- | --- | --- |
-| `generic-energetic` | `energetic` `upbeat` | `orchestral theme, driving drums and erhu over massed strings, rising heroic lead, instrumental, no vocals, no lyrics, 2 minutes` |
-| `generic-energetic` *(2nd)* | `energetic` `upbeat` | `the same scale with dizi and pipa, faster and brighter, instrumental, no vocals, no lyrics, 2 minutes` |
-| `tavern` | `indoor` `warm` | `warm indoor room, guzheng and low strings, unhurried, candlelit, instrumental, no vocals, no lyrics, 2 minutes` |
-| `tavern` *(2nd)* | `indoor` `warm` | `the same room at a quieter hour, pipa and soft flute, fewer instruments, instrumental, no vocals, no lyrics, 2 minutes` |
-| `market` | `market` `busy` | `busy market street, pipa and clappers, quick light rhythm, instrumental, no vocals, no lyrics, 2 minutes` |
-| `market` *(2nd)* | `market` `busy` | `the same street later in the day, xiao and plucked strings over busier percussion, instrumental, no vocals, no lyrics, 2 minutes` |
-| `intense-battle` | `battle` `intense` | `close combat, war drums and low brass, urgent, no heroics, instrumental, no vocals, no lyrics, 2 minutes` |
-| `intense-battle` *(2nd)* | `battle` `intense` | `a longer pitched battle, taiko and massed strings, surging and receding, instrumental, no vocals, no lyrics, 2 minutes` |
-| `sad` | `sad` `sorrow` | `solo erhu, slow grief, sparse, one line at a time, instrumental, no vocals, no lyrics, 2 minutes` |
-| `sad` *(2nd)* | `sad` `sorrow` | `the same grief with a low string pad and a distant bell, instrumental, no vocals, no lyrics, 2 minutes` |
-| `soft-cute` | `romantic` | `tender guzheng and soft flute, gentle and close, instrumental, no vocals, no lyrics, 2 minutes` |
-| `soft-cute` *(2nd)* | `romantic` | `the same tenderness with celesta and a string pad, instrumental, no vocals, no lyrics, 2 minutes` |
-| `playful` | `playful` `light` | `light pipa, comic bounce, plucked throughout, instrumental, no vocals, no lyrics, 2 minutes` |
-| `playful` *(2nd)* | `playful` `light` | `the same mood with marimba and dizi, quicker, instrumental, no vocals, no lyrics, 2 minutes` |
-| `tense` | `tense` `uneasy` | `low drone and sparse percussive ticks, uneasy, almost no melody, instrumental, no vocals, no lyrics, 2 minutes` |
-| `tense` *(2nd)* | `tense` `uneasy` | `the same unease with a bowed metal edge and a distant drum, instrumental, no vocals, no lyrics, 2 minutes` |
-| `generic-soft` | `soft` `calm` | `soft pads, almost no motion, room for a voice, instrumental, no vocals, no lyrics, 2 minutes` |
-| `soft-relax` | `soft` `calm` | `the same stillness with a single distant erhu line, instrumental, no vocals, no lyrics, 2 minutes` |
+| `heroic-rise` | `energetic` `upbeat` | `orchestral theme, driving drums and erhu over massed strings, rising heroic lead, instrumental, no vocals, no lyrics, 2 minutes` |
+| `heroic-rise` *(2nd)* | `energetic` `upbeat` | `the same scale with dizi and pipa, faster and brighter, instrumental, no vocals, no lyrics, 2 minutes` |
+| `hearth` | `indoor` `warm` | `warm indoor room, guzheng and low strings, unhurried, candlelit, instrumental, no vocals, no lyrics, 2 minutes` |
+| `hearth` *(2nd)* | `indoor` `warm` | `the same room at a quieter hour, pipa and soft flute, fewer instruments, instrumental, no vocals, no lyrics, 2 minutes` |
+| `market-bustle` | `market` `busy` | `busy market street, pipa and clappers, quick light rhythm, instrumental, no vocals, no lyrics, 2 minutes` |
+| `market-bustle` *(2nd)* | `market` `busy` | `the same street later in the day, xiao and plucked strings over busier percussion, instrumental, no vocals, no lyrics, 2 minutes` |
+| `war-drums` | `battle` `intense` | `close combat, war drums and low brass, urgent, no heroics, instrumental, no vocals, no lyrics, 2 minutes` |
+| `war-drums` *(2nd)* | `battle` `intense` | `a longer pitched battle, taiko and massed strings, surging and receding, instrumental, no vocals, no lyrics, 2 minutes` |
+| `sorrow` | `sad` `sorrow` | `solo erhu, slow grief, sparse, one line at a time, instrumental, no vocals, no lyrics, 2 minutes` |
+| `sorrow` *(2nd)* | `sad` `sorrow` | `the same grief with a low string pad and a distant bell, instrumental, no vocals, no lyrics, 2 minutes` |
+| `tender` | `romantic` | `tender guzheng and soft flute, gentle and close, instrumental, no vocals, no lyrics, 2 minutes` |
+| `tender` *(2nd)* | `romantic` | `the same tenderness with celesta and a string pad, instrumental, no vocals, no lyrics, 2 minutes` |
+| `mischief` | `playful` `light` | `light pipa, comic bounce, plucked throughout, instrumental, no vocals, no lyrics, 2 minutes` |
+| `mischief` *(2nd)* | `playful` `light` | `the same mood with marimba and dizi, quicker, instrumental, no vocals, no lyrics, 2 minutes` |
+| `dread` | `tense` `uneasy` | `low drone and sparse percussive ticks, uneasy, almost no melody, instrumental, no vocals, no lyrics, 2 minutes` |
+| `dread` *(2nd)* | `tense` `uneasy` | `the same unease with a bowed metal edge and a distant drum, instrumental, no vocals, no lyrics, 2 minutes` |
+| `hushed-pads` | `soft` `calm` | `soft pads, almost no motion, room for a voice, instrumental, no vocals, no lyrics, 2 minutes` |
+| `stillness` | `soft` `calm` | `the same stillness with a single distant erhu line, instrumental, no vocals, no lyrics, 2 minutes` |
 
 `court-mystery`'s five extra moods — `court`, `inquiry`, `illness`, `wicked`,
 `wry` — are answered by the fifteen tracks that go in this pack (see its own
@@ -225,7 +225,7 @@ tools/gen-sound.sh one --prompt "<the prompt from a music row>" \
 
 A track's `--tags` are its row's tags, verbatim — they are what the palette
 matches — and `--sound` defaults to the take's own name, so `market-bg-2` is a
-second take of `market`. `--pool` defaults to `music-pool.json` beside the
+second take of `market-bustle`. `--pool` defaults to `music-pool.json` beside the
 destination directory.
 
 For a moment, the length in the row is the length of the **finished** clip: the

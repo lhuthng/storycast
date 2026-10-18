@@ -322,7 +322,7 @@ Then `tools/normalize-audio.sh` into `music/`.
 
 Nothing in the mix reads a filename. It reads the **key** and that key's
 `files`. The filename spelling is a suggestion; the registry is the authority.
-`soft-cute` is not a mood, it is a sound whose tags are `[romantic]`, and a
+`tender` is not a mood, it is a sound whose tags are `[romantic]`, and a
 script's `music: romantic` is what selects it.
 
 ## 6. Registering a clip
@@ -572,7 +572,7 @@ Four things decide how a generated clip is treated:
   tags the palette matches, so `--level track` hands the result to
   `add-music.sh`, which appends the take to `--sound` in `music-pool.json` and
   warns when the tags answer no mood. The sound key comes from the take name
-  (`market-bg-2` is another take of `market`); `--pool` defaults to
+  (`market-bg-2` is another take of `market-bustle`); `--pool` defaults to
   `music-pool.json` beside the destination directory.
 * **120 s is the ceiling, and 90 s is the default for a place.** Not arbitrary:
   the effect layer still loops with `-stream_loop -1` and a window is at most

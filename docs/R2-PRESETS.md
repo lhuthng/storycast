@@ -95,6 +95,16 @@ curl -s -o /dev/null -w "%{http_code} %{size_download}\n" \
   against the checksum list that inductor writes, so a foreign bake would land
   and then fail its own check. Publish from the machine that bakes, or expect
   the push.
+- `tools/profile.sh fetch <name> [@version]` reads the bucket too, so an
+  operator needs no other address: it takes `packs_release` (or `--repo`),
+  maps the piece to the bucket's kind (`pack`→`sounds`, `adapter`→`profiles`),
+  resolves `latest.json`, downloads to a dot-named `.part` and only gives the
+  file its real name once its sha256 is the pinned one — then `verify` runs on
+  it. A pinned `@version` is addressed directly; the bucket publishes a hash
+  only for the version `latest.json` describes, so any other pin is checked
+  against the bundle's own manifest and says so. `owner/name` still works and
+  still means GitHub releases, but this repo has none left — the bucket is the
+  only plane with content.
 - The box still fetches one URL with one hash (`fetch-artifact --expect`):
   the indirection stays inductor-side, and every fetch sends the
   `storycast-preset-fetch/1.0` agent string the bucket's bot protection

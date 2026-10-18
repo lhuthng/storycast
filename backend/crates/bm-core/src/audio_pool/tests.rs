@@ -11,6 +11,7 @@ fn pool() -> ClipPool {
     p.insert(
         "day".into(),
         Sound {
+            id: None,
             tags: tags(&["day", "calm"]),
             files: vec![
                 "effects/day-1.mp3".into(),
@@ -27,6 +28,7 @@ fn pool() -> ClipPool {
     p.insert(
         "night".into(),
         Sound {
+            id: None,
             tags: tags(&["night"]),
             files: vec!["effects/night-1.mp3".into()],
             looped: true,
@@ -39,6 +41,7 @@ fn pool() -> ClipPool {
     p.insert(
         "rain".into(),
         Sound {
+            id: None,
             tags: tags(&["rain", "calm"]),
             files: vec!["effects/rain-1.mp3".into()],
             looped: true,
@@ -51,6 +54,7 @@ fn pool() -> ClipPool {
     p.insert(
         "sword-fight".into(),
         Sound {
+            id: None,
             tags: tags(&["battle", "sword"]),
             files: vec!["effects/sword-fight-1.mp3".into()],
             looped: false,
@@ -92,6 +96,44 @@ fn every_take_of_a_sound_is_reachable() {
 }
 
 #[test]
+fn a_rename_that_keeps_its_id_keeps_the_candidate_order() {
+    let mut p = ClipPool::new();
+    for (key, id, file) in [
+        ("alpha", "alpha", "music/alpha.mp3"),
+        ("zeta", "zeta", "music/zeta.mp3"),
+    ] {
+        p.insert(
+            key.into(),
+            Sound {
+                id: Some(id.into()),
+                tags: tags(&["soft"]),
+                files: vec![file.into()],
+                looped: true,
+                dur_s: None,
+                mode: None,
+                hold: None,
+                level: None,
+            },
+        );
+    }
+    let before: Vec<String> = candidates(&p, &tags(&["soft"]))
+        .into_iter()
+        .map(|(_, s)| s.files[0].clone())
+        .collect();
+
+    // `alpha` becomes `omega`, still carrying `alpha` as its identity.
+    let mut sound = p.remove("alpha").unwrap();
+    sound.id = Some("alpha".into());
+    p.insert("omega".into(), sound);
+    let after: Vec<String> = candidates(&p, &tags(&["soft"]))
+        .into_iter()
+        .map(|(_, s)| s.files[0].clone())
+        .collect();
+
+    assert_eq!(before, after, "the pick must not move under a rename");
+}
+
+#[test]
 fn the_best_overlap_wins_over_mere_intersection() {
     let p = pool();
     // Two shared tags beat one, whatever the seed.
@@ -116,6 +158,7 @@ fn a_weaker_overlap_never_reaches_the_candidate_set() {
         p.insert(
             name.into(),
             Sound {
+                id: None,
                 tags: tags(t),
                 files: vec![format!("effects/{name}.mp3")],
                 looped: true,
@@ -142,6 +185,7 @@ fn a_sound_with_no_files_is_not_a_candidate() {
     p.insert(
         "day".into(),
         Sound {
+            id: None,
             tags: tags(&["day"]),
             files: vec![],
             looped: true,
@@ -284,6 +328,7 @@ fn a_new_entry_is_written_in_its_layers_field_order() {
     pool.insert(
         "kettle".into(),
         Sound {
+            id: None,
             tags: vec!["kettle".into(), "whistle".into()],
             files: vec!["injects/kettle-1.mp3".into()],
             looped: false,
@@ -308,6 +353,29 @@ fn a_new_entry_is_written_in_its_layers_field_order() {
     assert!(after.find("\"light-spell\"").unwrap() > kettle);
     assert!(after.find("\"fire-spell\"").unwrap() < kettle);
     assert_eq!(load_pool(&path)["kettle"].level, Some(0.8));
+}
+
+/// The file is the one place an id has to survive: an edit that re-renders the
+/// entry must keep it, or the next rename would move the design stamp.
+#[test]
+fn an_edited_entry_keeps_the_id_it_carries() {
+    let (path, _) = shipped_copy(PoolKind::Music, "id-edit");
+    let mut pool = load_pool(&path);
+    let mut sound = pool.remove("market").expect("fixture has market");
+    sound.id = Some("market".into());
+    // A level is not what the fixture says, so the entry is re-rendered.
+    sound.level = Some(0.7);
+    pool.insert("market-bustle".into(), sound);
+    save_pool(&path, PoolKind::Music, &pool).unwrap();
+
+    let after = std::fs::read_to_string(&path).unwrap();
+    assert!(after.contains("\"id\": \"market\""), "{after}");
+    let back = load_pool(&path);
+    assert_eq!(back["market-bustle"].id("market-bustle"), "market");
+
+    // A fixed point: reading the id back and saving again changes nothing.
+    save_pool(&path, PoolKind::Music, &back).unwrap();
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), after);
 }
 
 /// An edit to one number must not collapse an entry the author expanded.
@@ -336,6 +404,7 @@ fn a_short_list_stays_inline_but_a_long_one_does_not() {
     let (path, _) = shipped_copy(PoolKind::Effect, "inline");
     let mut pool = load_pool(&path);
     let mk = |files: Vec<String>| Sound {
+        id: None,
         tags: vec!["probe".into()],
         files,
         looped: true,
@@ -445,6 +514,7 @@ fn a_missing_registry_is_created() {
     pool.insert(
         "coin".into(),
         Sound {
+            id: None,
             tags: vec!["coin".into()],
             files: vec!["injects/coin-1.mp3".into()],
             looped: false,
@@ -463,6 +533,7 @@ fn a_missing_registry_is_created() {
 fn an_absent_level_is_one_and_a_level_rides_on_the_pick() {
     let mut p = ClipPool::new();
     let mut s = Sound {
+        id: None,
         tags: tags(&["day"]),
         files: vec!["effects/day-1.mp3".into()],
         looped: true,

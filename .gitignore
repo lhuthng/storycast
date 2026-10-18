@@ -20,6 +20,15 @@ __pycache__/
 # `workspace new --profile` reads, and a clone without it cannot create the
 # books the presets name (see docs/PROFILES.md §Choosing a profile).
 !/profiles/presets.json
+# A pack's rename history is the one thing under `profiles/` that is *not*
+# derived: `profiles/pack/<name>.tar.zst` is rebuilt from `assets/` at will, but
+# which moods were renamed, and to what, cannot be recovered from the tree that
+# resulted. Losing it means every workspace that installs the next release
+# keeps the old names and refuses its chapters. So the directory is opened, its
+# contents are ignored again, and only the history is let through.
+!/profiles/pack/
+/profiles/pack/*
+!/profiles/pack/*.migrations.json
 
 # Language adapters: `adapters/<name>/` is a language's own home — its
 # analyze/script prompts. Machine-local for the same reason the live `prompts/`

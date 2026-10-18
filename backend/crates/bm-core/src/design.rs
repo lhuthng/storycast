@@ -85,9 +85,8 @@ impl MergeDesign {
                 .or_insert_with(|| ambience::match_scene(&label, &self.map));
             if let Some(m) = seg.get("music").and_then(|v| v.as_str()).map(str::trim) {
                 if !m.is_empty() {
-                    music.entry(m.to_string()).or_insert_with(|| {
-                        self.map.music_palette.get(m).cloned().unwrap_or_default()
-                    });
+                    let entry = self.map.music_palette.get(m).cloned().unwrap_or_default();
+                    music.entry(entry.id(m).to_string()).or_insert(entry);
                 }
             }
         }
@@ -126,7 +125,7 @@ impl MergeDesign {
                 match &inj {
                     ambience::Inject::Start { sound, .. } | ambience::Inject::Stop { sound } => {
                         if let Some(entry) = self.inject_pool.get(sound) {
-                            injects.insert(sound.clone(), entry.clone());
+                            injects.insert(entry.id(sound).to_string(), entry.clone());
                         }
                     }
                     // A query reaches every clip that answers it, not only the
@@ -157,11 +156,11 @@ impl MergeDesign {
     }
 }
 
-/// The candidate set, keyed by sound name so the hash is a stable value.
+/// The candidate set, keyed by identity so a rename is not a new design.
 fn named_candidates(pool: &ClipPool, tags: &[String]) -> BTreeMap<String, Sound> {
     audio_pool::candidates(pool, tags)
         .into_iter()
-        .map(|(name, sound)| (name.to_string(), sound.clone()))
+        .map(|(name, sound)| (sound.id(name).to_string(), sound.clone()))
         .collect()
 }
 
@@ -596,6 +595,93 @@ mod tests {
             reload(&layout).fingerprint(&mountain_script(), knobs()),
             mountain,
             "which take plays is part of the mix"
+        );
+    }
+
+    #[test]
+    fn a_pool_rename_that_keeps_its_id_is_not_a_new_design() {
+        let (root, layout) = fixture("rename-pool");
+        let design = MergeDesign::load(&layout);
+        let mountain = design.fingerprint(&mountain_script(), knobs());
+
+        // Same entry, new key, the old key carried as its identity.
+        write(
+            &root,
+            "assets/music-pool.json",
+            r#"{
+              "calm-drift": {"id": "soft-relax", "tags": ["soft"],
+                             "files": ["music/soft-1.mp3"]},
+              "driving-tension": {"tags": ["driving"], "files": ["music/tens-1.mp3"]},
+              "unused-track": {"tags": ["unused"], "files": ["music/none-1.mp3"]}
+            }"#,
+        );
+        assert_eq!(
+            reload(&layout).fingerprint(&mountain_script(), knobs()),
+            mountain,
+            "a rename is not a re-tune: the id keeps the candidate and the stamp"
+        );
+    }
+
+    #[test]
+    fn a_palette_rename_that_keeps_its_id_is_not_a_new_design() {
+        let (root, layout) = fixture("rename-palette");
+        let design = MergeDesign::load(&layout);
+        let mountain = design.fingerprint(&mountain_script(), knobs());
+
+        write(
+            &root,
+            "assets/scene-map.json",
+            r#"{
+              "rules": [
+                {"match": ["mountain"], "effect": ["wind"], "level": 0.3,
+                 "reverb": "cave", "pause_before_s": 0.4},
+                {"match": ["kitchen"], "effect": ["fire"], "level": 0.2}
+              ],
+              "default": {"effect": [], "level": 0.0},
+              "music_palette": {
+                "serene": {"id": "calm", "tags": ["soft"], "note": "gentle"},
+                "tense": {"tags": ["driving"], "note": "urgent"}
+              },
+              "reverb_presets": {"cave": "aecho=0.8:0.9:40|60:0.4|0.3"},
+              "layers": {"effect": {"trim": 1.0}, "music": {"level": 0.6},
+                         "inject": {"level": 0.8, "default_hold_s": 1.5}},
+              "pause": {"pause_s": 0.6}
+            }"#,
+        );
+        let renamed = serde_json::json!({
+            "segments": [
+                {"speaker": "A", "text": "Chương 1: Khởi đầu"},
+                {"speaker": "A", "text": "Trên núi.", "scene": "mountain", "music": "serene"},
+                {"sound": "page-turn"},
+                {"speaker": "B", "text": "Xuống núi.", "scene": "mountain"}
+            ]
+        });
+        assert_eq!(
+            reload(&layout).fingerprint(&renamed, knobs()),
+            mountain,
+            "a rewritten script under a renamed mood is the same design"
+        );
+    }
+
+    #[test]
+    fn a_rename_without_an_id_moves_the_stamp() {
+        let (root, layout) = fixture("rename-no-id");
+        let design = MergeDesign::load(&layout);
+        let mountain = design.fingerprint(&mountain_script(), knobs());
+
+        write(
+            &root,
+            "assets/music-pool.json",
+            r#"{
+              "calm-drift": {"tags": ["soft"], "files": ["music/soft-1.mp3"]},
+              "driving-tension": {"tags": ["driving"], "files": ["music/tens-1.mp3"]},
+              "unused-track": {"tags": ["unused"], "files": ["music/none-1.mp3"]}
+            }"#,
+        );
+        assert_ne!(
+            reload(&layout).fingerprint(&mountain_script(), knobs()),
+            mountain,
+            "without an id the key is the identity, so a rename is a new design"
         );
     }
 }

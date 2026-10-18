@@ -484,6 +484,7 @@ fn validate_effect_tags_accepts_pool_tags_and_old_digests() {
 fn validate_injects_accepts_sound_items_and_refuses_bad_names_and_long_hits() {
     use crate::audio_pool::{ClipPool, Sound};
     let mk = |dur: f64, mode: &str| Sound {
+        id: None,
         tags: vec![],
         files: vec!["injects/x.mp3".into()],
         looped: false,
@@ -586,6 +587,7 @@ fn validate_injects_accepts_sound_items_and_refuses_bad_names_and_long_hits() {
 fn validate_injects_checks_tag_queries_against_the_pool() {
     use crate::audio_pool::{ClipPool, Sound};
     let mk = |tags: &[&str], mode: &str| Sound {
+        id: None,
         tags: tags.iter().map(|t| t.to_string()).collect(),
         files: vec!["injects/x.mp3".into()],
         looped: false,
@@ -672,6 +674,7 @@ fn validate_injects_refuses_a_prompt_side_sound_field() {
     let pool: ClipPool = [(
         "page-turn",
         Sound {
+            id: None,
             tags: vec![],
             files: vec!["injects/page-turn-1.mp3".into()],
             looped: false,
@@ -701,6 +704,7 @@ fn validate_injects_refuses_a_prompt_side_sound_field() {
 fn validate_injects_refuses_a_stop_with_nothing_to_stop() {
     use crate::audio_pool::{ClipPool, Sound};
     let mk = |dur: f64, mode: &str| Sound {
+        id: None,
         tags: vec![],
         files: vec!["injects/x.mp3".into()],
         looped: true,

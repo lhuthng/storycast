@@ -9,7 +9,8 @@ use std::path::{Path, PathBuf};
 /// How much of the hash goes in the tag. A tag is a name a human reads in a
 const TAG_HASH_LEN: usize = 12;
 
-/// The file name both sides agree on. `tools/models.sh` cuts it, and the
+/// The file name both sides agree on. The preset-manager's models build cuts
+/// it, and the
 pub const BUNDLE_NAME: &str = "models.tar.zst";
 
 /// A GitHub Releases artifact for one bake: the repo that hosts it, the hash
@@ -74,7 +75,8 @@ pub fn parse_repo(repo: &str) -> Result<(&str, &str)> {
     Ok((owner, name))
 }
 
-/// `models-v<first 12 of the hash>`, the tag `tools/models.sh publish` cuts.
+/// `models-v<first 12 of the hash>`: the tag the GitHub plane used, kept
+/// because the shape is still what `docs/ARTIFACTS.md` describes.
 pub fn tag_for(hash: &str) -> String {
     format!("models-v{}", &hash[..TAG_HASH_LEN.min(hash.len())])
 }
@@ -179,6 +181,12 @@ pub struct PresetFile {
     pub manifest_hash: String,
 }
 
+/// The sha256 of a file on disk, as `latest.json` spells it.
+pub fn sha256_of(path: &Path) -> Result<String> {
+    let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
+    Ok(crate::profile::content_hash(&bytes))
+}
+
 /// Read a pack's latest.json and take one entry out of it. Network, unlike
 /// the GitHub path, which derives everything from the local manifest.
 pub fn preset_latest(base: &str, kind: &str, name: &str, file: &str) -> Result<PresetFile> {
@@ -186,21 +194,47 @@ pub fn preset_latest(base: &str, kind: &str, name: &str, file: &str) -> Result<P
         "{}/preset/{kind}/{name}/latest.json",
         base.trim_end_matches('/')
     );
+    let doc = preset_doc(&url)?.ok_or_else(|| anyhow!("{url}: no such pack"))?;
+    preset_file(base, &url, &doc, file)
+}
+
+/// [`preset_latest`] with a missing pack answered as `None`: an update walks a
+/// closure, and a dependency nobody published is the caller's call, not a 404.
+pub fn preset_latest_opt(
+    base: &str,
+    kind: &str,
+    name: &str,
+    file: &str,
+) -> Result<Option<PresetFile>> {
+    let url = format!(
+        "{}/preset/{kind}/{name}/latest.json",
+        base.trim_end_matches('/')
+    );
+    let Some(doc) = preset_doc(&url)? else {
+        return Ok(None);
+    };
+    preset_file(base, &url, &doc, file).map(Some)
+}
+
+fn preset_doc(url: &str) -> Result<Option<Value>> {
     let client = reqwest::blocking::Client::builder()
         .connect_timeout(std::time::Duration::from_secs(20))
         .timeout(std::time::Duration::from_secs(60))
         .build()
         .map_err(|e| anyhow!("preset fetch unavailable: {e}"))?;
-    let doc: Value = client
-        .get(&url)
+    let resp = client
+        .get(url)
         .header("User-Agent", PRESET_UA)
         .send()
-        .map_err(|e| anyhow!("{url}: {e}"))?
-        .error_for_status()
+        .map_err(|e| anyhow!("{url}: {e}"))?;
+    if resp.status() == reqwest::StatusCode::NOT_FOUND {
+        return Ok(None);
+    }
+    resp.error_for_status()
         .map_err(|e| anyhow!("{url}: {e}"))?
         .json()
-        .map_err(|e| anyhow!("{url}: {e}"))?;
-    preset_file(base, &url, &doc, file)
+        .map(Some)
+        .map_err(|e| anyhow!("{url}: {e}"))
 }
 
 /// One latest.json document resolved against its base URL: the direct file
@@ -323,6 +357,9 @@ pub struct Landing {
     pub files: usize,
     pub bytes: u64,
     pub tag: String,
+    /// The bundle's `migrations.json`, copied beside the landed tree: it is not
+    /// content, so it must not be folded in, but the updater has to read it.
+    pub migrations: Option<PathBuf>,
 }
 
 #[derive(Debug)]
@@ -473,6 +510,7 @@ fn land_with(archive: &Path, dest: &Path, expect: Option<&str>) -> Result<Landin
             files,
             bytes: dir_bytes(dest),
             tag: tag_for(&hash),
+            migrations: None,
         })
     })();
     // A stage left behind is 668 MB of the box's disk and nothing else; the
@@ -604,6 +642,17 @@ fn land_pack_with(
             )));
         }
         swap(&tree, dest).map_err(|e| FetchError::Corrupt(format!("{}: {e:#}", dest.display())))?;
+        // Beside the tree, not inside it: a dependency's `_extends/` directory
+        // is folded into the live assets, and history is not content.
+        let history = stage.join(crate::pack_migration::MIGRATIONS_FILE);
+        let migrations = if history.is_file() {
+            let kept = dest.with_extension(crate::pack_migration::MIGRATIONS_FILE);
+            std::fs::copy(&history, &kept)
+                .ok()
+                .map(|_| kept)
+        } else {
+            None
+        };
         // The receipt is the manifest this land verified, so a later diff
         let receipt = dest.parent().unwrap_or(Path::new(".")).join(PACK_RECEIPT);
         match crate::profile::read_manifest_at(&stage.join(PACK_MANIFEST)) {
@@ -624,6 +673,7 @@ fn land_pack_with(
                 files,
                 bytes: dir_bytes(dest),
                 tag: tag.to_string(),
+                migrations,
             },
             hash,
         ))

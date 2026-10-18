@@ -186,6 +186,7 @@ fn a_registry_name_carrying_the_query_prefix_is_refused() {
     pools.get_mut(&PoolKind::Inject).unwrap().insert(
         "tags:rain".to_string(),
         audio_pool::Sound {
+            id: None,
             tags: vec!["rain".into()],
             files: vec!["injects/rain-1.mp3".into()],
             looped: false,

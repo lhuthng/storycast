@@ -160,29 +160,30 @@ With GitHub Releases the key becomes the release tag:
 https://github.com/<owner>/<repo>/releases/download/models-v<hash>/models.tar.zst
 ```
 
-and the mechanism is one this repo already runs: `tools/profile.sh fetch` queries
-`api.github.com/…/releases`, selects the release whose `tag_name` matches, picks
-the asset ending in `.tar.zst`, and curls its `browser_download_url`, with
-`GH_TOKEN` used only when set. Public repo means no token on the box.
+and the mechanism is `tools/profile.sh fetch`, which reads whichever plane
+`packs_release` names: a **URL** is the R2 bucket ([R2-PRESETS](R2-PRESETS.md)),
+where `latest.json` pins both the archive sha256 and the tree hash, and an
+`owner/name` is the GitHub release above. The transfer is
+`bm-inductor profile fetch`, because checking the bucket's pinned sha256 before
+the file is given its real name is not something shell should re-implement.
+
+**This repo's GitHub releases are retired** — every tag was deleted, and the R2
+bucket is the only plane with content. `owner/name` is still *supported*, so a
+box configured that way resolves a URL that no longer exists, gets the
+"unreachable" answer and falls back to receiving `assets/` over the uplink. The
+tables below describe that mode; on this deployment they are history.
 
 ## Publishing, **done**
 
-`tools/models.sh`, a sibling of `tools/profile.sh` with the same four verbs:
+Packing and verifying a models bundle is the **preset-manager's** job
+(`backend/preset-manager`, the Release page) — it was `tools/models.sh`, which
+is gone. The four verbs became: `pack` → *Build the models bundle*, `verify` →
+*Verify the bundle*, `publish` → *Publish it* (any kind, models included), and
+`list` → the *Built archives* table, which already walked `engines/`.
 
-```
-tools/models.sh pack     [--level N] [--engine <name>]
-                         verify the bake -> engines/<engine>/models/models.tar.zst
-tools/models.sh verify   [--engine <name>]
-                         bundle manifest vs. bundle contents
-tools/models.sh publish  [--notes "…"] [--engine <name>]
-                         gh release create models-v<hash> with the bundle
-tools/models.sh list     [--engine <name>]
-                         the local bundle, its hash and size
-```
-
-`--engine` defaults to `vieneu`, or to `$BM_ENGINE` when that is set, and every
-path is derived from it — so a second engine is `--engine pocket` and its own
-`engines/pocket/models/`, beside its own binary and runtime. The name is checked
+The engine picker offers every `engines/<name>/` that has a `models/manifest.json`,
+and every path is derived from the name — so a second engine is its own
+`engines/<name>/models/`, beside its own binary and runtime. The name is checked
 rather than trusted, because it lands in a path: letters, digits, dot, dash and
 underscore only, and an `engines/<name>/` that does not exist is an error naming
 the ones that do. An engine that ships its own bake (`engines/<name>/bake.py`)
@@ -196,8 +197,10 @@ pack pointer's `version` does for a pack. A content address needs no help
 naming its bytes, and adding a free-text component to one only makes it easier
 to get wrong. One engine pointer per workspace is the limit this scheme has.
 
-`pack` runs the engine's bake with `--check` first and **refuses unless every
-file matches**. That gate is the whole safety story, and it
+The build **refuses unless every file the manifest lists is on disk with the
+sha256 it records** — the same comparison `bake-models.py --check` makes, done
+in-process so packing needs no interpreter. That gate is the whole safety story,
+and it
 could not be used as a gate until the roster left the record, before that, it
 reported a `CHANGED` that no re-bake could clear. It also selects members from
 the manifest rather than globbing `models/`, which is the same content-addressing
@@ -232,8 +235,9 @@ models-vdda4efee13df)` at 18 MiB/s off the CDN. If a bundle ever needs
 re-cutting, the same tag is the right one to clobber and not a new one:
 
 ```bash
-tools/models.sh pack && tools/models.sh verify
-gh release upload models-v<hash> models/models.tar.zst --clobber
+# the Release page: Build the models bundle, then Verify the bundle
+# then publish the re-cut archive as a new version in the bucket
+tools/preset-publish.sh models vieneu <version> engines/vieneu/models/models.tar.zst
 ```
 
 The tag names the *contents* by the manifest hash, and the contents have not
@@ -373,7 +377,7 @@ Two things this found, both of which were true before it existed:
   `._name` sidecar for every member carrying an extended attribute and *hides
   them from its own `tar -t`*. A Linux box unpacked them as 17 real files, and
   the "nothing unlisted" check refuses that bundle by name — which is how a
-  packer nobody audited gets caught. `tools/models.sh pack` now sets
+  packer nobody audited gets caught. The manager's models build sets
   `COPYFILE_DISABLE=1` (the env var, not `--no-mac-metadata`, which GNU tar
   rejects as unknown). The same bug shipped 115 sidecars per push in the sources
   bundle before that was fixed.

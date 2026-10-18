@@ -13,6 +13,17 @@ pub struct Available {
     /// The release tag, for the log line — `<name>-pack-v<version>`.
     pub tag: String,
     pub url: String,
+    /// The tree's manifest hash, when the source pins one (R2's `latest.json`).
+    pub manifest_hash: Option<String>,
+}
+
+/// One fetched dependency: its flat tree, and the bundle's rename history.
+#[derive(Debug, Clone)]
+pub struct Fetched {
+    /// What lands at `assets/_extends/<name>/`.
+    pub tree: PathBuf,
+    /// Read from beside the bundle's `assets/`, so the fold never inherits it.
+    pub migrations: Option<crate::pack_migration::Migrations>,
 }
 
 /// Where an update asks what exists, and gets the bytes.
@@ -21,7 +32,7 @@ pub trait Releases {
     fn latest(&mut self, name: &str) -> Result<Option<Available>>;
 
     /// Download `release`, verify it, and answer with its **unpacked tree**.
-    fn fetch(&mut self, release: &Available) -> Result<PathBuf>;
+    fn fetch(&mut self, release: &Available) -> Result<Fetched>;
 }
 
 /// What an update found, per dependency.
@@ -89,6 +100,13 @@ pub struct Update {
     pub replaced: Vec<String>,
     /// The fold, after the swap. `None` on a dry run, which computes the plan
     pub fold: Option<compose::Report>,
+    /// The renames every replaced pack agrees on, for the caller to apply to
+    /// the workspace's scripts — the tree, not the scripts, is what this owns.
+    pub migrations: crate::pack_migration::Renames,
+    /// The binding this update re-stamped, when the checkout has one. An update
+    /// that moves the tree and leaves the pointer on the old hash hands the
+    /// next run a checkout its own gate calls drifted; this is that closed.
+    pub stamped: Option<crate::profile::Pointer>,
     pub dry_run: bool,
 }
 
@@ -153,6 +171,8 @@ pub fn update(
 
     let mut steps: Vec<Step> = Vec::new();
     let mut staged: BTreeMap<String, PathBuf> = BTreeMap::new();
+    // The rename history every replaced bundle carries, merged after the walk.
+    let mut docs: Vec<crate::pack_migration::Migrations> = Vec::new();
     // name -> its own dependencies, and name -> who names it. The first is what
     let mut graph: BTreeMap<String, Vec<String>> = BTreeMap::new();
     let mut parents: BTreeMap<String, Vec<String>> = BTreeMap::new();
@@ -204,14 +224,17 @@ pub fn update(
             let fetched = releases
                 .fetch(&release)
                 .with_context(|| format!("fetching {} ({})", release.name, release.tag))?;
-            if !fetched.is_dir() {
+            if !fetched.tree.is_dir() {
                 bail!(
                     "the release source answered {} for '{name}', which is not a tree",
-                    fetched.display()
+                    fetched.tree.display()
                 );
             }
-            tree = fetched.clone();
-            staged.insert(name.clone(), fetched);
+            if let Some(doc) = fetched.migrations {
+                docs.push(doc);
+            }
+            tree = fetched.tree.clone();
+            staged.insert(name.clone(), fetched.tree);
         }
 
         // Whichever tree the update knows about: the staged release when one was
@@ -243,6 +266,8 @@ pub fn update(
 
     let mut replaced: Vec<String> = Vec::new();
     let mut fold = None;
+    let mut stamped = None;
+    let migrations = crate::pack_migration::merge(&docs)?;
     if !dry_run {
         for (name, tree) in &staged {
             let dir = extends.join(name);
@@ -257,12 +282,23 @@ pub fn update(
             .map(|s| (s.name.clone(), s.version.clone()))
             .collect();
         compose::set_release_versions(assets, &versions)?;
+        // Last, because it hashes what the two steps above left behind: the
+        // binding is the gate the next run reads, and this function is what
+        // moved the tree. `assets` is `<root>/assets`, so its parent is the
+        // checkout the binding belongs to; a workspace with its own `assets/`
+        // has no `.bm/profile` and gets `None`, which is correct — the pack it
+        // runs is its own, and this did not touch it.
+        if let Some(root) = assets.parent() {
+            stamped = crate::profile::restamp_binding(root)?;
+        }
     }
 
     Ok(Update {
         steps,
         replaced,
         fold,
+        migrations,
+        stamped,
         dry_run,
     })
 }
@@ -402,6 +438,7 @@ mod tests {
         broken: BTreeSet<String>,
         fetched: Vec<String>,
         listed: Vec<String>,
+        migrations: Option<crate::pack_migration::Migrations>,
     }
 
     impl Fake {
@@ -413,7 +450,13 @@ mod tests {
                 broken: BTreeSet::new(),
                 fetched: Vec::new(),
                 listed: Vec::new(),
+                migrations: None,
             }
+        }
+
+        fn migrating(mut self, migrations: crate::pack_migration::Migrations) -> Self {
+            self.migrations = Some(migrations);
+            self
         }
 
         fn releasing(mut self, name: &str, version: &str, deps: &[&str]) -> Self {
@@ -439,10 +482,11 @@ mod tests {
                 version: version.clone(),
                 tag: format!("{name}-pack-v{version}"),
                 url: format!("https://example.invalid/{name}-{version}.tar.zst"),
+                manifest_hash: None,
             }))
         }
 
-        fn fetch(&mut self, release: &Available) -> Result<PathBuf> {
+        fn fetch(&mut self, release: &Available) -> Result<Fetched> {
             self.fetched.push(release.name.clone());
             if self.broken.contains(&release.name) {
                 anyhow::bail!("{} sha256 does not match the manifest", release.tag);
@@ -458,7 +502,10 @@ mod tests {
                 tree.join("pack.json"),
                 serde_json::json!({ "deps": deps }).to_string(),
             )?;
-            Ok(tree)
+            Ok(Fetched {
+                tree,
+                migrations: self.migrations.clone(),
+            })
         }
     }
 
@@ -707,5 +754,34 @@ mod tests {
         let err = update(&l.assets, &mut fake, false, false).unwrap_err();
         assert!(err.to_string().contains("pack.json"), "{err}");
         assert!(fake.listed.is_empty(), "and it asked nothing");
+    }
+
+    #[test]
+    fn a_release_s_rename_history_travels_with_the_update() {
+        let l = Live::new("history");
+        l.pack(&["B"]);
+        l.unpack("B", "0.1.0", &[]);
+        l.settled(&[("B", "0.1.0")]);
+        let history = crate::pack_migration::Migrations {
+            format: crate::pack_migration::FORMAT,
+            pack: "B".into(),
+            history: vec![crate::pack_migration::Step {
+                version: "0.2.0".into(),
+                palette: [("quiet".to_string(), "calm".to_string())]
+                    .into_iter()
+                    .collect(),
+                inject: Default::default(),
+            }],
+        };
+        let mut fake = Fake::new(&l.root)
+            .releasing("B", "0.2.0", &[])
+            .migrating(history);
+
+        let u = update(&l.assets, &mut fake, false, false).unwrap();
+        assert_eq!(
+            u.migrations.palette.get("quiet").map(String::as_str),
+            Some("calm"),
+            "the bundle's history is merged for the caller to apply"
+        );
     }
 }

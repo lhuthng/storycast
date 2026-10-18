@@ -3,9 +3,10 @@
 #
 #   tools/profile.sh pack <name> [--piece pack|adapter] [--level N] [--version V]
 #                                        tar.zst the live piece -> profiles/<piece>/<name>.tar.zst
-#   tools/profile.sh fetch <name> [@version] [--piece p]
-#                                        download it from the `<name>-<piece>-v<version>`
-#                                        GitHub release (latest matching when omitted), then verify
+#   tools/profile.sh fetch <name> [@version] [--piece p] [--repo where]
+#                                        download it from `packs_release` — the R2
+#                                        bucket when that is a URL, a GitHub release
+#                                        when it is `owner/name` — then verify
 #   tools/profile.sh unpack <name> [--piece p]
 #                                        verify -> replace that piece, merge `.bm/profile`
 #   tools/profile.sh list                releases, with their piece and version
@@ -106,6 +107,16 @@ piece_members() { # $1 = piece, $2 = name
   case "$1" in
     pack) echo "assets";;
     adapter) echo "adapters/$2";;
+  esac
+}
+
+# The bucket's word for a piece. A bucket holds every kind, and the piece names
+# only two of them: `pack` is published under `sounds`, `adapter` under
+# `profiles` (docs/R2-PRESETS.md).
+preset_kind() { # $1 = piece
+  case "$1" in
+    pack) echo "sounds";;
+    adapter) echo "profiles";;
   esac
 }
 
@@ -229,7 +240,9 @@ print("loaded " + piece + " " + m["name"] + " v" + m.get("version", "?")
 EOF
 }
 
-# owner/repo from the origin remote (both ssh and https spellings).
+# owner/repo from the origin remote (both ssh and https spellings). Not used by
+# `fetch` — that one reads `packs_release`, which is where a *box* learns the
+# address and the only answer a box without a git remote has.
 repo_slug() {
   git -C "$root" remote get-url origin 2>/dev/null | python3 -c '
 import re, sys
@@ -247,7 +260,12 @@ case "$cmd" in
     fi
     bundle="$root/profiles/$PIECE/$name.tar.zst"
     mkdir -p "$root/profiles/$PIECE"
-    stage=$(mktemp -d "$root/profiles/.pack.XXXXXX")
+    PUBLISH_KIND=$(preset_kind "$PIECE")
+    # Outside the checkout on purpose. A stage holds a whole copy of `assets/`
+    # (~90 MB for a preset), and a sandbox that refuses a bulk `rm -rf` under
+    # the repo leaves that copy behind on every pack — six had piled up before
+    # anyone noticed. The operator's `$TMPDIR` is not the tree's problem.
+    stage=$(mktemp -d "${TMPDIR:-/tmp}/bm-pack.XXXXXX")
     trap 'rm -rf "$stage"' EXIT
     # The manifest first, deliberately: it is where a stale tree is refused, so
     # nothing is copied or compressed for a release that will not be true.
@@ -302,10 +320,28 @@ EOF
       done
     fi
     out="$root/profiles/.pack.$name.tar.zst"
+    # The rename history travels beside `assets/`, never inside it: the fold
+    # would inherit it, and a second pack's history would collide with this one.
+    #
+    # It also has to be *in* the manifest, for the reason `assets/pack.json` is
+    # patched in above: the bundle is verified file for file against its own
+    # manifest, so an unlisted member makes every fetch refuse the bundle. And
+    # hashing it is worth the four lines — a rename map that travelled
+    # unprotected could point a workspace's scripts anywhere.
+    if [ -f "$root/profiles/$PIECE/$name.migrations.json" ]; then
+      cp "$root/profiles/$PIECE/$name.migrations.json" "$stage/migrations.json"
+      python3 - "$stage/migrations.json" "$stage/manifest.json" <<'EOF'
+import hashlib, json, sys
+data = open(sys.argv[1], "rb").read()
+m = json.load(open(sys.argv[2]))
+m["files"]["migrations.json"] = hashlib.sha256(data).hexdigest()
+json.dump(m, open(sys.argv[2], "w"), indent=2)
+EOF
+    fi
     # OS noise never enters a bundle: a .DS_Store would hash-drift every
     # unpack on a different machine for zero content.
     #
-    # `COPYFILE_DISABLE=1` for the same reason `tools/models.sh` sets it, and it
+    # `COPYFILE_DISABLE=1` for the same reason the models build sets it, and it
     # is not belt-and-braces: macOS `bsdtar` writes a `._name` AppleDouble
     # sidecar for every member carrying an extended attribute, **hides those
     # sidecars from its own `tar -t`**, and a provisioned box would then unpack
@@ -318,6 +354,7 @@ EOF
     # what makes that gate pass, not a substitute for it.
     COPYFILE_DISABLE=1 tar --exclude=.DS_Store $(piece_excludes "$PIECE") -cf - -C "$stage" \
       $(piece_members "$PIECE" "$name") manifest.json \
+      $(if [ -f "$stage/migrations.json" ]; then echo migrations.json; fi) \
       | zstd -"$LEVEL" -o "$out"
     mv "$out" "$bundle"
     trap - EXIT; rm -rf "$stage"
@@ -364,45 +401,29 @@ EOF
       stamp_piece "$kept" "$root/.bm/profile" | sed 's/^/  /'
       rm -f "$kept"
     fi
-    printf 'publish: gh release create %s-%s-v%s %s --title "%s %s v%s" --notes "profile %s"\n' \
-      "$name" "$PIECE" "$stamped" "$bundle" "$name" "$PIECE" "$stamped" "$PIECE"
-    if [ "$PIECE" = pack ] && [ -n "$stamped" ] && [ -z "$DEP" ]; then
-      printf 'then, to have boxes fetch it instead of receiving assets/ over your uplink:\n  :packrelease owner/name   (or set "packs_release" in settings.json)\n'
+    # The bucket is the plane, so the next step is the publish script and not
+    # `gh release create`: a tag on GitHub is a URL no fetcher here reads now
+    # that `fetch` goes through `packs_release`.
+    if [ -n "$stamped" ]; then
+      printf 'publish: tools/preset-publish.sh %s %s %s %s\n' \
+        "$PUBLISH_KIND" "$name" "$stamped" "$bundle"
+      printf 'then point boxes at it:  :packrelease <bucket url>   (or set "packs_release" in settings.json)\n'
     fi
     tar --use-compress-program=unzstd -tf "$bundle" | head -5
     ;;
   fetch)
-    command -v curl >/dev/null || { echo "curl not on PATH" >&2; exit 1; }
-    slug=$(repo_slug)
+    # Which plane this reads is the *setting's shape*, not a flag: a URL is the
+    # preset bucket (docs/R2-PRESETS.md) and `owner/name` is GitHub releases.
+    # `packs_release` is the default, so a provisioned box needs no arguments
+    # beyond the name. The transfer lives in `bm-inductor profile fetch` because
+    # the bucket pins an archive sha256 in latest.json and checking it is the
+    # one thing this script would otherwise have to re-implement; the file only
+    # gets its real name after it matches.
     mkdir -p "$root/profiles/$PIECE"
-    # Anonymous works on a public repo; a private one needs GH_TOKEN.
-    # One release per (name, piece), so the tag carries both and the asset keeps
-    # the plain `<name>.tar.zst` a local pack produces.
-    url=$(NAME="$name" WANT="$version_arg" SLUG="$slug" PIECE="$PIECE" python3 - <<'EOF'
-import json, os, sys, urllib.request
-slug, name, want, piece = os.environ["SLUG"], os.environ["NAME"], os.environ["WANT"], os.environ["PIECE"]
-want = want.lstrip("v")
-tag = lambda v: f"{name}-{piece}-v{v}"
-req = urllib.request.Request(f"https://api.github.com/repos/{slug}/releases?per_page=100",
-                             headers={"Accept": "application/vnd.github+json"})
-if os.environ.get("GH_TOKEN"):
-    req.add_header("Authorization", "Bearer " + os.environ["GH_TOKEN"])
-rels = json.load(urllib.request.urlopen(req))
-cands = [r for r in rels if (r.get("tag_name", "") + "/").startswith(f"{name}-{piece}-v")]
-if want:
-    cands = [r for r in cands if r["tag_name"] == tag(want)]
-if not cands:
-    sys.exit(f"no release for {piece} {name}" + (f" version {want}" if want else ""))
-rel = sorted(cands, key=lambda r: r.get("created_at", ""))[-1]
-zst = [a["browser_download_url"] for a in rel.get("assets", []) if a["name"].endswith(".tar.zst")]
-if not zst:
-    sys.exit(f"release {rel['tag_name']} holds no .tar.zst asset")
-print(zst[0])
-EOF
-)
-    out="$root/profiles/.fetch.$name.tar.zst"
-    curl -fsSL ${GH_TOKEN:+-H "Authorization: Bearer $GH_TOKEN"} -o "$out" "$url"
-    mv "$out" "$root/profiles/$PIECE/$name.tar.zst"
+    args=(profile fetch "$name" --piece "$PIECE")
+    if [ -n "$version_arg" ]; then args+=(--version "$version_arg"); fi
+    if [ -n "$REPO" ]; then args+=(--repo "$REPO"); fi
+    inductor "${args[@]}"
     "${BASH_SOURCE[0]}" verify "$name" --piece "$PIECE"
     ;;
   unpack)

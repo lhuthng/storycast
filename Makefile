@@ -12,6 +12,7 @@
 #   make provision BOX=<name>    onboard a linked machine (see `link` below)
 #   make link NAME=<n> ADDR=<ip>  remember a machine in .bm/machines.json
 #   make test                   full test suite + clippy
+#   make preset-manager         preset packs admin UI (http://localhost:5173)
 #
 # Variables (override with `make tui API=http://box:8901`):
 #   API        inductor base URL        (default http://127.0.0.1:8901)
@@ -36,6 +37,8 @@ CARGO := $(shell command -v cargo 2>/dev/null || echo $(HOME)/.cargo/bin/cargo)
 # both have to be findable on PATH for the build, not just for the check.
 CARGO_BIN_DIR := $(patsubst %/,%,$(dir $(CARGO)))
 ZIG := $(shell command -v zig 2>/dev/null || echo $(CARGO_BIN_DIR)/zig)
+# Same story for bun: the preset-manager is the one target that needs it.
+BUN := $(shell command -v bun 2>/dev/null || echo $(HOME)/.bun/bin/bun)
 API ?= http://127.0.0.1:8901
 # `digest-assistant` reads API as the *model* service, so it needs a model
 # default of its own; this is what API falls back to there when it still holds
@@ -51,7 +54,7 @@ GO ?=
 # silent, and is stamped offline — so it is offered nothing.
 TASK_PORT ?= 8917
 
-.PHONY: build build-inductor build-inductor-release tui tui-release serve agent digest-assistant provision link test
+.PHONY: build build-inductor build-inductor-release tui tui-release serve agent digest-assistant provision link test preset-manager
 
 build:
 	$(CARGO) build --workspace --manifest-path $(BACKEND_DIR)/Cargo.toml
@@ -146,6 +149,14 @@ KEY ?=
 test:
 	$(CARGO) test --workspace --manifest-path $(BACKEND_DIR)/Cargo.toml
 	$(CARGO) clippy --all-targets --manifest-path $(BACKEND_DIR)/Cargo.toml -- -D warnings
+
+# The preset-packs admin UI (backend/preset-manager). It finds the repo root
+# from its cwd, so the `cd` is load-bearing. Listing the bucket needs the `aws`
+# CLI and R2 credentials, which it reads from the checkout's own `.env`.
+# The port is pinned and strict: otherwise a stray copy of the server keeps 5173
+# and this one quietly moves to the next free port.
+preset-manager:
+	cd $(BACKEND_DIR)/preset-manager && $(BUN) run dev -- --port 5173 --strictPort
 
 # ── the TTS sidecar: its runtime, and its binary ────────────────────────────
 #

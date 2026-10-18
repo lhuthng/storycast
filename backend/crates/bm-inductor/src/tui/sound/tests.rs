@@ -2,6 +2,7 @@ use super::*;
 
 fn sound(files: &[&str], tags: &[&str]) -> Sound {
     Sound {
+        id: None,
         tags: tags.iter().map(|t| t.to_string()).collect(),
         files: files.iter().map(|f| f.to_string()).collect(),
         looped: true,
@@ -131,6 +132,7 @@ fn a_registry_naming_a_missing_clip_is_flagged() {
 fn an_entry_round_trips_through_the_prompt_line() {
     for layer in PoolKind::ALL {
         let s = Sound {
+            id: None,
             tags: vec!["a".into(), "b".into()],
             files: vec![format!("{}/x-1.mp3", layer.dir())],
             // The music layer has no `looped` flag at all — it always loops
@@ -225,6 +227,7 @@ fn a_bed_renders_at_a_tenth_and_the_table_cell_does_not_say_so() {
     let row = |mode: Option<&str>, level: Option<f64>| SoundRow {
         name: "boil".into(),
         sound: Sound {
+            id: None,
             looped: true,
             dur_s: Some(51.0),
             mode: mode.map(str::to_string),
@@ -281,6 +284,7 @@ fn a_clip_must_exist_and_live_in_its_own_layers_directory() {
 fn an_edit_is_checked_on_what_it_introduces_not_on_what_was_already_there() {
     let (_d, dir) = fixture();
     let gone = Sound {
+        id: None,
         tags: vec!["rain".into()],
         files: vec!["effects/gone-1.mp3".into()],
         looped: true,
@@ -291,6 +295,7 @@ fn an_edit_is_checked_on_what_it_introduces_not_on_what_was_already_there() {
     };
     // The same (broken) take, retagged: nothing new to check.
     let retagged = Sound {
+        id: None,
         tags: vec!["rain".into(), "storm".into()],
         ..gone.clone()
     };
@@ -299,6 +304,7 @@ fn an_edit_is_checked_on_what_it_introduces_not_on_what_was_already_there() {
 
     // A take the edit adds is checked, and a missing one is refused.
     let replaced = Sound {
+        id: None,
         files: vec!["effects/gone-1.mp3".into(), "effects/absent-1.mp3".into()],
         ..gone.clone()
     };
@@ -312,6 +318,7 @@ fn an_edit_is_checked_on_what_it_introduces_not_on_what_was_already_there() {
     assert_eq!(introduced(None, &replaced).len(), 2);
     // ...and the one that is there passes.
     let good = Sound {
+        id: None,
         files: vec!["effects/rain-1.mp3".into()],
         ..gone.clone()
     };

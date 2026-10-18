@@ -436,6 +436,7 @@ pub(crate) fn parse_entry(
     Ok((
         name,
         Sound {
+            id: None,
             tags,
             files,
             looped: looped.unwrap_or(true),

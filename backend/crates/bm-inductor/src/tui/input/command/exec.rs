@@ -233,8 +233,9 @@ pub(crate) fn do_command(
             app.screen = Screen::Text(TextPrompt::new(
                 TextKind::ModelsRelease,
                 "Model artifact release",
-                "GitHub owner/name holding the baked weights as a release (tools/models.sh \
-                 publish). A provisioned box then fetches that 363 MB bundle and verifies it \
+                "Preset bucket URL (or GitHub owner/name) holding the baked weights as a \
+                 release; publish it from the preset-manager's Release page. A provisioned box \
+                 then fetches that 363 MB bundle and verifies it \
                  itself, instead of receiving 668 MB over this machine's uplink. Empty restores \
                  the push.",
                 &cur,
@@ -263,8 +264,9 @@ pub(crate) fn do_command(
                 TextKind::PacksRelease,
                 "Profile pack release",
                 &format!(
-                    "GitHub owner/name holding the profile pack as a release (tools/profile.sh \
-                     pack <name> --version <v>, then `gh release create`). A provisioned box \
+                    "Preset bucket URL (or GitHub owner/name) holding the profile pack as a \
+                     release; publish it with tools/preset-publish.sh, or from the \
+                     preset-manager's Release page. A provisioned box \
                      fetches that ~60 MB of assets/ and verifies it itself, instead of \
                      receiving it over this machine's uplink once per box. {} Empty restores \
                      the push.",

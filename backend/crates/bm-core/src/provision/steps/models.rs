@@ -129,8 +129,8 @@ echo "TTS-RUNTIME-OK ($(LD_LIBRARY_PATH="$D" ./bm-tts --version))"
                     // Not a fallback trigger. The bytes disagreed with the
                     anyhow::bail!(
                         "the release artifact does not verify and was not put in place: {e} \
-                         (nothing was changed on this box; re-pack with tools/models.sh pack \
-                         and re-publish, or clear `models_release` to push the directory)"
+                         (nothing was changed on this box; re-pack it on the preset-manager's \
+                         Release page and re-publish, or clear `models_release` to push the directory)"
                     );
                 }
                 Err(FetchOutcome::Unreachable(e)) => {

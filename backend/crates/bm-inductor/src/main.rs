@@ -294,6 +294,32 @@ async fn main() -> anyhow::Result<()> {
                     Err(e) => Err(anyhow::anyhow!("the update did not finish: {e}")),
                 }
             }
+            ProfileCmd::Fetch {
+                name,
+                piece,
+                version,
+                repo,
+            } => {
+                // `reqwest::blocking` builds a runtime of its own, and dropping
+                // one inside tokio's is a panic — so the fetch runs off the
+                // runtime thread, the same way `update` does.
+                let layout = layout.clone();
+                let settings = settings.clone();
+                let task = tokio::task::spawn_blocking(move || {
+                    releases::cmd_fetch(
+                        &layout,
+                        &settings,
+                        &name,
+                        &piece,
+                        version.as_deref(),
+                        repo.as_deref(),
+                    )
+                });
+                match task.await {
+                    Ok(result) => result,
+                    Err(e) => Err(anyhow::anyhow!("the fetch did not finish: {e}")),
+                }
+            }
             ProfileCmd::Check => {
                 let (lines, ok) = profile_check(&layout, &settings)?;
                 for line in &lines {

@@ -376,6 +376,56 @@ fn a_workspace_owned_pack_manifests_the_workspace_tree_not_the_checkouts() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// An update moves the tree, so it owes the checkout a pointer that matches
+/// what it left behind. The difference from `verify_binding` is the report, not
+/// the hash: a caller that moved the tree itself must not be told it drifted,
+/// and a checkout must not need a second command to become true.
+#[test]
+fn restamp_binding_adopts_the_live_tree_without_calling_it_drift() {
+    let dir = live_fixture("restamp");
+    let live = manifest_hash(&hash_live(&dir).unwrap());
+    write_binding(
+        &dir,
+        &Binding {
+            pack: Pointer {
+                name: "xianxia".into(),
+                hash: "stale".into(),
+                version: "1".into(),
+            },
+            ..Default::default()
+        },
+    )
+    .unwrap();
+
+    let stamped = restamp_binding(&dir)
+        .unwrap()
+        .expect("a binding to re-stamp");
+    assert_eq!(stamped.hash, live, "the hash is the live tree's");
+    assert_eq!(
+        stamped.name, "xianxia",
+        "the name is the operator's, not the tree's"
+    );
+    assert_eq!(stamped.version, "1", "and so is the version it was loaded as");
+    let after = read_binding(&dir).unwrap();
+    assert_eq!(after.pack, stamped, "it was written, not just computed");
+    assert_eq!(
+        after.adapter,
+        Pointer::default(),
+        "the other pieces are not its business"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Nothing to re-stamp without a pointer: a plain pack is run by path, and a
+/// workspace with its own `assets/` has no `.bm/profile` of its own.
+#[test]
+fn restamp_binding_is_none_when_nothing_is_bound() {
+    let dir = live_fixture("restamp-none");
+    assert!(!pointer_path(&dir).exists(), "the fixture starts unbound");
+    assert!(restamp_binding(&dir).unwrap().is_none());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// One file per piece, in a directory per piece — so `xianxia` the pack and
 #[test]
 fn a_release_is_one_file_per_piece_and_the_engine_is_not_one() {

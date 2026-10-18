@@ -244,6 +244,22 @@ pub(crate) enum ProfileCmd {
     },
     /// What this checkout's adapter, the binding and the engine say about each
     Check,
+    /// Put one piece's bundle at `profiles/<piece>/<name>.tar.zst`, from the
+    /// newest release or from a version named outright.
+    Fetch {
+        /// Release name (`xianxia`).
+        name: String,
+        /// Which piece: `pack` or `adapter`.
+        #[arg(long, default_value = "pack")]
+        piece: String,
+        /// A version to fetch instead of the newest (`2026-10-18.1`, `@…` or `v…`).
+        #[arg(long)]
+        version: Option<String>,
+        /// The repo (`owner/name`) or preset bucket base URL. Defaults to
+        /// `packs_release` in settings.json.
+        #[arg(long)]
+        repo: Option<String>,
+    },
     /// Bring every dependency of the live composition up to its newest release.
     Update {
         /// Report the plan and write nothing. Reads the release list, so it

@@ -858,11 +858,13 @@ visible in the TUI log (the machine overlay shows which key won:
 makes a *re*-provision free; what still costs is the *first* push to a new box,
 and three quarters of it is 667 MB of TTS weights that are identical on every
 machine and change only when you re-bake them. The publish half is now built:
-`tools/models.sh` packs the 16 immutable weight files plus their manifest into
-`models.tar.zst` and cuts a GitHub release named by the manifest hash (pack,
-verify, publish, list; `pack` refuses unless `bake-models.py --check` reports
-16/16). The fetch half is built too: `bm-agent fetch-artifact` downloads the
-tagged bundle, verifies all 17 files against the manifest that travelled with
+the preset-manager's Release page packs the immutable weight files plus their
+manifest into `models.tar.zst` and publishes it to the bucket under
+`preset/models/<engine>/<version>/` (build, verify, publish; the build refuses
+unless every file matches the hash its manifest records). The fetch half is
+built too:
+`bm-agent fetch-artifact` downloads the
+bundle, verifies every file against the manifest that travelled with
 them, and swaps the tree into place, so a box takes 363 MB off a CDN instead of
 668 MB off this house's uplink. Absent release falls back to the push; bytes that
 disagree stop the provision. See [ARTIFACTS.md](ARTIFACTS.md).
@@ -1646,7 +1648,7 @@ flowchart TB
 * **No cloud object store, and none planned.** `output/` and the segment store
   are local on purpose; the cluster's design is one LAN with the inductor as
   the hub. The large-artifact problem is being answered by publishing the
-  weights as a release (`tools/models.sh`, see section 4 and
+  weights as a release (the preset-manager's Release page, see section 4 and
   [ARTIFACTS.md](ARTIFACTS.md)), not by adding a bucket. The `SegmentStore`
   trait (`bm-core/src/segments.rs`, `LocalStore` the only implementation) stays
   the seam where storage swaps, should that ever change.

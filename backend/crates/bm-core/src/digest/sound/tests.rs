@@ -5,6 +5,7 @@ use crate::digest::TagAliases;
 /// A pooled sound, with only the fields the sound pass reads set.
 fn sound(looped: bool, tags: &[&str]) -> Sound {
     Sound {
+        id: None,
         tags: tags.iter().map(|t| t.to_string()).collect(),
         files: vec!["injects/x.mp3".into()],
         looped,

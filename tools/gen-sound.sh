@@ -39,7 +39,7 @@
 # gitignored, like `engines/vieneu/`: an engine tree is fetched or built, never
 # authored. The weights land in the Hugging Face cache on first use (`HF_HOME`
 # moves it) — one download per tier, and only for the tier you actually run.
-# There is no bake step and no release bundle, unlike `tools/models.sh`: VieNeu
+# There is no bake step and no release bundle, unlike the engine weights: VieNeu
 # is 16 fixed ONNX files that a box has to receive byte-identical, while these
 # are safetensors the HF client already names and verifies by hash.
 #
