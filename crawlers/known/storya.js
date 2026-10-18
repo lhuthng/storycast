@@ -72,6 +72,10 @@ const SITE = {
     ],
     // `ps:` / `p/s:` at the start of a line, as the sites write them.
     post: ["ps:", "p/s:"],
+    // The cross-promo tail names a different book every time, so the prefix is
+    // the only stable part of it. `Mời ` alone is not enough: prose can start
+    // that way, and one chapter's dialogue does.
+    promo_prefix: ["mời đọc", "mời các bạn", "mời mọi người"],
   },
   // The first line longer than this is prose rather than a stray label.
   min_line: 40,
@@ -146,6 +150,12 @@ function isNumberedHeading(line) {
   return rest !== line && isHeadline(rest);
 }
 
+// A cross-promo line names another book; the prefix is the stable part.
+function isPromo(line) {
+  const lower = asciiLower(line);
+  return SITE.artifact.promo_prefix.some((p) => lower.startsWith(p));
+}
+
 // Whether a line is the site's furniture rather than the novel. Every word
 // checked here is a fact about Storya, which is why this function exists in
 // this file and not in the host.
@@ -160,6 +170,16 @@ function isArtifact(line) {
     return true;
   if (anyOf(lower, SITE.artifact.completion)) return true;
   for (const p of SITE.artifact.post) if (lower.startsWith(p)) return true;
+  if (isPromo(line)) return true;
+  // The reader header between the headline and the prose: the date with its
+  // reading-time estimate, and the read counters printed under it.
+  if (
+    lower.includes("chương này khoảng") &&
+    /\d{2}\/\d{2}\/\d{4}/.test(lower)
+  )
+    return true;
+  if (lower.includes("lượt đọc chương") || lower.includes("lượt đọc truyện"))
+    return true;
   return false;
 }
 
@@ -193,6 +213,8 @@ function stripStub(line) {
 function extract(html) {
   // `<script>` and `<style>` bodies are not prose, and neither are the site's
   // own wrappers.
+  const headerHint = select(html, "article header > p");
+  const headerSubtitle = select(html, "article header h1");
   let page = removeBlock(html, "script");
   page = removeBlock(page, "style");
   let scoped = null;
@@ -248,6 +270,9 @@ function extract(html) {
       break;
     }
   }
+  if (headerHint !== "" && headerSubtitle !== "" && isHeadline(headerHint)) {
+    title = headerHint + ": " + headerSubtitle;
+  }
   let from = 0;
   for (let i = 0; i < body.length; i++) {
     const line = body[i];
@@ -257,13 +282,22 @@ function extract(html) {
     }
   }
 
-  const all = title === null ? body.slice(from) : [title].concat(body.slice(from));
+  const tail = [];
+  for (let i = from; i < body.length; i++) {
+    const line = body[i];
+    if (line !== headerHint && line !== headerSubtitle) tail.push(line);
+  }
+  const all = title === null ? tail : [title].concat(tail);
+  // The cross-promo is a block: `Mời đọc:` introduces the titles it
+  // recommends, so everything from that line on is the site's, not the book's.
+  const promoAt = all.findIndex(isPromo);
+  const kept = promoAt === -1 ? all : all.slice(0, promoAt);
   // The site's own lines go here, where the site is described: the numbered
   // headline copy, the promo strip, the completion footer, the author's PS.
   // What is left is prose, and the host's `sanitize` is then only tidying —
   // entities, whitespace, paragraph shape — the same boundary a manual import
   // and the digest preparer run.
-  const out = all
+  const out = kept
     .filter((line) => !isArtifact(line) && !isNumberedHeading(line))
     .map(stripStub);
   return sanitize(out.join("\n\n"));

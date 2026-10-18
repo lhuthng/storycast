@@ -90,6 +90,10 @@ local SITE = {
     },
     -- `ps:` / `p/s:` at the start of a line, as the sites write them.
     post = { "ps:", "p/s:" },
+    -- The cross-promo tail names a different book every time, so the prefix is
+    -- the only stable part of it. `Mời ` alone is not enough: prose can start
+    -- that way, and one chapter's dialogue does.
+    promo_prefix = { "mời đọc", "mời các bạn", "mời mọi người" },
   },
   -- The first line longer than this is prose rather than a stray label.
   min_line = 40,
@@ -203,6 +207,17 @@ local function is_numbered_heading(line)
   return rest ~= nil and is_headline(rest)
 end
 
+-- A cross-promo line names another book; the prefix is the stable part.
+local function is_promo(line)
+  local lower = string.lower(line)
+  for _, p in ipairs(SITE.artifact.promo_prefix) do
+    if lower:sub(1, #p) == p then
+      return true
+    end
+  end
+  return false
+end
+
 -- Whether a line is the site's furniture rather than the novel. Every word
 -- checked here is a fact about Storya, which is why this function exists in
 -- this file and not in the host.
@@ -224,6 +239,19 @@ local function is_artifact(line)
     if lower:sub(1, #p) == p then
       return true
     end
+  end
+  if is_promo(line) then
+    return true
+  end
+  -- The reader header between the headline and the prose: the date with its
+  -- reading-time estimate, and the read counters printed under it.
+  if string.find(lower, "chương này khoảng", 1, true)
+    and string.find(lower, "%d%d/%d%d/%d%d%d%d") then
+    return true
+  end
+  if string.find(lower, "lượt đọc chương", 1, true)
+    or string.find(lower, "lượt đọc truyện", 1, true) then
+    return true
   end
   return false
 end
@@ -256,6 +284,11 @@ end
 
 -- The old Rust extractor, as a script: one page of HTML in, one chapter out.
 local function extract(html)
+  -- The live reader header splits the number and the subtitle into separate
+  -- elements; the shape below would see only `Chương N` and lose the title.
+  local header_hint = select(html, "article header > p")
+  local header_subtitle = select(html, "article header h1")
+
   -- `<script>` and `<style>` bodies are not prose, and neither are the site's
   -- own wrappers. Both go before anything is measured.
   local page = remove_block(remove_block(html, "script"), "style")
@@ -324,6 +357,9 @@ local function extract(html)
       break
     end
   end
+  if header_hint ~= "" and header_subtitle ~= "" and is_headline(header_hint) then
+    title = header_hint .. ": " .. header_subtitle
+  end
   local from = 1
   for i, line in ipairs(body) do
     if chars(line) > SITE.min_line and not is_headline(line) and not any_of(line, SITE.junk) then
@@ -337,7 +373,21 @@ local function extract(html)
     out[#out + 1] = title
   end
   for i = from, #body do
-    out[#out + 1] = body[i]
+    local line = body[i]
+    if line ~= header_hint and line ~= header_subtitle then
+      out[#out + 1] = line
+    end
+  end
+
+  -- The cross-promo is a block: `Mời đọc:` introduces the titles it
+  -- recommends, so everything from that line on is the site's, not the book's.
+  for i, line in ipairs(out) do
+    if is_promo(line) then
+      while #out >= i do
+        table.remove(out)
+      end
+      break
+    end
   end
 
   -- The site's own lines go here, where the site is described: the numbered
