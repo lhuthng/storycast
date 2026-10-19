@@ -3,6 +3,9 @@
 mod catalogue;
 mod consts;
 mod label;
+pub mod packs;
+pub mod preset;
+pub mod tags;
 
 pub use catalogue::{
     effective_engine, effective_engine_lenient, effective_offline_voices, effective_policy,
@@ -17,3 +20,4 @@ pub use consts::{
     GEMINI_NEUTRAL, POCKET, VIENEU, VIENEU_FEMALE, VIENEU_MALE,
 };
 pub use label::{enrolled_voices, offline_voices, voice_name, voices_from_labels};
+pub use preset::{PresetVoice, VoicePreset};
