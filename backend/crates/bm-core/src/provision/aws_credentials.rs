@@ -48,7 +48,7 @@ pub fn require(root: &Path) -> Result<()> {
     if !p.is_file() {
         anyhow::bail!(
             "no IAM user for this app yet — {} does not exist.\n  \
-             Create the user (docs/AWS-IAM-USER.md; `bm-inductor aws policy` prints the \
+             Create the user (`bm-inductor aws policy` prints the \
              policy and the commands), then store its key:\n    \
              bm-inductor aws login --access-key-id AKIA…\n  \
              This app runs as that user and nothing else — it does not fall back to this \
@@ -97,8 +97,8 @@ impl CredentialSource {
         let path = credentials_path(root);
         match self {
             CredentialSource::None => format!(
-                "identity: none — no IAM user stored ({}). See docs/AWS-IAM-USER.md, \
-                 then `aws login`",
+                "identity: none — no IAM user stored ({}). See `bm-inductor aws \
+                 policy`, then `aws login`",
                 path.display()
             ),
             CredentialSource::IamUser {
@@ -381,7 +381,7 @@ mod tests {
         let err = require(&d).unwrap_err().to_string();
         assert!(err.contains("no IAM user for this app"), "{err}");
         assert!(err.contains("aws login"), "names the fix: {err}");
-        assert!(err.contains("AWS-IAM-USER.md"), "names the guide: {err}");
+        assert!(err.contains("aws policy"), "names the guide: {err}");
         // And the line `aws show` prints first says the same thing.
         assert!(source(&d).describe(&d).contains("identity: none"));
         let _ = std::fs::remove_dir_all(&d);

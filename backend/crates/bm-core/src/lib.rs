@@ -15,7 +15,7 @@
 //! more. They are `crawlers/known/storya.lua`, a script in the operator's own
 //! profile, held byte-for-byte to the Rust extractor it replaced by the tests in
 //! `crawl/script_tests.rs`. The module keeps the host half — the script engines,
-//! the fetch budget, the chapter boundary. See `docs/CRAWLING.md`.
+//! the fetch budget, the chapter boundary. See `docs/ARCHITECTURE.md` §Pipeline.
 //!
 //! [`eta`], [`provision`] and [`config`] are new: they exist because the
 //! pipeline now runs across a cluster instead of on one box.

@@ -183,7 +183,7 @@ pub(crate) fn login(
                  This app runs as an IAM user created for it and nothing else — a root \
                  key or an assumed role is exactly the identity this exists to replace.\n  \
                  Create one: `bm-inductor aws policy` prints the policy and the \
-                 commands; docs/AWS-IAM-USER.md walks through it.",
+                 commands.",
                 who.arn
             ),
             Some(who) => {

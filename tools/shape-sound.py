@@ -26,7 +26,7 @@ the normalize pass, the registry edit and the aliases.
 
 What SoX is actually better at, and what this tool wraps:
 
-  * **`triage`** — the take-ranking problem `docs/SOUND.md` §9 names. A
+  * **`triage`** — the take-ranking problem `docs/tools/gen-sound.md` names. A
     whole-clip average cannot see *when* a sound happens inside the clip, so a
     knock and a stone breaking apart can share a spectral centroid and be
     nothing alike. SoX `stat` gives crest factor, the deltas and DC offset
@@ -115,7 +115,7 @@ def need_ffmpeg() -> None:
     for tool in ("ffmpeg", "ffprobe"):
         if not shutil.which(tool):
             die(f"{tool} not on PATH — decoding runs through ffmpeg, see "
-                f"docs/SOUND.md §3")
+                f"docs/tools/normalize-audio.md")
 
 
 # ---------------------------------------------------------------------------
@@ -148,7 +148,7 @@ def crest_factor(stats: dict[str, float]) -> float | None:
     """Peak / RMS — the transient-versus-sustain discriminator.
 
     A hit has a high crest (a spike over a mostly quiet body); a bed has a low
-    one (energy spread across the whole clip). `docs/SOUND.md` §9 names this as
+    one (energy spread across the whole clip). `docs/tools/gen-sound.md` names this as
     one of the three things a whole-clip average misses, and it is the one
     `stat` already computes the inputs for.
     """

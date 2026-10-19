@@ -112,7 +112,7 @@ piece_members() { # $1 = piece, $2 = name
 
 # The bucket's word for a piece. A bucket holds every kind, and the piece names
 # only two of them: `pack` is published under `sounds`, `adapter` under
-# `profiles` (docs/R2-PRESETS.md).
+# `profiles` (docs/ARCHITECTURE.md §Packs).
 preset_kind() { # $1 = piece
   case "$1" in
     pack) echo "sounds";;
@@ -413,7 +413,7 @@ EOF
     ;;
   fetch)
     # Which plane this reads is the *setting's shape*, not a flag: a URL is the
-    # preset bucket (docs/R2-PRESETS.md) and `owner/name` is GitHub releases.
+    # preset bucket (docs/tools/preset-publish.md) and `owner/name` is GitHub releases.
     # `packs_release` is the default, so a provisioned box needs no arguments
     # beyond the name. The transfer lives in `bm-inductor profile fetch` because
     # the bucket pins an archive sha256 in latest.json and checking it is the

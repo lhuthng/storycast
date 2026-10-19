@@ -50,7 +50,6 @@ pub(crate) fn aws_cmd(root: &std::path::Path, cmd: AwsCmd) -> anyhow::Result<Vec
             out.push(
                 "  bm-inductor aws policy    # the policy, and the commands that create it".into(),
             );
-            out.push("  step by step: docs/AWS-IAM-USER.md".into());
             out.push(String::new());
             // Console work, all of it, and named here rather than assumed,
             out.push("In the console, alongside the user:".into());
@@ -60,7 +59,7 @@ pub(crate) fn aws_cmd(root: &std::path::Path, cmd: AwsCmd) -> anyhow::Result<Vec
             out.push("  a security group — EC2 → Security Groups → Create, SSH inbound".into());
             out.push("  only. The account's default group is shared with everything else".into());
             out.push("  in the default VPC, so a rule on it is a rule on all of that too.".into());
-            out.push("  Name yours with `--security-group` (docs/AWS-IAM-USER.md step 6)".into());
+            out.push("  Name yours with `--security-group` — `aws discover` names the default".into());
             out.push(String::new());
             out.push("Creating, tagging and terminating boxes is money and destruction — those are `aws up` / `aws down`, next.".into());
             Ok(out)
@@ -102,7 +101,7 @@ pub(crate) fn aws_cmd(root: &std::path::Path, cmd: AwsCmd) -> anyhow::Result<Vec
             out.push("  bm-inductor aws login --access-key-id <that key id>".into());
             out.push("  bm-inductor aws ls       # the check: reaches the API as that user".into());
             out.push(String::new());
-            out.push("Full walkthrough, including the console path: docs/AWS-IAM-USER.md".into());
+            out.push("What the cluster does with these boxes: docs/ARCHITECTURE.md §Cluster".into());
             Ok(out)
         }
         AwsCmd::Login { args } => {
@@ -156,7 +155,7 @@ pub(crate) fn aws_cmd(root: &std::path::Path, cmd: AwsCmd) -> anyhow::Result<Vec
             }
             // One asset plane, and it is this machine's disk. Named rather than
             out.push(
-                "asset plane: rsync from this machine (~668 MB per box) — publishing it as a release artifact is designed, not built (docs/ARTIFACTS.md)".into(),
+                "asset plane: rsync from this machine (~668 MB per box) — publishing it as a release artifact is designed, not built (docs/ARCHITECTURE.md §Packs)".into(),
             );
             let missing = cfg.missing();
             if missing.is_empty() {
@@ -424,7 +423,7 @@ pub(crate) fn aws_cli_with(
         let err = String::from_utf8_lossy(&out.stderr);
         // Three first-run states, three different fixes. The middle one is the
         let hint = if err.contains("Unable to locate credentials") {
-            " — the stored key was not accepted; re-run `bm-inductor aws login` (docs/AWS-IAM-USER.md)"
+            " — the stored key was not accepted; re-run `bm-inductor aws login`"
         } else if err.contains("UnauthorizedOperation") || err.contains("not authorized") {
             " — this IAM user is not allowed to make this call; `bm-inductor aws policy` prints the policy it needs"
         } else if err.contains("InvalidClientTokenId") || err.contains("ExpiredToken") {

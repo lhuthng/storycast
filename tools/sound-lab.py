@@ -4,7 +4,7 @@
     python3 tools/sound-lab.py [--port 8770] [--daemon] [--stop]
 
 WHY THIS EXISTS. Every round of sound design so far went the same way: a prompt
-was written into `docs/AUDIO-NEEDS.md`, a batch ran, and then a listening page had
+was written into `docs/tools/add-sound.md`, a batch ran, and then a listening page had
 to be built — inline base64, because the preview server serves one file and
 cannot link its neighbours. That is a shell round trip per attempt, and an
 attempt is about a second of model time. The loop was slower than the work.
@@ -84,7 +84,7 @@ def generate(prompt: str, seconds: float, model: str, seed: int,
     if not CLI.exists():
         raise RuntimeError(
             f"no engine CLI at {CLI} — install the optimized runtime first "
-            "(see §9 of docs/SOUND.md), or run tools/gen-sound.sh setup"
+            "(see docs/tools/gen-sound.md), or run tools/gen-sound.sh setup"
         )
     dit, decoder = MODELS[model]
     LAB.mkdir(parents=True, exist_ok=True)
@@ -460,7 +460,7 @@ def main() -> None:
 
     if not CLI.exists():
         print(f"no engine CLI at {CLI}\n"
-              "install the optimized runtime (see §9 of docs/SOUND.md) — the lab will not start "
+              "install the optimized runtime (see docs/tools/gen-sound.md) — the lab will not start "
               "without something to run", flush=True)
         raise SystemExit(1)
 

@@ -3,7 +3,7 @@
 
 One-shot migration, run from the repo root. `assets/` is machine-local (ignored
 by git), so this exists to make the split reviewable rather than to be kept: the
-shape it produces is the shape docs/ASSETS.md describes, and
+shape it produces is the shape docs/ARCHITECTURE.md §Sound describes, and
 `bm-inductor asset resolve` is what folds it back together.
 
     python3 tmp/make-common.py            # print the plan
@@ -387,7 +387,7 @@ def main():
     write(
         os.path.join(A, "pack.json"),
         '{\n  "_note": "This pack\'s dependencies, weakest first. Each names a'
-        ' directory under assets/_extends/; see docs/ASSETS.md. `common` is the'
+        ' directory under assets/_extends/; see docs/ARCHITECTURE.md §Sound. `common` is the'
         ' world — its beds, its injects, its rules, and the mix\'s knobs. The score is'
         ' not here: it belongs to the pack that extends this one. The combat'
         ' impacts and the spells are still this pack\'s own; `tools/make-packs.tmp.py`'

@@ -18,7 +18,7 @@ __pycache__/
 /profiles/*
 # The preset file is configuration, not a bundle: it is what
 # `workspace new --profile` reads, and a clone without it cannot create the
-# books the presets name (see docs/PROFILES.md §Choosing a profile).
+# books the presets name (see docs/ARCHITECTURE.md §Profiles and workspaces).
 !/profiles/presets.json
 # A pack's rename history is the one thing under `profiles/` that is *not*
 # derived: `profiles/pack/<name>.tar.zst` is rebuilt from `assets/` at will, but

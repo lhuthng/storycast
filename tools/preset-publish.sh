@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Publish one preset pack version to the R2 bucket, then point latest.json at
-# it. Layout per docs/R2-PRESETS.md:
+# it. Layout per docs/ARCHITECTURE.md §Packs:
 #
 #   preset/<kind>/<name>/<version>/<file>
 #   preset/<kind>/<name>/latest.json

@@ -87,10 +87,10 @@
 # and prints the two URLs instead of a traceback. No account is needed for the
 # `optimized/` runtimes in the same checkout — they pull the same two tiers from
 # `stabilityai/stable-audio-3-optimized`, which is public (MLX on Apple silicon,
-# TFLite on CPU anywhere); see §9 of docs/SOUND.md.
+# TFLite on CPU anywhere); see docs/tools/gen-sound.md.
 #
 # PROMPTS ARE NOT STORED HERE. They live with the reason for them, in
-# docs/AUDIO-NEEDS.md — one row a sound, with its tags and its prompt. Copy the
+# docs/tools/add-sound.md — one row a sound, with its tags and its prompt. Copy the
 # prompt text out of that table into `--prompt`, or into the tsv that `batch`
 # reads:
 #
@@ -164,8 +164,8 @@ show_gate() { # show_gate <model>
     echo "    export HF_TOKEN=hf_...        # or, in the engine: uv run hf auth login"
     echo
     echo "no account is needed for the ungated optimized runtimes, which serve the"
-    echo "same two tiers from stabilityai/stable-audio-3-optimized — see §9 of"
-    echo "docs/SOUND.md for that route (Apple silicon MLX, or TFLite on CPU)."
+    echo "same two tiers from stabilityai/stable-audio-3-optimized — see"
+    echo "docs/tools/gen-sound.md for that route (Apple silicon MLX, or TFLite on CPU)."
   } >&2
 }
 

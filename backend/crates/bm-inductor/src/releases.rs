@@ -303,7 +303,7 @@ fn asset_url(release: &Value) -> Option<String> {
 }
 
 /// The bucket's word for a piece: a `pack` is published under `sounds` and an
-/// `adapter` under `profiles` (docs/R2-PRESETS.md), because a bucket holds
+/// `adapter` under `profiles` (docs/ARCHITECTURE.md §Packs), because a bucket holds
 /// every kind and the piece names only two of them.
 fn preset_kind(piece: &str) -> Result<&'static str> {
     match piece {
