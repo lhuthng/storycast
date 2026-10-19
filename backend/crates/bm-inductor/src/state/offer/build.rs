@@ -114,19 +114,20 @@ impl Inner {
             if stage == Stage::Render && !self.voices_in_sync(worker_id) {
                 continue;
             }
+            let shelved = self.shelved_chapters();
             let mut ids: Vec<String> = self
                 .tasks
                 .iter()
                 .filter(|(_, t)| t.stage == stage)
                 .filter(|(_, t)| {
-                    if t.state == TaskState::Pending && !self.shelved(t.chapter) {
+                    if t.state == TaskState::Pending && !shelved.contains(&t.chapter) {
                         return !write_blocks.as_ref().is_some_and(|f| f(t.chapter))
                             && self.upstream_done(t.chapter, t.stage);
                     }
                     // Digest racing: the head digest is the pipeline's
                     stage == Stage::Digest
                         && matches!(t.state, TaskState::Assigned | TaskState::Running)
-                        && !self.shelved(t.chapter)
+                        && !shelved.contains(&t.chapter)
                         && !t.is_holder(worker_id)
                         && !write_blocks.as_ref().is_some_and(|f| f(t.chapter))
                         && self.upstream_done(t.chapter, t.stage)

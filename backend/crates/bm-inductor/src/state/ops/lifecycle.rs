@@ -89,9 +89,10 @@ impl Inner {
 
     /// Work the cluster could actually start right now.
     pub fn runnable(&self) -> bool {
+        let shelved = self.shelved_chapters();
         self.tasks.values().any(|t| {
             t.state == TaskState::Pending
-                && !self.shelved(t.chapter)
+                && !shelved.contains(&t.chapter)
                 && self.upstream_done(t.chapter, t.stage)
         })
     }

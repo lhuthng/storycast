@@ -125,11 +125,14 @@ impl Inner {
         })
     }
 
-    /// A chapter is parked when any of its tasks is shelved — including a
-    pub(crate) fn shelved(&self, chapter: u32) -> bool {
+    /// The chapters a shelved task parks; computed once per scan because a
+    /// per-task check over a book's render rows is quadratic.
+    pub(crate) fn shelved_chapters(&self) -> std::collections::HashSet<u32> {
         self.tasks
             .values()
-            .any(|t| t.chapter == chapter && t.state == TaskState::Shelved)
+            .filter(|t| t.state == TaskState::Shelved)
+            .map(|t| t.chapter)
+            .collect()
     }
 
     pub(crate) fn ensure_task(&mut self, chapter: u32, stage: Stage) -> &mut Task {
