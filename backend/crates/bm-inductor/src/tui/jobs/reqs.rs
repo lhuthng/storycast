@@ -202,10 +202,17 @@ pub(crate) enum Job {
         http: reqwest::Client,
         count: u32,
     },
-    /// Terminate explicit instance ids, stream the lines, refresh the list.
+    /// Terminate explicit instance ids, stream the lines, then take the boxes
+    /// they were off the registry — a terminated instance cannot come back, so
+    /// its record has nothing left to describe.
     AwsDown {
         root: std::path::PathBuf,
+        layout: bm_core::Layout,
+        api: String,
+        http: reqwest::Client,
         ids: Vec<String>,
+        /// The registry rows to match the instance ids against.
+        machines: Vec<Machine>,
     },
     /// List what one LLM provider serves (`GET {base}/models`), off the UI
     LlmModels {
@@ -421,6 +428,11 @@ pub(crate) enum Ev {
     CatchUp {
         machines: Vec<Machine>,
         cancel: Arc<AtomicBool>,
+    },
+    /// A machine left the registry: taken off the panes now rather than at the
+    /// next poll, which may never come with the inductor down.
+    MachineDropped {
+        addr: String,
     },
     /// Push a machine's state directly into the TUI's in-memory list.
     MachineUpdate {

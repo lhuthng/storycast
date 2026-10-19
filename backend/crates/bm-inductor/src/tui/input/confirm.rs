@@ -54,12 +54,16 @@ pub(crate) async fn key_confirm(
                         job_tx,
                         Job::AwsDown {
                             root: app.layout.root.clone(),
+                            layout: app.layout.clone(),
+                            api: app.api.clone(),
+                            http: http.clone(),
                             ids,
+                            machines: app.effective_machines(),
                         },
                     );
                     app.set_status(
                         Level::Info,
-                        format!("terminating {n} box(es) — watch events"),
+                        format!("terminating {n} box(es) — their records go with them"),
                     );
                 }
                 ConfirmAction::DropMachine { addr } => {

@@ -10,6 +10,8 @@ use aws::job_aws_login;
 pub(crate) use aws::job_aws_pool;
 use aws::job_aws_up;
 use aws::job_relink_machine;
+#[allow(unused_imports)]
+pub(crate) use aws::instance_machines;
 use backend::job_drop_machine;
 use backend::job_save_task_policy;
 use backend::job_set_accepting;
@@ -243,7 +245,14 @@ pub(crate) async fn run_job(job: Job, tx: tokio::sync::mpsc::UnboundedSender<Ev>
             http,
             count,
         } => job_aws_up(tx, root, api, http, count).await,
-        Job::AwsDown { root, ids } => job_aws_down(tx, root, ids).await,
+        Job::AwsDown {
+            root,
+            layout,
+            api,
+            http,
+            ids,
+            machines,
+        } => job_aws_down(tx, root, layout, api, http, ids, machines).await,
         Job::AddSample {
             layout,
             path,

@@ -71,6 +71,19 @@ pub(crate) fn offline_remix_apply(
         .map_err(|e| e.to_string())
 }
 
+/// Drop a machine with no scheduler to keep the books: the same
+/// `drop_machine` against a throwaway Inner over `machines.json` and the
+/// ledger. A terminated box has no address left to race.
+pub(crate) fn offline_drop_apply(layout: &bm_core::Layout, addr: &str) -> String {
+    let settings = bm_core::config::Settings::load(&layout.settings());
+    let mut inner = Inner::new(layout.clone(), settings);
+    inner.load_ledger();
+    format!(
+        "{} [offline — inductor was down]",
+        inner.drop_machine(addr)
+    )
+}
+
 /// A sound-design write with no scheduler to notice it.
 pub(crate) async fn offline_sound_changed(
     api: &str,

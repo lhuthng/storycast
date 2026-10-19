@@ -1,3 +1,4 @@
+use super::offline::offline_drop_apply;
 use super::offline::offline_remix_apply;
 use super::offline::offline_swap_apply;
 use super::roster::local_roster;
@@ -104,6 +105,42 @@ async fn a_policy_edit_persists_and_leaves_delivery_to_the_dispatcher() {
             .find(|p| p.stage == bm_proto::Stage::Render)
             .unwrap()
             .enabled
+    );
+}
+
+#[test]
+fn an_offline_drop_takes_the_box_out_of_both_files() {
+    let d = scratch();
+    let layout = bm_core::Layout::new(d.path());
+    let m = Machine::new("192.168.2.9", "thang", 22, None, "worker");
+    {
+        let mut inner = crate::state::Inner::distributing(
+            layout.clone(),
+            bm_core::config::Settings::default(),
+        );
+        inner.machines.insert(m.addr.clone(), m.clone());
+        inner.save();
+        let (bxo, _) = bm_core::provision::split_machine(&m, "box");
+        bm_core::provision::save_box(&layout.machines(), &bxo).unwrap();
+    }
+    assert_eq!(
+        bm_core::provision::load_boxes(&layout.machines()).len(),
+        1,
+        "seeded in machines.json"
+    );
+    let line = offline_drop_apply(&layout, &m.addr);
+    assert!(line.contains("dropped 192.168.2.9"), "{line}");
+    assert!(line.contains("[offline"), "says which path ran: {line}");
+    assert!(
+        bm_core::provision::load_boxes(&layout.machines()).is_empty(),
+        "the config record is gone"
+    );
+    let doc: serde_json::Value = bm_core::read_json(&layout.ledger()).unwrap();
+    assert!(
+        doc["machine_state"]
+            .as_object()
+            .is_some_and(|o| o.is_empty()),
+        "the ledger row went with it: {doc}"
     );
 }
 

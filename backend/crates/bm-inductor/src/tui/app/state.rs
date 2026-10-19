@@ -433,6 +433,17 @@ impl App {
             Ev::CatchUp { machines, cancel } => {
                 self.pending_catchup = Some((machines, cancel));
             }
+            // The record is gone from the cluster, so it goes from the panes
+            // now: with the inductor down no poll will come to take it away.
+            Ev::MachineDropped { addr } => {
+                self.machines.retain(|m| m.addr != addr);
+                self.beats.retain(|b| b.addr != addr);
+                self.onboarded.remove(&addr);
+                self.pending_onboard.retain(|m| m.addr != addr);
+                if self.selected >= self.machines.len() {
+                    self.selected = self.machines.len().saturating_sub(1);
+                }
+            }
             Ev::MachineUpdate { addr, state, note } => {
                 if let Some(m) = self.machines.iter_mut().find(|m| m.addr == addr) {
                     m.state = state;

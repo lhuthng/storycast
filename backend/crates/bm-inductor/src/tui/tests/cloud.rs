@@ -285,3 +285,50 @@ fn cloud_listing_addresses_and_liveness_are_read_off_the_instances() {
     assert!(!is_live_state("terminated"));
     assert!(!is_live_state("stopped"));
 }
+
+#[test]
+fn the_boxes_a_terminate_covers_are_the_ones_whose_note_names_the_instance() {
+    let row = |addr: &str, note: &str| {
+        let mut m = Machine::new(addr, "thang", 22, None, "worker");
+        m.note = note.into();
+        m
+    };
+    let machines = vec![
+        row("10.0.0.1", "launched · EC2 i-0aaa1111aaaa1111a (running)"),
+        row("10.0.0.2", "provisioned · EC2 i-0bbb2222bbbb2222b alive"),
+        // Never EC2-born: nothing ties it to an instance, so a terminate
+        // must leave it alone.
+        row("10.0.0.3", "added by hand"),
+        row("10.0.0.4", "EC2 i-0ccc3333cccc3333c (running)"),
+    ];
+    assert_eq!(
+        instance_machines(
+            &machines,
+            &[
+                "i-0aaa1111aaaa1111a".to_string(),
+                "i-0ccc3333cccc3333c".to_string(),
+            ],
+        ),
+        vec!["10.0.0.1".to_string(), "10.0.0.4".to_string()],
+        "the two boxes those instances were, and no others"
+    );
+    assert!(instance_machines(&machines, &["i-0zzz4444zzzz4444z".to_string()]).is_empty());
+}
+
+#[test]
+fn a_dropped_machine_leaves_the_panes_at_once() {
+    let mut app = App::new("http://127.0.0.1:8901");
+    app.machines = vec![
+        Machine::new("10.0.0.1", "thang", 22, None, "worker"),
+        Machine::new("10.0.0.2", "thang", 22, None, "worker"),
+    ];
+    app.beats = vec![beat("w1", "10.0.0.1", 0, "box")];
+    app.selected = 1;
+    app.apply(Ev::MachineDropped {
+        addr: "10.0.0.1".into(),
+    });
+    assert_eq!(app.machines.len(), 1, "the row is gone");
+    assert_eq!(app.machines[0].addr, "10.0.0.2");
+    assert!(app.beats.is_empty(), "its worker row goes with it");
+    assert_eq!(app.selected, 0, "the cursor still points at a row");
+}

@@ -330,20 +330,121 @@ pub(crate) async fn job_aws_up(
 pub(crate) async fn job_aws_down(
     tx: tokio::sync::mpsc::UnboundedSender<Ev>,
     root: std::path::PathBuf,
+    layout: bm_core::Layout,
+    api: String,
+    http: reqwest::Client,
     ids: Vec<String>,
+    machines: Vec<Machine>,
 ) {
     let down_root = root.clone();
+    let wanted = ids.clone();
     let out =
-        tokio::task::spawn_blocking(move || crate::aws_ops::terminate(&down_root, &ids)).await;
-    match out {
+        tokio::task::spawn_blocking(move || crate::aws_ops::terminate(&down_root, &wanted)).await;
+    let terminated = match out {
         Ok(Ok(lines)) => {
             for l in lines {
                 send(&tx, Level::Ok, l);
             }
+            true
         }
-        Ok(Err(e)) => send(&tx, Level::Error, format!("aws down: {e:#}")),
-        Err(e) => send(&tx, Level::Error, format!("aws down task failed: {e}")),
+        Ok(Err(e)) => {
+            send(&tx, Level::Error, format!("aws down: {e:#}"));
+            false
+        }
+        Err(e) => {
+            send(&tx, Level::Error, format!("aws down task failed: {e}"));
+            false
+        }
+    };
+    // Only what is really gone loses its record: a failed terminate leaves live
+    // boxes, and a live box with no record is invisible while it burns.
+    if terminated {
+        // Both sources, because either can be ahead: the panes' poll may be
+        // stale, and with the inductor down the registry file is all there is.
+        let mut known = machines;
+        known.extend(crate::tui::model::registry_machines(&layout));
+        let doomed = instance_machines(&known, &ids);
+        if doomed.is_empty() {
+            send(
+                &tx,
+                Level::Info,
+                "no registry entry carried those instance ids — nothing to drop".into(),
+            );
+        } else {
+            let live_api = crate::backend::inductor_up(&api).await;
+            let mut dropped = 0usize;
+            for addr in doomed {
+                let (ok, line) = drop_box(&api, &http, &layout, &addr, live_api).await;
+                send(&tx, if ok { Level::Ok } else { Level::Error }, line);
+                if ok {
+                    dropped += 1;
+                    let _ = tx.send(Ev::MachineDropped { addr });
+                }
+            }
+            if dropped > 0 {
+                send(
+                    &tx,
+                    Level::Info,
+                    format!("{dropped} box record(s) went with their instances"),
+                );
+            }
+        }
     }
     let _ = tx.send(Ev::Cloud(cloud_snapshot(&root).await));
     let _ = tx.send(Ev::Done(DoneKind::Other));
+}
+
+/// The registry addresses whose EC2 instance is one of `ids`. The note is the
+/// only place a machine remembers which instance it is.
+pub(crate) fn instance_machines(machines: &[Machine], ids: &[String]) -> Vec<String> {
+    let mut addrs: Vec<String> = machines
+        .iter()
+        .filter(|m| {
+            bm_core::provision::ec2_id_from_note(&m.note).is_some_and(|id| ids.contains(&id))
+        })
+        .map(|m| m.addr.clone())
+        .collect();
+    addrs.sort();
+    addrs.dedup();
+    addrs
+}
+
+/// Take one terminated box's record off the cluster: through the API when it
+/// answers, against the registry and ledger files when it does not.
+async fn drop_box(
+    api: &str,
+    http: &reqwest::Client,
+    layout: &bm_core::Layout,
+    addr: &str,
+    live: bool,
+) -> (bool, String) {
+    if live {
+        let url = format!(
+            "{}/api/machines?addr={}",
+            api.trim_end_matches('/'),
+            urlencode(addr)
+        );
+        return match http.delete(&url).send().await {
+            Ok(r) if r.status().is_success() => {
+                let line = r
+                    .json::<serde_json::Value>()
+                    .await
+                    .ok()
+                    .and_then(|v| v.get("line").and_then(|l| l.as_str()).map(str::to_string))
+                    .unwrap_or_else(|| format!("dropped {addr} from the registry"));
+                (true, line)
+            }
+            Ok(r) => (
+                false,
+                format!("drop {addr}: the inductor answered HTTP {}", r.status()),
+            ),
+            Err(e) => (false, format!("drop {addr} failed: {e}")),
+        };
+    }
+    let (l, a) = (layout.clone(), addr.to_string());
+    match tokio::task::spawn_blocking(move || crate::api::offline::offline_drop_apply(&l, &a)).await
+    {
+        Ok(line) => (true, line),
+        Err(e) => (false, format!("drop {addr} task failed: {e}")),
+    }
 }

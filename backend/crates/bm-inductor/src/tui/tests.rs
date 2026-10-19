@@ -11,8 +11,9 @@ use super::input::runconfig::{
 use super::input::submit::submit_text;
 use super::input::{handle_key, op_key, urlencode};
 use super::jobs::{
-    job_segment, run_job, set_machine_state, unreachable_verdict, verdict_after_failed_provision,
-    BackgroundJob, DoneKind, Ev, Job, ProfileReq, Res, WorkspaceReq,
+    instance_machines, job_segment, run_job, set_machine_state, unreachable_verdict,
+    verdict_after_failed_provision, BackgroundJob, DoneKind, Ev, Job, ProfileReq, Res,
+    WorkspaceReq,
 };
 use super::layout::{
     cols, size_class, width_of, Size, COMPACT_EVENTS_MIN_H, COMPACT_FOOTER_H,

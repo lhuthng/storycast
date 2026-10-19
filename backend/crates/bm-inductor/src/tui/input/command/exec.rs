@@ -611,7 +611,7 @@ pub(crate) fn do_command(
             }
             body.push(String::new());
             body.push("Terminated boxes cannot be restarted; a replacement is `:up`.".into());
-            body.push("Their registry entries stay until you `:drop` them.".into());
+            body.push("Their registry entries go once `terminate` is accepted.".into());
             if !busy.is_empty() {
                 body.push(String::new());
                 // Bounded: one box can hold a whole batch of takes, and the
