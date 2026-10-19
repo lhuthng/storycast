@@ -169,14 +169,22 @@ async fn colon_opens_a_command_line_that_presses_keys() {
         matches!(app.screen, Screen::Text(_)),
         ": opens the command line"
     );
-    // `:r` refreshes: a state fetch against a dead inductor fails
+    // `:r` refreshes, off the UI task: a state fetch is megabytes of JSON and
+    // the frame must keep drawing while it is out.
     app.screen = Screen::Text(TextPrompt::new(TextKind::Command, ":", "", "r"));
     handle_key(&mut app, key(KeyCode::Enter), &http, &job_tx).await;
     assert!(
         matches!(app.screen, Screen::Normal),
         "submit closes the prompt"
     );
-    assert!(job_rx.try_recv().is_err(), "refresh dispatches no job");
+    match job_rx.try_recv().expect("a refresh job") {
+        Job::Tracked { job, .. } => assert!(
+            matches!(job.bare(), Job::RefreshState { .. }),
+            "the key hands the fetch to a job: {job:?}"
+        ),
+        other => panic!("{other:?}"),
+    }
+    assert!(app.polling, "the footer names the wait while it is out");
     // `:frobnicate` stays an error, `:q` quits through the normal path.
     app.screen = Screen::Text(TextPrompt::new(TextKind::Command, ":", "", "frobnicate"));
     handle_key(&mut app, key(KeyCode::Enter), &http, &job_tx).await;

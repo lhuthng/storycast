@@ -1424,7 +1424,14 @@ pub enum Op {
     /// Read the sidecar roster and refill the cast.
     Voices,
     /// Repoint one character's voice and invalidate only its cached segments.
+    /// Applied at once, even with workers mid-play: the swap requeues exactly
+    /// the rows it invalidated, and a take already out with a box is refused at
+    /// the completion gate rather than waited for.
     SwapVoice,
+    /// Give one speaker `voice` to itself: every other character speaking it is
+    /// moved to a free voice of its own. Carries `character` (the owner) and
+    /// `voice` (what it keeps); each move is the same surgery a `SwapVoice` is.
+    ClaimVoice,
     /// Render a short sample of one voice so it can be auditioned before it is
     /// assigned. Writes nothing: the wav comes back in `OpResult::audio_b64`
     /// and the client decides where (and whether) it lands on disk.
@@ -1518,11 +1525,13 @@ pub enum Op {
     /// Arm drain-then-exit: workers stop on their own once no unfinished
     /// task remains. Fires at once when the queue is already drained.
     ShutdownWhenIdle,
-    /// Run a queued exclusive write (`swap-voice`, `remix`, `retag`, …) —
+    /// Run a queued exclusive write (`merge`, `remix`, `retag`, …) —
     /// the writes that used to refuse while any worker held a task. The
     /// write is validated now, parked, the stages it could disturb stop
     /// being offered, and it runs the moment the way is clear. One entry
     /// at a time: a second exclusive write joins the line behind it.
+    /// `swap-voice` is accepted here too, but a swap never parks: it runs
+    /// at once, because its own invalidation requeues what it reached.
     Exclusive,
     /// Drop the queued exclusive write (or clear the whole line with
     /// `force`). The stages it was holding open start taking work again
@@ -1539,6 +1548,7 @@ impl Op {
             Op::Import => "import",
             Op::Voices => "voices",
             Op::SwapVoice => "swap-voice",
+            Op::ClaimVoice => "claim-voice",
             Op::PreviewVoice => "preview-voice",
             Op::Segment => "segment",
             Op::Eta => "eta",
@@ -1569,6 +1579,7 @@ impl Op {
             Op::Import,
             Op::Voices,
             Op::SwapVoice,
+            Op::ClaimVoice,
             Op::PreviewVoice,
             Op::Segment,
             Op::Eta,
@@ -1615,9 +1626,10 @@ pub struct SpeakerFix {
 /// the arguments in their usual `OpRequest` fields.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ExclusiveOp {
-    /// Repoint one character's voice. Waits on the render + merge rows of
-    /// every chapter that hears the speaker (its takes, or its stored
-    /// plan's) — chapters the voice cannot reach keep rendering.
+    /// Repoint one character's voice. Runs at once rather than waiting on
+    /// the render + merge rows of the chapters that hear the speaker: those
+    /// rows are requeued by the invalidation, and a take already out with a
+    /// box is refused when it lands.
     SwapVoice {
         character: String,
         voice: String,

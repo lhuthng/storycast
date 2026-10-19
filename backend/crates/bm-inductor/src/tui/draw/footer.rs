@@ -63,8 +63,14 @@ pub(crate) fn draw_footer(f: &mut ratatui::Frame, app: &App, area: Rect, compact
         Conn::Up => {
             let ago = app.refreshed.map(|t| t.elapsed().as_secs()).unwrap_or(0);
             // The dot breathes: a *moving* live light proves the poll loop
+            // runs. `fetching` names the wait when a read is out.
+            let what = if app.polling {
+                "live · fetching"
+            } else {
+                "live"
+            };
             spans.push(Span::styled(
-                format!("   {} live ({ago}s ago)", pulse(app.tick)),
+                format!("   {} {what} ({ago}s ago)", pulse(app.tick)),
                 app.style(Color::Green),
             ));
         }

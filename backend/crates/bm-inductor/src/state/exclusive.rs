@@ -117,6 +117,13 @@ impl Inner {
         } {
             *chapters = scope;
         }
+        // A voice swap never waits, however busy the cluster is. Its own
+        // invalidation requeues every row it reached, and a take already out
+        // with a box is refused at the completion gate, so parking it would
+        // only make the operator stop the work it is waiting for.
+        if matches!(op, ExclusiveOp::SwapVoice { .. }) {
+            return self.apply_exclusive(op);
+        }
         // Way clear? Run now, exactly as the old direct path did — the
         if self.exclusive_clear(&op) {
             return self.apply_exclusive(op);
@@ -287,7 +294,7 @@ impl Inner {
     }
 
     /// The ask-time half of a swap: the trust rule the surgery itself
-    fn validate_swap(&self, character: &str, voice: &str) -> anyhow::Result<()> {
+    pub(crate) fn validate_swap(&self, character: &str, voice: &str) -> anyhow::Result<()> {
         let engine = self.settings.engine.clone();
         let policy = bm_core::voices::effective_policy(&engine);
         let voice = bm_core::voices::resolve_voice_name(&engine, voice);

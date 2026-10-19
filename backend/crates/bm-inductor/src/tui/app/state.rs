@@ -252,15 +252,6 @@ impl App {
         self.machines.iter().find(|m| m.addr == addr)
     }
 
-    /// One blocking snapshot. Only the startup path and the `r` key use this;
-    pub(crate) async fn refresh(&mut self, http: &reqwest::Client) {
-        let outcome = fetch_state(http, &self.api).await;
-        match outcome {
-            Ok(snap) => self.apply_snap(snap),
-            Err(e) => self.state_failed(e),
-        }
-    }
-
     /// Fold one parsed `/api/state` snapshot into the screen.
     pub(crate) fn apply_snap(&mut self, snap: StateSnap) {
         let StateSnap {
@@ -298,6 +289,7 @@ impl App {
             self.selected = self.machines.len().saturating_sub(1);
         }
         self.refreshed = Some(Instant::now());
+        self.polling = false;
         if self.conn != Conn::Up {
             if matches!(self.conn, Conn::Down(_)) {
                 self.log_at(Level::Ok, "inductor reachable again");
@@ -315,6 +307,7 @@ impl App {
 
     /// Record a failed poll. The message is only logged on the *transition* into
     pub(crate) fn state_failed(&mut self, e: String) {
+        self.polling = false;
         if self.conn != Conn::Down(e.clone()) {
             self.log_at(Level::Warn, e.clone());
         }
@@ -498,6 +491,7 @@ impl App {
                 self.cloud_error = Some(e);
             }
             // A poller snapshot, applied the moment it arrives: nothing here
+            Ev::PollStart => self.polling = true,
             Ev::State(Ok(snap)) => self.apply_snap(snap),
             Ev::State(Err(e)) => self.state_failed(e),
             Ev::Done(kind) => {
@@ -555,8 +549,9 @@ impl App {
                             }
                             self.play_audition(ok, audio_b64);
                         }
-                        // A successful swap rewrites the cast, so the picker's
-                        if op == Op::SwapVoice && ok {
+                        // A voice write rewrites the cast, so the roster the
+                        // picker and the cast screen draw is no longer it.
+                        if matches!(op, Op::SwapVoice | Op::ClaimVoice) && ok {
                             self.roster = None;
                         }
                     }

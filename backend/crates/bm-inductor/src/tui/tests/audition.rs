@@ -506,12 +506,12 @@ async fn cast_keys_play_until_the_filter_takes_focus() {
 
     // Any other letter focuses the filter and types; focused `t` types too.
     finish_audition(&mut app, "Đức Trí");
-    handle_key(&mut app, key(KeyCode::Char('x')), &http, &job_tx).await;
+    handle_key(&mut app, key(KeyCode::Char('z')), &http, &job_tx).await;
     handle_key(&mut app, key(KeyCode::Char('t')), &http, &job_tx).await;
     match &app.screen {
         Screen::Cast(v) => {
             assert!(v.filter_focus, "typing focuses");
-            assert_eq!(v.filter, "xt");
+            assert_eq!(v.filter, "zt");
         }
         other => panic!("must stay in the overview, got {other:?}"),
     }

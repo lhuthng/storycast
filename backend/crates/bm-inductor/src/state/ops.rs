@@ -5,6 +5,7 @@ use bm_proto::{now_secs, Stage, Task, TaskState};
 pub const BOOT_DEADLINE_SECS: u64 = 300;
 
 mod apply;
+mod claim;
 mod lifecycle;
 mod recast;
 mod retry;

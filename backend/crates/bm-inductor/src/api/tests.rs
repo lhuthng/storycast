@@ -107,6 +107,35 @@ async fn a_policy_edit_persists_and_leaves_delivery_to_the_dispatcher() {
     );
 }
 
+#[tokio::test]
+async fn the_claim_op_hands_the_voice_to_one_speaker_and_moves_the_rest() {
+    let d = scratch();
+    let layout = bm_core::Layout::new(d.path());
+    std::fs::write(layout.cast("vieneu"), r#"{"A":"Adam","B":"Adam"}"#).unwrap();
+    let st: Shared = std::sync::Arc::new(tokio::sync::Mutex::new(
+        crate::state::Inner::distributing(layout.clone(), bm_core::config::Settings::default()),
+    ));
+    let Json(res) = op(
+        State(st.clone()),
+        Json(OpRequest {
+            op: bm_proto::Op::ClaimVoice,
+            character: Some("A".into()),
+            voice: Some("Adam".into()),
+            ..Default::default()
+        }),
+    )
+    .await;
+    assert!(res.ok, "{}", res.message);
+    let cast = bm_core::cast::read_cast("vieneu", &layout.cast("vieneu"));
+    assert_eq!(cast.get("A").map(String::as_str), Some("Adam"));
+    assert!(
+        cast.get("B").is_some_and(|v| v != "Adam"),
+        "B is off the claimed voice: {} — {}",
+        cast.get("B").cloned().unwrap_or_default(),
+        res.message
+    );
+}
+
 /// A plannable chapter: one run by A, so `0000_Adam.wav` is the whole
 fn one_run_layout() -> (tempfile::TempDir, bm_core::Layout) {
     let d = scratch();

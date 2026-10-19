@@ -269,6 +269,11 @@ pub(crate) enum ConfirmAction {
         character: String,
         voice: String,
     },
+    /// One speaker keeps `voice`; the other users of it are moved off.
+    ClaimVoice {
+        character: String,
+        voice: String,
+    },
     StopBackend,
     Reconcile,
     Rerender,

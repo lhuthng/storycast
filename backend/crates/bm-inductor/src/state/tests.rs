@@ -2835,19 +2835,13 @@ fn swap_refuses_while_workers_are_mid_play() {
 /// void.
 #[test]
 fn no_surgery_refuses_a_busy_cluster_and_every_one_of_them_parks() {
-    use bm_proto::ExclusiveOp;
-    // Each arm the API dispatches. If a new surgery is added to the API
-    // and not listed here, it is free to reintroduce the refusal.
-    let surgeries: Vec<(&str, ExclusiveOp)> = vec![
-        (
-            "swap-voice",
-            ExclusiveOp::SwapVoice {
-                character: "A".into(),
-                voice: "Quang Sơn".into(),
-                chapters: Vec::new(),
-            },
-        ),
-        (
+    use bm_proto::ExclusiveOp;        // Each arm the API dispatches. If a new surgery is added to the API
+        // and not listed here, it is free to reintroduce the refusal.
+        // `swap-voice` is absent on purpose: a voice swap never waits, so
+        // there is nothing to park (`a_swap_runs_at_once_even_with_a_box_mid_play`
+        // is its guard).
+        let surgeries: Vec<(&str, ExclusiveOp)> = vec![
+            (
             "remix",
             ExclusiveOp::Remix {
                 speed: 1.0,
@@ -3215,15 +3209,13 @@ fn queue_inner() -> (tempfile::TempDir, Inner) {
 }
 
 #[test]
-fn a_swap_waits_on_its_chapters_and_runs_when_they_settle() {
+fn a_swap_runs_at_once_even_with_a_box_mid_play() {
     let (_d, mut inner) = queue_inner();
-    // The swap's scope is chapters hearing "A" — render:1 holds chapter
-    // 1. Crawl:2 is outside any voice's reach and must not block.
-    // The live beat on w1 is what blocks: render:1 is out with a box
-    // that is answering right now, so the swap queues instead of
-    // running. (A stale beat would be the wedged-box shape, where the
-    // 30s rule is deliberately indifferent — the queue waits on the
-    // living only.)
+    // render:1 is out with a box that is answering right now — the exact
+    // shape that used to park a swap until the cluster went quiet, which
+    // made the operator stop the cluster to get the swap through. The swap
+    // requeues the rows it invalidates itself, so it has nothing to wait
+    // for.
     let msg = inner
         .exclusive_request(ExclusiveOp::SwapVoice {
             character: "A".into(),
@@ -3231,26 +3223,79 @@ fn a_swap_waits_on_its_chapters_and_runs_when_they_settle() {
             chapters: vec![1],
         })
         .unwrap();
-    assert!(msg.contains("queued"), "{msg}");
-    assert!(msg.contains("render:1"), "names what it waits on: {msg}");
-    assert_eq!(inner.exclusive.len(), 1, "parked, not run");
-    assert!(!inner.exclusive_clear(&inner.exclusive[0].op));
-
-    // The render finishes (Done, holders gone) — the way is clear.
-    let t = inner.tasks.get_mut("render:1").unwrap();
-    t.state = TaskState::Done;
-    t.clear_holders();
-    inner.run_exclusive();
-    assert!(
-        inner.exclusive.is_empty(),
-        "the write ran once the chapter went quiet"
-    );
-    // And it really ran: the cast moved.
+    assert!(!msg.contains("in the way"), "a swap never waits: {msg}");
+    assert!(inner.exclusive.is_empty(), "nothing parked: {msg}");
     let cast = bm_core::cast::read_cast(
         &inner.settings.engine,
         &inner.layout.cast(&inner.settings.engine),
     );
     assert_eq!(cast.get("A").map(String::as_str), Some("Quang Sơn"));
+    // And the take that was out is no longer anyone's: the completion gate
+    // answers a late report as stale rather than landing it under the new
+    // voice.
+    assert!(
+        inner
+            .tasks
+            .values()
+            .filter(|t| t.chapter == 1 && t.stage == Stage::Render)
+            .all(|t| !matches!(t.state, TaskState::Assigned | TaskState::Running)),
+        "no render row of chapter 1 is still out with a box"
+    );
+}
+
+#[test]
+fn a_claim_keeps_the_voice_for_one_speaker_and_moves_the_rest() {
+    let (_d, mut inner) = fixture();
+    let layout = inner.layout.clone();
+    std::fs::create_dir_all(layout.script_dir()).unwrap();
+    std::fs::write(
+        layout.script(1),
+        r#"{"segments":[{"speaker":"A","text":"Xin chào."},{"speaker":"B","text":"Chào."}]}"#,
+    )
+    .unwrap();
+    // Two speakers on one male preset, and someone else already sitting on the
+    // voice the move would otherwise reach for first.
+    std::fs::write(
+        layout.cast("vieneu"),
+        r#"{"A":"Adam","B":"Adam","C":"Minh Đức"}"#,
+    )
+    .unwrap();
+    let msg = inner.claim_voice_apply("A", "Adam").unwrap();
+    let cast = bm_core::cast::read_cast("vieneu", &layout.cast("vieneu"));
+    assert_eq!(cast.get("A").map(String::as_str), Some("Adam"), "{msg}");
+    let b = cast.get("B").cloned().unwrap_or_default();
+    assert_ne!(b, "Adam", "B moves off the claimed voice: {msg}");
+    assert_ne!(
+        b, "Minh Đức",
+        "…and never onto a voice someone else speaks: {msg}"
+    );
+    assert!(
+        bm_core::voices::vieneu_policy().male.contains(&b),
+        "it keeps the gender of the voice it lost: {b}"
+    );
+    assert_eq!(
+        cast.get("C").map(String::as_str),
+        Some("Minh Đức"),
+        "a speaker on another voice is untouched"
+    );
+    assert!(msg.contains(&format!("B → {b}")), "names the move: {msg}");
+    // Chapter 1 hears A, so the claim re-speaks it.
+    assert!(!inner.tasks.is_empty(), "the claim requeued its chapters");
+}
+
+#[test]
+fn a_claim_on_a_voice_nobody_shares_says_so() {
+    let (_d, mut inner) = fixture();
+    let layout = inner.layout.clone();
+    std::fs::write(layout.cast("vieneu"), r#"{"A":"Adam"}"#).unwrap();
+    let msg = inner.claim_voice_apply("A", "Adam").unwrap();
+    assert!(msg.contains("only speaker"), "{msg}");
+    // A voice the catalogue does not know is refused before anything moves.
+    let err = inner
+        .claim_voice_apply("A", "Chưa Từng Có")
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("neither a preset nor an enrolled"), "{err}");
 }
 
 #[test]
@@ -3346,14 +3391,9 @@ fn a_typo_is_refused_at_ask_time_and_nothing_is_parked() {
 #[test]
 fn the_queue_survives_a_restart_and_cancels_by_route() {
     let (d, mut inner) = queue_inner();
-    // Blocked for real: render:1 out with a box that is beating now.
-    inner
-        .exclusive_request(ExclusiveOp::SwapVoice {
-            character: "A".into(),
-            voice: "Quang Sơn".into(),
-            chapters: vec![1],
-        })
-        .unwrap();
+    // Blocked for real: render:1 out with a box that is beating now, and a
+    // full re-speak waits on render rows.
+    inner.exclusive_request(ExclusiveOp::Rerender).unwrap();
     assert_eq!(inner.exclusive.len(), 1, "queued, not run");
     inner.save();
 
@@ -3361,11 +3401,11 @@ fn the_queue_survives_a_restart_and_cancels_by_route() {
     let mut reborn = Inner::distributing(inner.layout.clone(), inner.settings.clone());
     reborn.load_ledger();
     assert_eq!(reborn.exclusive.len(), 1, "the ask is still there");
-    assert_eq!(reborn.exclusive[0].label, "swap-voice");
+    assert_eq!(reborn.exclusive[0].label, "rerender");
 
     // Dropping by route: the right entries, by name.
     assert_eq!(reborn.exclusive_cancel(Some("remix")), 0);
-    assert_eq!(reborn.exclusive_cancel(Some("swap-voice")), 1);
+    assert_eq!(reborn.exclusive_cancel(Some("rerender")), 1);
     assert!(reborn.exclusive.is_empty());
     let _ = d;
 }

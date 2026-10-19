@@ -92,6 +92,12 @@ pub(crate) enum Job {
         http: reqwest::Client,
         layout: bm_core::Layout,
     },
+    /// One `/api/state` read for the `r` key: the poller's fetch shape, but
+    /// asked for now instead of at the next tick.
+    RefreshState {
+        api: String,
+        http: reqwest::Client,
+    },
     /// Read every `data/script-*.json` and index the lines by speaker.
     LoadLines {
         layout: bm_core::Layout,
@@ -252,6 +258,7 @@ impl Job {
             }
             Job::Op { req, .. } => req.op.as_str(),
             Job::LoadRoster { .. } => "load roster",
+            Job::RefreshState { .. } => "refresh state",
             Job::LoadLines { .. } => "index audition lines",
             Job::LoadSounds { .. } => "load sound design",
             Job::Segment { .. } => "local segment",
@@ -300,8 +307,12 @@ impl Job {
             | Job::AwsDown { .. }
             | Job::AwsLogin { .. }
             | Job::AwsDiscover { .. } => vec![Res::Aws],
-            // Read-only indexes: a roster GET, a hundred file opens. They
-            Job::LoadRoster { .. } | Job::LoadLines { .. } | Job::LoadSounds { .. } => vec![],
+            // Read-only indexes: a roster GET, a hundred file opens, one state
+            // fetch. They never queue behind anything.
+            Job::LoadRoster { .. }
+            | Job::LoadLines { .. }
+            | Job::LoadSounds { .. }
+            | Job::RefreshState { .. } => vec![],
             // Read-only provider read: never queued behind anything.
             Job::LlmModels { .. } => vec![],
             _ => vec![Res::Command],
@@ -378,6 +389,9 @@ pub(crate) enum DoneKind {
 }
 
 pub(crate) enum Ev {
+    /// A `/api/state` read has begun: the footer says what the dashboard is
+    /// waiting for instead of showing a still frame.
+    PollStart,
     JobStarted(u64),
     JobProgress {
         id: u64,

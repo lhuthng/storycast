@@ -152,7 +152,7 @@ pub(crate) static WORDS: &[Word] = &[
     Word { key: None, names: &["remerge"], desc: Some("requeue every merge — render cache kept, no confirm"), cmd: Command::Remerge },
     Word { key: None, names: &["rerender"], desc: Some("requeue every render + merge — full re-speak, asks first"), cmd: Command::Rerender },
     Word { key: None, names: &["shutdown-when-idle", "drain"], desc: Some("workers exit on their own once the queue drains — restart with :B"), cmd: Command::ShutdownWhenIdle },
-    Word { key: None, names: &["xdrop"], desc: Some("drop the queued exclusive write (a swap/merge/remix waiting for the cluster to quiet) — :xdrop swap-voice drops only that kind"), cmd: Command::ExclusiveCancel { route: None } },
+    Word { key: None, names: &["xdrop"], desc: Some("drop the queued exclusive write (a merge/remix/retag waiting for the cluster to quiet) — :xdrop remix drops only that kind"), cmd: Command::ExclusiveCancel { route: None } },
     Word { key: None, names: &["go"], desc: Some("start distributing: armed here and now, and the remainder of the range queued — a process comes up held, so a restart never resumes on its own"), cmd: Command::Dispatch { go: true } },
     Word { key: None, names: &["hold"], desc: Some("stop distributing: what is in flight finishes, nothing new is offered — `:go` to resume; `:drain` is the other thing (workers exit)"), cmd: Command::Dispatch { go: false } },
     Word { key: None, names: &["workspace", "ws"], desc: Some("list, switch or create a workspace — one per book; only with the cluster stopped"), cmd: Command::WorkspacePick },

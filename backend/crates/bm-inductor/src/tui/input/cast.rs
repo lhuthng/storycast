@@ -5,7 +5,7 @@ use crate::tui::{
     input::audition::{cast_current, cast_pointed},
     jobs::Job,
     model::filtered_cast_rows,
-    screen::{CastView, Screen, TextKind, TextPrompt},
+    screen::{CastView, Confirm, ConfirmAction, Screen, TextKind, TextPrompt},
     style::Level,
 };
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -36,6 +36,42 @@ pub(crate) async fn key_cast(
             app.screen = Screen::Cast(v);
         }
         KeyCode::Char('R') if !ctrl && !alt => app.load_roster(job_tx, http),
+        // `x`: this speaker keeps its voice and everyone else on it moves. The
+        // row under the cursor is the one that keeps it.
+        KeyCode::Char('x') if !v.filter_focus && !ctrl && !alt => {
+            let list = filtered_cast_rows(&app.cast_rows(), &v.filter);
+            match list.get(v.cursor) {
+                Some(r) if r.unassigned() => {
+                    app.set_status(Level::Warn, format!("{} has no voice to keep", r.character))
+                }
+                // One user already: there is nothing to break apart.
+                Some(r) if !r.shared() => app.set_status(
+                    Level::Info,
+                    format!("“{}” already speaks “{}” alone", r.character, r.voice),
+                ),
+                Some(r) => {
+                    let others = r.shared_with.len();
+                    app.screen = Screen::Confirm(Confirm {
+                        title: "Make a voice exclusive".into(),
+                        danger: true,
+                        body: vec![
+                            format!("“{}” keeps “{}”.", r.character, r.voice),
+                            format!(
+                                "The other {others} speaker(s) on it take a free voice of their"
+                            ),
+                            "own, same gender first, and re-speak the takes it reached.".into(),
+                            String::new(),
+                            format!("sharing now: {}", r.shared_with.join(", ")),
+                        ],
+                        action: ConfirmAction::ClaimVoice {
+                            character: r.character.clone(),
+                            voice: r.voice.clone(),
+                        },
+                    });
+                }
+                None => app.set_status(Level::Warn, "no speaker under the cursor"),
+            }
+        }
         // `t`: the speaker's current voice on the shown line, from cache
         KeyCode::Char('t') if !v.filter_focus && !ctrl && !alt => {
             cast_current(app, job_tx, http, &mut v);

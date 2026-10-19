@@ -3,7 +3,7 @@ use crate::tui::EVENT_CAP;
 use crate::tui::{
     audio::Player,
     input::dispatch,
-    jobs::{fetch_state, BackgroundJob, DoneKind, Ev, Job},
+    jobs::{BackgroundJob, DoneKind, Ev, Job},
     model::{beat_backed, live_beats},
     model::{
         cast_rows, parse_dispatch, parse_stats, registry_machines, CastRow, Dispatch, WorkerStats,
@@ -189,6 +189,8 @@ pub(crate) struct App {
     pub(crate) status: LogLine,
     pub(crate) conn: Conn,
     pub(crate) tick: u64,
+    /// A `/api/state` read is in flight: the footer names the wait.
+    pub(crate) polling: bool,
     pub(crate) refreshed: Option<Instant>,
     /// Voice whose audition render is in flight, if any.
     pub(crate) audition: Option<String>,
@@ -275,6 +277,7 @@ impl App {
             },
             conn: Conn::Unknown,
             tick: 0,
+            polling: false,
             refreshed: None,
             audition: None,
             audition_cache: Default::default(),

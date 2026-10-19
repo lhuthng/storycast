@@ -95,6 +95,11 @@ async fn run_loop(
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             ticker.tick().await;
+            // Said *before* the fetch, so the footer names what the dashboard
+            // is waiting for rather than showing a still frame.
+            if poll_tx.send(Ev::PollStart).is_err() {
+                return;
+            }
             // The first tick fires immediately, so the dashboard fills without
             if poll_tx
                 .send(Ev::State(fetch_state(&poll_http, &poll_api).await))
@@ -105,8 +110,8 @@ async fn run_loop(
         }
     });
 
-    // One blocking fetch before the first draw, so the opening frame shows the
-    app.refresh(&http).await;
+    // Nothing is fetched here: the poller's first tick is immediate, so the
+    // opening frame is drawn at once and fills in behind the operator.
     loop {
         let mut dirty = last_draw.elapsed() >= Duration::from_secs(1);
         while let Ok(ev) = rx.try_recv() {
@@ -115,8 +120,16 @@ async fn run_loop(
             let reload_roster = matches!(ev, Ev::Done(DoneKind::ReloadRoster));
             // A workspace switch or profile load moved the tree under us:
             let relayout = matches!(ev, Ev::Done(DoneKind::Relayout));
+            // A voice write rewrites the cast, and the picker and cast screen
+            // are looking at it.
+            let recast = matches!(
+                &ev,
+                Ev::Done(DoneKind::Op { op, ok: true, .. })
+                    if matches!(op, Op::SwapVoice | Op::ClaimVoice)
+            );
+            let had_roster = app.roster.is_some();
             app.apply(ev);
-            if reload_roster && app.roster.is_some() {
+            if (reload_roster || recast) && had_roster {
                 app.load_roster(&job_tx, &http);
             }
             if relayout {

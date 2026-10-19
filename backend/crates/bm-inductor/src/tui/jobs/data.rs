@@ -118,6 +118,18 @@ pub(crate) async fn job_op(
     }));
 }
 
+/// One `/api/state` read on its own task, for the `r` key.
+pub(crate) async fn job_refresh_state(
+    tx: tokio::sync::mpsc::UnboundedSender<Ev>,
+    api: String,
+    http: reqwest::Client,
+) {
+    let _ = tx.send(Ev::PollStart);
+    let _ = tx.send(Ev::State(fetch_state(&http, &api).await));
+    // Every arm of `run_job` owes exactly one of these; see `job_load_lines`.
+    let _ = tx.send(Ev::Done(DoneKind::Other));
+}
+
 pub(crate) async fn job_load_roster(
     tx: tokio::sync::mpsc::UnboundedSender<Ev>,
     api: String,

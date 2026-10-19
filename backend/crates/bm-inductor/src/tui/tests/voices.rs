@@ -307,6 +307,64 @@ async fn the_character_stage_has_no_headings_so_up_reaches_row_zero() {
     }
 }
 
+#[tokio::test]
+async fn x_claims_a_shared_voice_for_the_row_under_the_cursor() {
+    let http = reqwest::Client::new();
+    let (job_tx, mut job_rx) = tokio::sync::mpsc::unbounded_channel::<Job>();
+    let mut app = cast_app();
+    // Rows are Narrator first, then by name: Kiên shares Adam with Vũ.
+    if let Screen::Cast(v) = &mut app.screen {
+        v.cursor = 2;
+    }
+    handle_key(&mut app, key(KeyCode::Char('x')), &http, &job_tx).await;
+    match &app.screen {
+        Screen::Confirm(c) => {
+            assert!(
+                c.body.iter().any(|l| l.contains("Kiên")) && c.body.iter().any(|l| l.contains("Adam")),
+                "the confirmation names both: {:?}",
+                c.body
+            );
+            assert!(
+                c.body.iter().any(|l| l.contains("Vũ")),
+                "and who is sharing it: {:?}",
+                c.body
+            );
+            assert!(matches!(c.action, ConfirmAction::ClaimVoice { .. }));
+        }
+        other => panic!("{other:?}"),
+    }
+    handle_key(&mut app, key(KeyCode::Enter), &http, &job_tx).await;
+    let req = last_op(&mut job_rx).expect("the claim is dispatched");
+    assert_eq!(req.op, Op::ClaimVoice);
+    assert_eq!(req.character.as_deref(), Some("Kiên"));
+    assert_eq!(req.voice.as_deref(), Some("Adam"));
+}
+
+#[tokio::test]
+async fn x_says_so_when_the_voice_is_already_one_speakers_own() {
+    let http = reqwest::Client::new();
+    let (job_tx, mut job_rx) = tokio::sync::mpsc::unbounded_channel::<Job>();
+    let mut app = cast_app();
+    // Row 1 is Hà, whose voice the roster does not know, and row 0 the
+    // Narrator, alone on Đức Trí.
+    for cursor in [0, 1] {
+        if let Screen::Cast(v) = &mut app.screen {
+            v.cursor = cursor;
+        }
+        handle_key(&mut app, key(KeyCode::Char('x')), &http, &job_tx).await;
+        assert!(
+            matches!(app.screen, Screen::Cast(_)),
+            "nothing to ask about, so no dialog"
+        );
+    }
+    assert!(
+        app.status.text.contains("alone"),
+        "the status says why: {}",
+        app.status.text
+    );
+    assert!(job_rx.try_recv().is_err(), "no op is dispatched");
+}
+
 #[test]
 fn the_cast_table_names_only_what_it_shows() {
     // `gender` and `accent` read `unknown` on most rows and the language is
@@ -323,5 +381,15 @@ fn the_cast_table_names_only_what_it_shows() {
     assert!(
         text.contains("1 to fix"),
         "…and the problems are still counted:\n{text}"
+    );
+    // The key that breaks a collision apart is on the line that counts them,
+    // and in the hints under the table.
+    assert!(
+        hint_visible(&text, "1 shared — x keeps one"),
+        "a shared voice names its fix:\n{text}"
+    );
+    assert!(
+        hint_visible(&text, "x keeps this voice to this speaker"),
+        "the key is in the hints:\n{text}"
     );
 }

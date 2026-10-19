@@ -115,6 +115,20 @@ pub(crate) async fn op(State(st): State<Shared>, Json(req): Json<OpRequest>) -> 
                 Err(e) => Json(OpResult::fail(format!("swap failed: {e:#}"))),
             }
         }
+        bm_proto::Op::ClaimVoice => {
+            let (character, voice) = (
+                req.character.clone().unwrap_or_default(),
+                req.voice.clone().unwrap_or_default(),
+            );
+            if character.is_empty() || voice.is_empty() {
+                return Json(OpResult::fail("claim needs character + voice"));
+            }
+            let mut inner = st.lock().await;
+            match inner.claim_voice_apply(&character, &voice) {
+                Ok(msg) => Json(OpResult::ok(msg)),
+                Err(e) => Json(OpResult::fail(format!("claim failed: {e:#}"))),
+            }
+        }
         bm_proto::Op::PreviewVoice => {
             // No lock taken: rendering a sample reads no scheduler state, and
             let layout = st.lock().await.layout.clone();

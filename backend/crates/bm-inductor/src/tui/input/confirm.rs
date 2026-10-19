@@ -107,6 +107,23 @@ pub(crate) async fn key_confirm(
                     );
                     app.set_status(Level::Info, format!("swapping {character} → {voice}…"));
                 }
+                ConfirmAction::ClaimVoice { character, voice } => {
+                    dispatch_op(
+                        app,
+                        job_tx,
+                        http,
+                        OpRequest {
+                            op: Op::ClaimVoice,
+                            character: Some(character.clone()),
+                            voice: Some(voice.clone()),
+                            ..Default::default()
+                        },
+                    );
+                    app.set_status(
+                        Level::Info,
+                        format!("{character} claims {voice} — the rest move off…"),
+                    );
+                }
                 ConfirmAction::StopBackend => {
                     // Cluster-wide and slow (ssh sweeps) — a background job,
                     if let Some(flag) = app.start_cancel.take() {

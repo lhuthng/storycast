@@ -90,8 +90,18 @@ pub(crate) async fn normal_key(
             );
         }
         KeyCode::Char('r') => {
-            app.refresh(http).await;
-            app.set_status(Level::Ok, "refreshed");
+            // Off the UI task: a whole book's state is megabytes, so pressing a
+            // key must never freeze the dashboard on a slow inductor.
+            dispatch(
+                app,
+                job_tx,
+                Job::RefreshState {
+                    api: app.api.clone(),
+                    http: http.clone(),
+                },
+            );
+            app.polling = true;
+            app.set_status(Level::Info, "refreshing the cluster…");
         }
         // Draw the Machines pane as the hub-and-spoke picture, or back to the
         KeyCode::Char('g') => {

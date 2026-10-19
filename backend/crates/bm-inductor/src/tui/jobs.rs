@@ -24,6 +24,7 @@ use data::job_load_lines;
 use data::job_load_sounds;
 use data::job_op;
 use data::job_preview_local;
+use data::job_refresh_state;
 pub(crate) use data::{job_load_roster, job_segment};
 use digest::job_digest_policy;
 use digest::job_manual_digest;
@@ -328,6 +329,7 @@ pub(crate) async fn run_job(job: Job, tx: tokio::sync::mpsc::UnboundedSender<Ev>
             layout,
         } => job_op(tx, api, http, req, layout).await,
         Job::LoadRoster { api, http, layout } => job_load_roster(tx, api, http, layout).await,
+        Job::RefreshState { api, http } => job_refresh_state(tx, api, http).await,
         Job::LoadLines { layout } => job_load_lines(tx, layout).await,
         Job::LoadSounds { layout } => job_load_sounds(tx, layout).await,
         Job::Segment {

@@ -201,6 +201,8 @@ pub(crate) fn draw_help(f: &mut ratatui::Frame, app: &mut App, scroll: usize) {
         "count of the rest. A pool tag still filters (\"young\"), as do accent,",
         "language and style.",
         "The overview is speaker, voice, and how many other speakers share it.",
+        "`x` on a shared row keeps that voice for that speaker and moves the",
+        "rest to free voices of their own (same gender first), asking first.",
         "Enter advances or applies; Esc goes back one step.",
     ] {
         lines.push(Line::from(Span::styled(format!("  {v}"), dim)));
@@ -387,6 +389,8 @@ pub(crate) fn draw_help(f: &mut ratatui::Frame, app: &mut App, scroll: usize) {
     for v in [
         "Swap voice deletes only that speaker's cached segments, drops the stale",
         "mp3s and requeues render + merge. Every other character keeps its cache.",
+        "A swap runs at once, even with boxes mid-play: a take already out is",
+        "refused when it lands, so nothing has to stop first.",
         "Enrolled clones always pass, because they were vetted on enrolment.",
         "Below 100x32 the Tasks pane folds into the footer so Logs keeps its rows;",
         "below 76x20 the dashboard is replaced by a size notice, because a clipped",

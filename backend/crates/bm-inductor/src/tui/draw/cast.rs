@@ -82,8 +82,9 @@ pub(crate) fn draw_cast(f: &mut ratatui::Frame, app: &mut App, view: &CastView) 
         ),
     ];
     if shared_voices > 0 {
+        // The fix travels with the count here too: `x` on a row.
         summary.push(Span::styled(
-            format!("  ·  {shared_voices} shared"),
+            format!("  ·  {shared_voices} shared — x keeps one"),
             app.style(Color::Yellow),
         ));
     }
@@ -278,7 +279,7 @@ pub(crate) fn draw_cast(f: &mut ratatui::Frame, app: &mut App, view: &CastView) 
                 Style::default().fg(Color::DarkGray),
             )),
             Line::from(Span::styled(
-                "other letters filter · ^R focuses filter · ↑↓ move · Esc close · R reload roster",
+                "x keeps this voice to this speaker · other letters filter · ^R filter · ↑↓ · Esc · R roster",
                 Style::default().fg(Color::DarkGray),
             )),
         ]
