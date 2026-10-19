@@ -172,6 +172,7 @@ fn candidates_are_compatible_names_sorted() {
         PoolEntry {
             file: "refs/young-female-1.mp3".into(),
             tags: vec!["young".into(), "female".into()],
+            label: String::new(),
         },
     );
     pool.insert(
@@ -179,6 +180,7 @@ fn candidates_are_compatible_names_sorted() {
         PoolEntry {
             file: "refs/young-female-2.mp3".into(),
             tags: vec!["young".into(), "female".into()],
+            label: String::new(),
         },
     );
     pool.insert(
@@ -186,6 +188,7 @@ fn candidates_are_compatible_names_sorted() {
         PoolEntry {
             file: "refs/old-male-1.mp3".into(),
             tags: vec!["old".into(), "male".into()],
+            label: String::new(),
         },
     );
     let got = candidates(&pool, &["young".to_string(), "female".to_string()]);

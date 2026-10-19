@@ -368,6 +368,27 @@ pub(crate) enum RosterCmd {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Install a voice pack into this workspace: the published preset's slots,
+    /// the clone each slot resolves to, then `voices.json`, `voice-pool.json`
+    /// and the cast, which name them `<pack>/<slot>`. A workspace needs one.
+    ///
+    /// Re-running re-fetches the version this workspace pinned and verifies it
+    /// against the recorded hashes; `--latest` moves the pin forward.
+    PackInstall {
+        /// Pack name, e.g. `dan-truyen`.
+        name: String,
+        /// Fetch the version `latest.json` pins instead of the pinned one.
+        #[arg(long)]
+        latest: bool,
+        /// Fetch this version (only while latest.json still names it).
+        #[arg(long)]
+        version: Option<String>,
+        /// Read a pack tree from disk instead of the bucket (offline).
+        #[arg(long)]
+        tree: Option<std::path::PathBuf>,
+    },
+    /// List the packs this workspace holds, and what each slot answers.
+    PackList,
     /// Add a sample clip to the voice pool: copies it under `refs/`, takes its
     AddSample {
         /// Clip to add (mp3/wav/m4a/ogg/flac).

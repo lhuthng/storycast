@@ -8,11 +8,14 @@ use std::path::{Path, PathBuf};
 const CONFLICTS: [(&str, &str); 3] = [("male", "female"), ("young", "old"), ("strong", "weak")];
 
 /// One pooled sample: the clip enrolled as a clone voice plus its tags.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub struct PoolEntry {
     /// `refs/<file>`, the clip `voices.json` enrolls on workers.
     pub file: String,
     pub tags: Vec<String>,
+    /// What the clone calls itself. Display only: the key is the identity.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub label: String,
 }
 
 /// `name -> entry`. Ordered so the file on disk diffs cleanly.
@@ -253,6 +256,7 @@ pub fn add_sample(
         PoolEntry {
             file: format!("refs/{filename}"),
             tags: tags.clone(),
+            label: String::new(),
         },
     );
     write_pool(&pool_path, &pool)?;
@@ -316,6 +320,85 @@ pub fn add_sample(
         ));
     }
     Ok(log)
+}
+
+/// Enroll every voice the manifest declares into this machine's store, then
+/// bake the store the sidecar reads. One line per voice, for the caller to
+/// print: a pack install is silent otherwise.
+pub fn enroll_manifest(layout: &crate::Layout) -> Vec<String> {
+    let mut log = Vec::new();
+    let pool = load_pool(&layout.voice_pool());
+    for (name, clip) in load_manifest(&layout.voices_manifest()) {
+        let path = if Path::new(&clip).is_absolute() {
+            PathBuf::from(&clip)
+        } else {
+            layout.work.join(&clip)
+        };
+        if !path.is_file() {
+            log.push(format!("{name}: no clip at {clip}"));
+            continue;
+        }
+        match crate::voices::store_kind(&layout.engine) {
+            crate::voices::VoiceStore::Presets => {
+                let label = pool.get(&name).map(|e| e.label.as_str()).unwrap_or_default();
+                // An entry the store already holds under the clone's own name
+                // carries the encoding this machine cannot rebuild: re-key it
+                // before reaching for a venv that may not be here.
+                if adopt_store_entry(layout, &name, label) {
+                    log.push(format!("{name}: re-keyed from {label}"));
+                    continue;
+                }
+                match enroll_local(&layout.root, &name, &path.to_string_lossy()) {
+                    Ok(lines) => log.extend(lines),
+                    Err(e) => log.push(format!("{name}: local enroll failed ({e:#})")),
+                }
+            }
+            crate::voices::VoiceStore::Clips => match enroll_clip_voice(layout, &name, &path) {
+                Ok(Some(file)) => log.push(format!("{name} -> {file}")),
+                Ok(None) => log.push(format!(
+                    "{name}: no {} store on this machine — provision covers it",
+                    layout.engine
+                )),
+                Err(e) => log.push(format!("{name}: local enroll failed ({e:#})")),
+            },
+            crate::voices::VoiceStore::None => {}
+        }
+    }
+    let baked = bake_missing_voices(layout);
+    if !baked.is_empty() {
+        log.push(format!(
+            "baked {} into {}",
+            baked.join(", "),
+            layout.tts_voices().display()
+        ));
+    }
+    log
+}
+
+/// Copy a preset-store entry that is keyed by `label` to `name`, keeping its
+/// encoding. False when the store holds neither the name nor the label.
+fn adopt_store_entry(layout: &crate::Layout, name: &str, label: &str) -> bool {
+    if label.trim().is_empty() || label == name {
+        return false;
+    }
+    let path = layout.tts_voices();
+    let Some(mut doc) = load_store(&path) else {
+        return false;
+    };
+    let mut changed = false;
+    if doc["presets"].get(name).is_none() {
+        let Some(entry) = doc["presets"].get(label).cloned() else {
+            return false;
+        };
+        doc["presets"][name] = entry;
+        changed = true;
+    }
+    // The old key is a shadow of the same encoding, and leaving it makes the
+    // sidecar offer a voice nothing declares.
+    if let Some(presets) = doc["presets"].as_object_mut() {
+        changed |= presets.remove(label).is_some();
+    }
+    changed && crate::util::atomic_write(&path, &serde_json::to_string(&doc).unwrap_or_default()).is_ok()
 }
 
 /// Hash of the baked voice store, computed the same way on both sides of the

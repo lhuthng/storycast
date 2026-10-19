@@ -1,13 +1,6 @@
 use super::*;
 
-/// What kind of voice this is — the two halves the picker sorts into.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum VoiceKind {
-    AutoAssign,
-    Unique,
-}
-
-/// The group heading a pooled voice is filed under: its tags, sorted and
+/// The group heading a voice is filed under: its tags, sorted and
 fn tag_group(tags: &[String]) -> String {
     let mut t: Vec<&str> = tags.iter().map(String::as_str).collect();
     t.sort_unstable();
@@ -19,8 +12,8 @@ fn tag_group(tags: &[String]) -> String {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum VoiceRow {
     Group {
-        kind: VoiceKind,
-        /// The pool tags this group is `AutoAssign` voices of; empty for
+        /// The pool tags this group's voices share; empty for a named voice
+        /// that only manual assignment reaches.
         tags: String,
         /// Voices in the group, so a heading says how much is under it.
         count: usize,
@@ -68,40 +61,42 @@ pub(crate) fn filtered_voices(app: &App, filter: &str) -> Vec<VoiceRow> {
     let Some(r) = &app.roster else {
         return Vec::new();
     };
-    let mut pooled: BTreeMap<String, Vec<(Vec<String>, VoiceInfo)>> = BTreeMap::new();
-    let mut unique: Vec<VoiceInfo> = Vec::new();
+    let mut groups: BTreeMap<String, Vec<(Vec<String>, VoiceInfo)>> = BTreeMap::new();
     for v in r.voices.iter().filter(|v| {
         matches(filter, &v.name)
             || matches(filter, &v.gender)
             || matches(filter, &v.accent)
             || matches(filter, &v.style)
     }) {
-        if v.pool_tags.is_empty() {
-            unique.push(v.clone());
-        } else {
-            let users = users_of(&r.cast, &v.name);
-            pooled
-                .entry(tag_group(&v.pool_tags))
-                .or_default()
-                .push((users, v.clone()));
-        }
+        let users = users_of(&r.cast, &v.name);
+        groups
+            .entry(tag_group(&v.pool_tags))
+            .or_default()
+            .push((users, v.clone()));
     }
-    // Folded, so a roster of accented names sorts the way it is read rather
-    unique.sort_by(|a, b| {
-        fold(&a.name)
-            .cmp(&fold(&b.name))
-            .then_with(|| a.name.cmp(&b.name))
-    });
-    let unique_count = unique.len();
+    // Tagged groups first, alphabetical; the untagged voices — manual
+    // assignment only — last, folded by name so they read as sorted.
+    let mut keys: Vec<String> = groups.keys().cloned().collect();
+    keys.sort_by_key(|k| (k.is_empty(), k.clone()));
     let mut out: Vec<VoiceRow> = Vec::new();
-    for (tags, mut voices) in pooled {
-        voices.sort_by(|a, b| {
-            a.0.len()
-                .cmp(&b.0.len())
-                .then_with(|| a.1.name.cmp(&b.1.name))
-        });
+    for tags in keys {
+        let Some(mut voices) = groups.remove(&tags) else {
+            continue;
+        };
+        if tags.is_empty() {
+            voices.sort_by(|a, b| {
+                fold(&a.1.name)
+                    .cmp(&fold(&b.1.name))
+                    .then_with(|| a.1.name.cmp(&b.1.name))
+            });
+        } else {
+            voices.sort_by(|a, b| {
+                a.0.len()
+                    .cmp(&b.0.len())
+                    .then_with(|| a.1.name.cmp(&b.1.name))
+            });
+        }
         out.push(VoiceRow::Group {
-            kind: VoiceKind::AutoAssign,
             tags,
             count: voices.len(),
         });
@@ -110,17 +105,6 @@ pub(crate) fn filtered_voices(app: &App, filter: &str) -> Vec<VoiceRow> {
                 .into_iter()
                 .map(|(users, voice)| VoiceRow::Voice { voice, users }),
         );
-    }
-    if unique_count > 0 {
-        out.push(VoiceRow::Group {
-            kind: VoiceKind::Unique,
-            tags: String::new(),
-            count: unique_count,
-        });
-        out.extend(unique.into_iter().map(|voice| VoiceRow::Voice {
-            users: users_of(&r.cast, &voice.name),
-            voice,
-        }));
     }
     out
 }

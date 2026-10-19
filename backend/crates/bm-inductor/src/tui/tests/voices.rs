@@ -26,21 +26,17 @@ fn the_voice_list_groups_pool_samples_by_tag_least_used_first_and_the_rest_by_na
         ],
         "tag groups alphabetical, least used first, then unique by name"
     );
-    let kinds: Vec<VoiceKind> = filtered_voices(&app, "")
+    let groups: Vec<String> = filtered_voices(&app, "")
         .iter()
         .filter_map(|r| match r {
-            VoiceRow::Group { kind, .. } => Some(*kind),
+            VoiceRow::Group { tags, .. } => Some(tags.clone()),
             _ => None,
         })
         .collect();
     assert_eq!(
-        kinds,
-        vec![
-            VoiceKind::AutoAssign,
-            VoiceKind::AutoAssign,
-            VoiceKind::Unique
-        ],
-        "two pooled groups, then the unique ones — in that order"
+        groups,
+        vec!["female + old", "male + young", ""],
+        "two pooled groups, then the untagged ones — in that order"
     );
 }
 

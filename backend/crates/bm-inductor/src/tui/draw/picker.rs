@@ -3,7 +3,7 @@ use crate::tui::{
     app::{App, HitTarget, ListTarget},
     model::{
         clamp_scroll, filtered_characters, filtered_voices, gender_of, settle_cursor, used_by,
-        VoiceKind, VoiceRow,
+        VoiceRow,
     },
     screen::{PickStage, Picker},
     style::{centered, empty_body, style_bold_of, style_of},
@@ -48,12 +48,11 @@ fn plural(n: usize, one: &str) -> String {
 }
 
 /// What a group heading says it is holding.
-fn group_label(kind: VoiceKind, tags: &str) -> String {
-    match kind {
-        // A pooled sample with no tags at all is still auto-assignable — it
-        VoiceKind::AutoAssign if tags.is_empty() => "Auto Assign · untagged".to_string(),
-        VoiceKind::AutoAssign => format!("Auto Assign · {tags}"),
-        VoiceKind::Unique => "Unique".to_string(),
+fn group_label(tags: &str) -> String {
+    if tags.is_empty() {
+        "Named · manual".to_string()
+    } else {
+        format!("Auto Assign · {tags}")
     }
 }
 
@@ -270,10 +269,10 @@ pub(crate) fn draw_picker(f: &mut ratatui::Frame, app: &mut App, picker: &Picker
                     .skip(scroll)
                     .take(height)
                     .map(|(i, row)| match row {
-                        VoiceRow::Group { kind, tags, count } => Line::from(Span::styled(
+                        VoiceRow::Group { tags, count } => Line::from(Span::styled(
                             format!(
                                 "── {} · {}",
-                                group_label(*kind, tags),
+                                group_label(tags),
                                 plural(*count, "voice")
                             ),
                             style_of(colour, Color::Cyan),

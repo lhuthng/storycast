@@ -42,6 +42,16 @@ export interface Pack {
 	latest: Latest | null;
 	/** Why `latest.json` could not be used, when it could not. */
 	latestError: string | null;
+	/** A working copy down here that the bucket has not got yet. */
+	local?: boolean;
+}
+
+/** The one preset a voices pack holds, inside its working copy. */
+export const PRESET_FILE = 'preset.json';
+
+/** Where a voices pack of `name` keeps its preset under `dir`. */
+export function presetPath(dir: string, name: string): string {
+	return path.join(dir, 'voices', name, PRESET_FILE);
 }
 
 export interface Inventory {
@@ -121,15 +131,63 @@ export async function latestOf(kind: string, name: string): Promise<Latest | nul
 
 /** Every pack in the bucket, newest version first. Never throws: the page says so. */
 export async function inventory(fresh = false): Promise<Inventory> {
-	if (!fresh && cached && Date.now() - cached.at < CACHE_MS) return cached.value;
-	if (!fresh && inflight) return inflight;
+	if (!fresh && cached && Date.now() - cached.at < CACHE_MS) return withLocal(cached.value);
+	if (!fresh && inflight) return withLocal(await inflight);
 	const run = loadInventory();
 	inflight = run;
 	const value = await run;
 	inflight = null;
 	// A failure is not cached: the next ask is the retry.
 	if (!value.error) cached = { at: Date.now(), value };
-	return value;
+	return withLocal(value);
+}
+
+/**
+ * Packs this checkout holds that the bucket has not got yet. One preset is one
+ * pack, so a voices pack exists from the moment it is started, and reading the
+ * working copies is cheap enough to do on every ask rather than cache.
+ */
+function withLocal(inv: Inventory): Inventory {
+	if (inv.error) return inv;
+	const known = new Set(inv.packs.map((p) => `${p.kind}/${p.name}`));
+	const extra: Pack[] = [];
+	for (const name of localVoicesPacks()) {
+		if (known.has(`voices/${name}`)) continue;
+		extra.push({ kind: 'voices', name, versions: [], latest: null, latestError: null, local: true });
+	}
+	if (!extra.length) return inv;
+	const packs = [...inv.packs, ...extra].sort((a, b) => {
+		const k = KINDS.indexOf(a.kind) - KINDS.indexOf(b.kind);
+		if (k !== 0) return k;
+		return a.name < b.name ? -1 : 1;
+	});
+	return { ...inv, packs };
+}
+
+function localVoicesPacks(): string[] {
+	const base = path.join(workRoot(), 'voices');
+	let names: string[];
+	try {
+		names = readdirSync(base, { withFileTypes: true })
+			.filter((d) => d.isDirectory())
+			.map((d) => d.name);
+	} catch {
+		return [];
+	}
+	return names.filter((name) => localVersions(name).length > 0).sort();
+}
+
+/** Versions of a working copy that hold the pack's own preset. */
+function localVersions(name: string): string[] {
+	let versions: string[];
+	try {
+		versions = readdirSync(path.join(workRoot(), 'voices', name), { withFileTypes: true })
+			.filter((d) => d.isDirectory())
+			.map((d) => d.name);
+	} catch {
+		return [];
+	}
+	return versions.filter((v) => existsSync(presetPath(workDir('voices', name, v), name)));
 }
 
 async function loadInventory(): Promise<Inventory> {

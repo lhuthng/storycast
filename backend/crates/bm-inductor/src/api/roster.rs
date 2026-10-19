@@ -13,9 +13,20 @@ fn disk_voices(
             voices.push(clone);
         }
     }
-    // The sample pool rides the same list: a pooled sample shows its tags where
+    merge_pool(layout, &mut voices);
+    // Assignable voices first, then by gender then name: a stable order means
+    voices.sort_by(|a, b| (&a.gender, &a.name).cmp(&(&b.gender, &b.name)));
+    voices
+}
+
+/// Fold the workspace's pool into the roster: a voice the engine already lists
+/// keeps its metadata and gains its tags; one it does not is an enrolled clone.
+/// A pool entry's label is the clone's own name — display only, never identity.
+fn merge_pool(layout: &bm_core::Layout, voices: &mut Vec<VoiceInfo>) {
     for (name, entry) in bm_core::pool::load_pool(&layout.voice_pool()) {
-        let style = if entry.tags.is_empty() {
+        let style = if !entry.label.is_empty() {
+            entry.label.clone()
+        } else if entry.tags.is_empty() {
             "named voice".to_string()
         } else {
             format!("pool: {}", entry.tags.join(", "))
@@ -23,7 +34,7 @@ fn disk_voices(
         match voices.iter_mut().find(|v| v.name == name) {
             Some(v) => {
                 v.style = style;
-                v.pool_tags = entry.tags.clone();
+                v.pool_tags = entry.tags;
             }
             None => voices.push(VoiceInfo {
                 key: String::new(),
@@ -32,14 +43,11 @@ fn disk_voices(
                 accent: "unknown".into(),
                 language: "vi-VN".into(),
                 style,
-                pool_tags: entry.tags.clone(),
+                pool_tags: entry.tags,
                 enrolled: true,
             }),
         }
     }
-    // Assignable voices first, then by gender then name: a stable order means
-    voices.sort_by(|a, b| (&a.gender, &a.name).cmp(&(&b.gender, &b.name)));
-    voices
 }
 
 /// Roster with no scheduler and no sidecar: what the picker shows instantly.
@@ -112,30 +120,7 @@ pub(crate) async fn build_roster(
             voices.push(clone);
         }
     }
-    // The sample pool rides the same list: a pooled sample shows its tags where
-    for (name, entry) in bm_core::pool::load_pool(&layout.voice_pool()) {
-        let style = if entry.tags.is_empty() {
-            "named voice".to_string()
-        } else {
-            format!("pool: {}", entry.tags.join(", "))
-        };
-        match voices.iter_mut().find(|v| v.name == name) {
-            Some(v) => {
-                v.style = style;
-                v.pool_tags = entry.tags.clone();
-            }
-            None => voices.push(VoiceInfo {
-                key: String::new(),
-                name,
-                gender: "unknown".into(),
-                accent: "unknown".into(),
-                language: "vi-VN".into(),
-                style,
-                pool_tags: entry.tags.clone(),
-                enrolled: true,
-            }),
-        }
-    }
+    merge_pool(layout, &mut voices);
     // Assignable voices first, then by gender then name: a stable order means
     voices.sort_by(|a, b| (&a.gender, &a.name).cmp(&(&b.gender, &b.name)));
     Roster {

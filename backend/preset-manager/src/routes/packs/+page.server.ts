@@ -1,7 +1,9 @@
-//! Every pack in the bucket, and the download that pulls one down here.
+//! Every pack in the bucket, its working copies, and the two writes that start
+//! here: pull a published version down, or start a voices pack of its own.
 
-import { fail } from '@sveltejs/kit';
+import { fail, redirect } from '@sveltejs/kit';
 import { download, inventory } from '#lib/packs';
+import { createPack } from '#lib/voice-pack';
 import type { Actions, PageServerLoad } from './$types';
 
 export const load: PageServerLoad = async ({ url }) => {
@@ -18,6 +20,16 @@ export const load: PageServerLoad = async ({ url }) => {
 };
 
 export const actions: Actions = {
+	createVoice: async ({ request }) => {
+		const form = await request.formData();
+		const name = String(form.get('name') ?? '')
+			.trim()
+			.toLowerCase();
+		const result = createPack(name, String(form.get('label') ?? ''));
+		if (!result.ok) return fail(400, { ok: false, pack: `voices/${name}`, log: result.msg });
+		throw redirect(303, `/packs/voices/${encodeURIComponent(name)}`);
+	},
+
 	download: async ({ request }) => {
 		const form = await request.formData();
 		const kind = String(form.get('kind') ?? '');

@@ -47,6 +47,26 @@
 		>
 	</form>
 
+	{#if data.kind === '' || data.kind === 'voices'}
+		<form
+			method="POST"
+			action="?/createVoice"
+			use:enhance
+			class="wrap"
+			style="align-items:flex-end;margin-bottom:var(--space)"
+		>
+			<label class="adm-field" style="max-width:14rem">
+				<span class="adm-label">New voices pack</span>
+				<input class="adm-input adm-code" name="name" placeholder="phim-cu" required />
+			</label>
+			<label class="adm-field" style="max-width:16rem">
+				<span class="adm-label">Label</span>
+				<input class="adm-input" name="label" placeholder="Phim Cũ" />
+			</label>
+			<button class="btn btn--ghost btn--sm" type="submit">Create pack</button>
+		</form>
+	{/if}
+
 	{#if data.packs.length === 0}
 		<p class="empty">Nothing published under this filter.</p>
 	{:else}
@@ -58,16 +78,22 @@
 						<span class="chip">{p.kind}</span>
 					</div>
 					<p class="muted" style="margin:var(--tight) 0 0">
-						{p.latest?.version ?? 'none'} · {p.latest ? bytes(size(p.latest.files)) : 'none'}{#if p.versions.some(
-							(v) => v.downloaded
-						)}
-							· downloaded here{/if}
+						{#if p.local}
+							local, not published
+						{:else}
+							{p.latest?.version ?? 'none'} · {p.latest
+								? bytes(size(p.latest.files))
+								: 'none'}{#if p.versions.some((v) => v.downloaded)}
+								· downloaded here{/if}
+						{/if}
 					</p>
-					<form method="POST" action="?/download" use:enhance style="margin-top:var(--space)">
-						<input type="hidden" name="kind" value={p.kind} />
-						<input type="hidden" name="name" value={p.name} />
-						<button class="btn btn--ghost btn--sm" type="submit">Download latest</button>
-					</form>
+					{#if !p.local}
+						<form method="POST" action="?/download" use:enhance style="margin-top:var(--space)">
+							<input type="hidden" name="kind" value={p.kind} />
+							<input type="hidden" name="name" value={p.name} />
+							<button class="btn btn--ghost btn--sm" type="submit">Download latest</button>
+						</form>
+					{/if}
 				</div>
 			{/each}
 		</div>
@@ -91,8 +117,12 @@
 							<td><a href="/packs/{p.kind}/{p.name}">{p.name}</a></td>
 							<td><span class="chip">{p.kind}</span></td>
 							<td class="adm-money">
-								{p.latest?.version ?? 'none'}
-								{#if p.latestError}<span class="muted" title={p.latestError}> (latest.json unreadable)</span>{/if}
+								{#if p.local}
+									<span class="chip chip--warn">local</span>
+								{:else}
+									{p.latest?.version ?? 'none'}
+									{#if p.latestError}<span class="muted" title={p.latestError}> (latest.json unreadable)</span>{/if}
+								{/if}
 							</td>
 							<td class="adm-money adm-num">{p.latest?.files.length ?? 0}</td>
 							<td class="adm-money adm-num">{p.latest ? bytes(size(p.latest.files)) : 'none'}</td>
@@ -102,11 +132,13 @@
 								{/each}
 							</td>
 							<td class="adm-end">
-								<form method="POST" action="?/download" use:enhance>
-									<input type="hidden" name="kind" value={p.kind} />
-									<input type="hidden" name="name" value={p.name} />
-									<button class="btn btn--ghost btn--sm" type="submit">Download latest</button>
-								</form>
+								{#if !p.local}
+									<form method="POST" action="?/download" use:enhance>
+										<input type="hidden" name="kind" value={p.kind} />
+										<input type="hidden" name="name" value={p.name} />
+										<button class="btn btn--ghost btn--sm" type="submit">Download latest</button>
+									</form>
+								{/if}
 							</td>
 						</tr>
 					{/each}

@@ -11,6 +11,7 @@ fn pool_with(entries: &[(&str, &[&str])]) -> Pool {
                 pool::PoolEntry {
                     file: format!("refs/{name}.mp3"),
                     tags: tags.iter().map(|t| (*t).to_string()).collect(),
+                    label: String::new(),
                 },
             )
         })

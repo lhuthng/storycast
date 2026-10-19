@@ -389,12 +389,12 @@ fn voice_app(roster: Roster) -> App {
     )]));
     app
 }
-/// The list as `(kind, label, name)` triples, so a test can read the whole
-fn listed(app: &App) -> Vec<(Option<VoiceKind>, String, Option<String>)> {
+/// The list as `(group tags, label, name)` triples, so a test can read the
+fn listed(app: &App) -> Vec<(Option<String>, String, Option<String>)> {
     filtered_voices(app, "")
         .iter()
         .map(|r| match r {
-            VoiceRow::Group { kind, tags, .. } => (Some(*kind), tags.clone(), None),
+            VoiceRow::Group { tags, .. } => (Some(tags.clone()), tags.clone(), None),
             VoiceRow::Voice { voice, .. } => (None, String::new(), Some(voice.name.clone())),
         })
         .collect()

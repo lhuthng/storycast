@@ -128,6 +128,103 @@ pub(crate) fn cmd_roster_add_sample(
     Ok(())
 }
 
+/// Install one voice pack and say what it paired, what it left open, and which
+/// cast files it retargeted.
+/// The fetch is `reqwest::blocking` all the way down, which cannot be dropped
+/// inside a runtime — so it runs where the provision flow runs: off it.
+pub(crate) async fn cmd_roster_pack_install(
+    layout: &Layout,
+    name: &str,
+    latest: bool,
+    version: Option<String>,
+    tree: Option<std::path::PathBuf>,
+) -> anyhow::Result<()> {
+    let opts = bm_core::voices::packs::Options {
+        latest,
+        version,
+        tree,
+    };
+    let name = name.to_string();
+    let (layout, fetching) = (layout.clone(), name.clone());
+    let (report, enrolled) = tokio::task::spawn_blocking(move || {
+        let report = bm_core::voices::packs::install(&layout, &fetching, &opts)?;
+        let enrolled = bm_core::pool::enroll_manifest(&layout);
+        Ok::<_, anyhow::Error>((report, enrolled))
+    })
+    .await??;
+    println!(
+        "{name} {} {} — {} slot(s)",
+        report.version,
+        report.source,
+        report.pairs.len()
+    );
+    for (slot, clone) in &report.pairs {
+        println!("  {name}/{slot} <- {clone}");
+    }
+    if !report.unfilled.is_empty() {
+        println!(
+            "  {} slot(s) with no clone behind them: {}",
+            report.unfilled.len(),
+            report.unfilled.join(", ")
+        );
+    }
+    println!(
+        "  voices.json and voice-pool.json rebuilt; {} cast file(s) retargeted",
+        report.retargeted
+    );
+    for line in enrolled {
+        println!("  {line}");
+    }
+    Ok(())
+}
+
+/// The packs this workspace holds, with every slot and the clone behind it.
+pub(crate) fn cmd_roster_pack_list(layout: &Layout) -> anyhow::Result<()> {
+    let packs = bm_core::voices::packs::Packs::load(layout);
+    if packs.packs.is_empty() {
+        println!(
+            "no voice packs in {} — `roster pack-install <name> <tree>` adds one",
+            layout.voices_dir().display()
+        );
+        return Ok(());
+    }
+    let voices = bm_core::voices::packs::voices(layout);
+    for pack in &packs.packs {
+        let slots: Vec<&bm_core::voices::packs::Voice> =
+            voices.iter().filter(|v| v.pack == pack.name).collect();
+        let open = slots.iter().filter(|v| v.file.is_empty()).count();
+        println!(
+            "{} {} — {} slot(s){}",
+            pack.name,
+            pack.version,
+            slots.len(),
+            if open == 0 {
+                String::new()
+            } else {
+                format!(", {open} with no take")
+            }
+        );
+        for v in slots {
+            let label = if v.label.is_empty() {
+                String::new()
+            } else {
+                format!(" ({})", v.label)
+            };
+            println!(
+                "  {}{label} [{}]{}",
+                v.id,
+                v.tags.join(", "),
+                if v.file.is_empty() {
+                    " — no take"
+                } else {
+                    ""
+                }
+            );
+        }
+    }
+    Ok(())
+}
+
 /// Report a `migrate-cast` run: what changed, what could not, and where the
 pub(crate) fn cmd_roster_migrate_cast(layout: &Layout, dry_run: bool) -> anyhow::Result<()> {
     let runs = roster::migrate_cast(layout, dry_run)?;

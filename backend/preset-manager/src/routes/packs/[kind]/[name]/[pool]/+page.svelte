@@ -341,7 +341,7 @@
 										{#if current.present[f]}
 											{#if s.files.length > 1}
 												<button
-													class="take-x"
+													class="icon-x"
 													type="submit"
 													formaction="?/dropTake"
 													name="file"

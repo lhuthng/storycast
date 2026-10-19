@@ -11,6 +11,8 @@ use crate::commands::cmd_provision;
 use crate::commands::cmd_retag;
 use crate::commands::cmd_roster_add_sample;
 use crate::commands::cmd_roster_migrate_cast;
+use crate::commands::cmd_roster_pack_install;
+use crate::commands::cmd_roster_pack_list;
 use crate::commands::cmd_roster_repair_gender;
 use crate::preset::workspace_cmd;
 use crate::provision::check_bins;
@@ -250,6 +252,13 @@ async fn main() -> anyhow::Result<()> {
             RosterCmd::AddSample { path, tags, name } => {
                 cmd_roster_add_sample(&layout, &path, tags, name)
             }
+            RosterCmd::PackInstall {
+                name,
+                latest,
+                version,
+                tree,
+            } => cmd_roster_pack_install(&layout, &name, latest, version, tree).await,
+            RosterCmd::PackList => cmd_roster_pack_list(&layout),
         },
         Cmd::Workspace { cmd } => {
             for line in workspace_cmd(&layout.root, cmd)? {

@@ -674,10 +674,10 @@ a.adm-row:hover {
 	outline-offset: 2px;
 }
 
-/* Dropping one take, inside the panel. The row's own delete is a labelled
-   button — an X at the far edge of a row is too easy to hit by accident and
-   says nothing about what it removes. */
-.take-x {
+/* The X that removes one item — a take inside the panel, a slot in a preset.
+   A row's own delete is a labelled button instead: an X at the far edge of a
+   row is too easy to hit by accident and says nothing about what it removes. */
+.icon-x {
 	display: inline-flex;
 	align-items: center;
 	justify-content: center;
@@ -694,12 +694,12 @@ a.adm-row:hover {
 		color 150ms ease;
 }
 
-.take-x svg {
+.icon-x svg {
 	width: 1rem;
 	height: 1rem;
 }
 
-.take-x:hover {
+.icon-x:hover {
 	background: color-mix(in oklab, var(--color-primary) 10%, transparent);
 	color: var(--color-primary);
 }
@@ -709,6 +709,37 @@ a.adm-row:hover {
 	gap: var(--tight);
 	grid-template-columns: repeat(auto-fit, minmax(9rem, 14rem));
 	margin-bottom: 0.25rem;
+}
+
+/* ---- voice slots ---- */
+/* A preset is a list of slots: a number, an optional clone name, the tags that
+   describe what to cast, and the one take that name can play. */
+.slots {
+	border-top: 1px solid var(--color-line);
+}
+
+.slot-row {
+	display: grid;
+	grid-template-columns: 2.25rem minmax(7rem, 11rem) minmax(0, 1fr) auto;
+	align-items: center;
+	gap: var(--tight);
+	padding: 0.4rem 0.25rem;
+	border-bottom: 1px solid var(--color-line);
+}
+
+.slot-n {
+	font-family: var(--font-mono);
+	font-size: 0.8125rem;
+	font-weight: 600;
+	color: var(--color-ink-soft);
+	font-variant-numeric: tabular-nums;
+}
+
+.rack-tags {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 0.375rem;
 }
 
 /* Below the table's own width the row stops being a table: the key and its
@@ -732,6 +763,20 @@ a.adm-row:hover {
 	.rack-toggle {
 		grid-column: 2;
 		grid-row: 1;
+	}
+
+	/* The name keeps its line, the tags and the pads take the one below. */
+	.slot-row {
+		grid-template-columns: 1.75rem minmax(0, 1fr);
+	}
+
+	.slot-row .rack-tags,
+	.slot-row .pads {
+		grid-column: 1 / -1;
+	}
+
+	.slot-row .pads {
+		justify-content: flex-end;
 	}
 }
 
@@ -991,6 +1036,32 @@ a.chip:hover {
 	color: color-mix(in oklab, var(--color-sea) 62%, var(--color-ink));
 }
 
+/* The × on a tag: part of the chip, not a second control beside it. */
+.chip-x {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	width: 1rem;
+	height: 1rem;
+	padding: 0;
+	border: 0;
+	border-radius: 999px;
+	background: transparent;
+	color: inherit;
+	font: inherit;
+	line-height: 1;
+	cursor: pointer;
+	opacity: 0.65;
+	transition:
+		opacity 150ms ease,
+		background-color 150ms ease;
+}
+
+.chip-x:hover {
+	opacity: 1;
+	background-color: color-mix(in oklab, currentColor 18%, transparent);
+}
+
 .banner {
 	border-radius: 1.25rem;
 	padding: calc(var(--space) * 0.75) var(--space);
@@ -1050,7 +1121,8 @@ dl.facts dd {
 	.chip,
 	.layer-tabs a,
 	.pad,
-	.take-x,
+	.icon-x,
+	.chip-x,
 	.rack-toggle,
 	.rack-row,
 	.rack-toggle svg,

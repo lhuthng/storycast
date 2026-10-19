@@ -101,6 +101,16 @@ impl Layout {
         self.work.join("voice-pool.json")
     }
 
+    /// The voice packs a book installs: `workspaces/<name>/voices/`.
+    pub fn voices_dir(&self) -> PathBuf {
+        self.work.join(crate::voices::packs::DIR)
+    }
+
+    /// The manifest naming those packs: `workspaces/<name>/voices/packs.json`.
+    pub fn voice_packs(&self) -> PathBuf {
+        self.voices_dir().join(crate::voices::packs::PACKS_FILE)
+    }
+
     pub fn python_dir(&self) -> PathBuf {
         self.root.join("python")
     }

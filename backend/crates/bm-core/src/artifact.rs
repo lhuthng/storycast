@@ -76,7 +76,7 @@ pub fn parse_repo(repo: &str) -> Result<(&str, &str)> {
 }
 
 /// `models-v<first 12 of the hash>`: the tag the GitHub plane used, kept
-/// because the shape is still what `docs/ARTIFACTS.md` describes.
+/// because the shape is still what `docs/ARCHITECTURE.md` §Packs describes.
 pub fn tag_for(hash: &str) -> String {
     format!("models-v{}", &hash[..TAG_HASH_LEN.min(hash.len())])
 }
@@ -158,7 +158,7 @@ pub fn pack_release_url(repo: &str, tag: &str, name: &str) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// R2 preset buckets (docs/R2-PRESETS.md). A setting holding a URL instead of
+// R2 preset buckets (docs/ARCHITECTURE.md §Packs). A setting holding a URL
 // `owner/name` resolves here: latest.json is read first, and the box fetches
 // the immutable file it names, verified against the listed hash.
 
@@ -333,6 +333,69 @@ pub fn manifest_hash(doc: &Value) -> Result<String> {
         h.update([0u8]);
     }
     Ok(hex(&h.finalize()))
+}
+
+/// [`manifest_hash`] for a manifest whose entries are either a bare sha (a pack)
+/// or an object carrying one (a bake) — the rule `tools/preset-publish.sh`
+/// computes over the bundle's own `manifest.json`.
+pub fn tree_hash(doc: &Value) -> Result<String> {
+    let files = doc
+        .get("files")
+        .and_then(|v| v.as_object())
+        .ok_or_else(|| anyhow!("manifest has no `files` object"))?;
+    let mut names: Vec<&String> = files.keys().collect();
+    names.sort();
+    let mut h = Sha256::new();
+    for name in names {
+        let entry = &files[name];
+        let sha = match entry {
+            Value::String(s) => s.as_str(),
+            _ => entry
+                .get("sha256")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| anyhow!("manifest entry `{name}` has no sha256"))?,
+        };
+        h.update(name.as_bytes());
+        h.update([0u8]);
+        h.update(sha.as_bytes());
+        h.update([0u8]);
+    }
+    Ok(hex(&h.finalize()))
+}
+
+/// Unpack a `.tar.zst` bundle into `dest` and verify what landed: the
+/// manifest's own tree hash first, then every file it lists.
+pub fn unpack_verified(archive: &Path, dest: &Path, expect: &str) -> Result<usize, String> {
+    std::fs::create_dir_all(dest).map_err(|e| format!("{}: {e}", dest.display()))?;
+    unpack_to_stage(archive, dest).map_err(|e| e.to_string())?;
+    let doc: Value = serde_json::from_str(
+        &std::fs::read_to_string(dest.join("manifest.json"))
+            .map_err(|e| format!("no manifest.json in the bundle: {e}"))?,
+    )
+    .map_err(|e| format!("unreadable manifest.json: {e}"))?;
+    let found = tree_hash(&doc).map_err(|e| e.to_string())?;
+    if found != expect {
+        return Err(format!(
+            "the bundle is a different tree: manifest hash {found}, expected {expect}"
+        ));
+    }
+    let files = doc["files"].as_object().expect("checked by tree_hash");
+    for (name, entry) in files {
+        let want = match entry {
+            Value::String(s) => s.clone(),
+            _ => entry
+                .get("sha256")
+                .and_then(|v| v.as_str())
+                .map(str::to_string)
+                .ok_or_else(|| format!("manifest entry `{name}` has no sha256"))?,
+        };
+        let path = dest.join(name);
+        let got = sha256_file(&path).map_err(|e| format!("{name}: {e}"))?;
+        if got != want {
+            return Err(format!("{name}: sha256 {got} does not match the manifest"));
+        }
+    }
+    Ok(files.len())
 }
 
 fn read_manifest(models_dir: &Path) -> Result<Value> {
