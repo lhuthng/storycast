@@ -1152,6 +1152,56 @@ fn a_duplicate_sidecar_is_an_event_on_the_edge_not_on_every_beat() {
 }
 
 #[test]
+fn merge_offer_requires_the_capability_a_box_without_ffmpeg_lacks() {
+    // A box whose probe found no ffmpeg or no sox advertises no `merge`
+    // capability (see `bm_agent::identity::capabilities`), and this is the
+    // other half of that promise: a merge is never *offered* to it. Without
+    // the gate the box would take the row, run the whole mix, and fail at the
+    // last shell-out — the encoder this test's box does not have.
+    let (_d, mut inner) = fixture();
+    for stage in [Stage::Crawl, Stage::Digest, Stage::Render] {
+        let mut t = Task::new(5, stage);
+        t.state = TaskState::Done;
+        inner.tasks.insert(format!("{stage}:5"), t);
+    }
+    inner.materialize_render_takes(5);
+    for take in inner.render_take_ids(5) {
+        if let Some(t) = inner.tasks.get_mut(&take) {
+            t.state = TaskState::Done;
+        }
+    }
+    inner.tasks.insert("merge:5".into(), Task::new(5, Stage::Merge));
+    inner.workers.insert("bare".into(), "192.0.2.5".into());
+    inner.caps.insert(
+        "bare".into(),
+        vec![
+            "crawl".into(),
+            "digest".into(),
+            "render".into(),
+            "render-segments".into(),
+        ],
+    );
+    inner.workers.insert("mixed".into(), "192.0.2.6".into());
+    inner.caps.insert(
+        "mixed".into(),
+        vec![
+            "crawl".into(),
+            "digest".into(),
+            "render".into(),
+            "render-segments".into(),
+            "merge".into(),
+        ],
+    );
+
+    assert!(
+        inner.offer("bare").is_none(),
+        "a box with no encoder is never handed a merge"
+    );
+    let offer = inner.offer("mixed").expect("the box that can mix takes it");
+    assert_eq!(offer.task_id, "merge:5");
+}
+
+#[test]
 fn merge_affinity_never_gates_the_local_node() {
     // Affinity is an optimization for remote boxes, not a gate for the
     let (_d, mut inner) = fixture();

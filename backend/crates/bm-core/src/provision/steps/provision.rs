@@ -429,9 +429,11 @@ pub fn provision(
     let after = ssh.probe(&layout.engine);
     log.push(format!("[{}] after provision: {}", m.id, after.summary()));
     // Named on its own line, not just inside the summary: a merge offered to
+    // a box that cannot mix is a task that fails after the work is done, so
+    // the capability gate withholds it — this line says which tool is why.
     if !after.ffmpeg_present {
         log.push(format!(
-            "[{}] ffmpeg is not on PATH, this box can crawl/digest/render but every merge it is offered will fail; install it (apt install ffmpeg / dnf install ffmpeg), the next probe picks it up",
+            "[{}] ffmpeg is not on PATH, this box can crawl/digest/render but advertises no merge capability; install it (apt install ffmpeg / dnf install ffmpeg), the next probe picks it up",
             m.id
         ));
     }

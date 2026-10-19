@@ -201,11 +201,11 @@ impl Probe {
         ) + if self.ffmpeg_present && self.sox_present {
             ""
         } else if !self.ffmpeg_present && !self.sox_present {
-            " · NO FFMPEG/SOX, merges will fail here"
+            " · NO FFMPEG/SOX, merge disabled here"
         } else if !self.ffmpeg_present {
-            " · NO FFMPEG, merges will fail here"
+            " · NO FFMPEG, merge disabled here"
         } else {
-            " · NO SOX, merges will fail here"
+            " · NO SOX, merge disabled here"
         }
     }
 }
@@ -292,6 +292,11 @@ fn ffmpeg_script() -> String {
 if command -v ffmpeg >/dev/null 2>&1; then echo "FFMPEG-OK (present)"; exit 0; fi
 install() { $1 >/dev/null 2>&1; }
 if command -v apt-get >/dev/null 2>&1; then
+  # A fresh box's package index is empty, so an install with no refresh in
+  # front of it answers "Unable to locate package" and this step skips
+  # itself — which reads as "ffmpeg unavailable" on a box that could have
+  # installed it.
+  sudo -n apt-get update -qq >/dev/null 2>&1 || install "apt-get update"
   sudo -n apt-get install -y ffmpeg >/dev/null 2>&1 || install "apt-get install -y ffmpeg"
 elif command -v dnf >/dev/null 2>&1; then
   sudo -n dnf install -y ffmpeg >/dev/null 2>&1 || install "dnf install -y ffmpeg"
@@ -311,6 +316,7 @@ fn sox_script() -> String {
 if command -v sox >/dev/null 2>&1; then echo "SOX-OK (present)"; exit 0; fi
 install() { $1 >/dev/null 2>&1; }
 if command -v apt-get >/dev/null 2>&1; then
+  sudo -n apt-get update -qq >/dev/null 2>&1 || install "apt-get update"
   sudo -n apt-get install -y sox >/dev/null 2>&1 || install "apt-get install -y sox"
 elif command -v dnf >/dev/null 2>&1; then
   sudo -n dnf install -y sox >/dev/null 2>&1 || install "dnf install -y sox"
@@ -332,6 +338,7 @@ fn zstd_script() -> String {
 command -v zstd >/dev/null 2>&1 && { echo "ZSTD-OK (present)"; exit 0; }
 install() { $1 >/dev/null 2>&1; }
 if command -v apt-get >/dev/null 2>&1; then
+  sudo -n apt-get update -qq >/dev/null 2>&1 || install "apt-get update"
   sudo -n apt-get install -y zstd >/dev/null 2>&1 || install "apt-get install -y zstd"
 elif command -v dnf >/dev/null 2>&1; then
   sudo -n dnf install -y zstd >/dev/null 2>&1 || install "dnf install -y zstd"

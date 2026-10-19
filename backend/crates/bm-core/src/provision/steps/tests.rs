@@ -265,6 +265,21 @@ fn ffmpeg_sox_and_zstd_always_ensure_their_tool() {
             !script.contains("force a re-provision"),
             "an ensure never waits for a forced box: {script}"
         );
+        // A fresh box's index is empty, so an install with no refresh before
+        // it answers "Unable to locate package" and the step skips itself —
+        // which is how four launched boxes came up with no ffmpeg at all.
+        if script.contains("apt-get") {
+            let refresh = script
+                .find("apt-get update")
+                .unwrap_or_else(|| panic!("the apt branch must refresh the index first: {script}"));
+            let install_at = script
+                .find(&format!("install -y {tool}"))
+                .expect("asserted above");
+            assert!(
+                refresh < install_at,
+                "the index refresh has to come before the install: {script}"
+            );
+        }
     }
 }
 
@@ -478,6 +493,7 @@ fn undeclared_voices_names_only_the_strays() {
         crate::pool::PoolEntry {
             file: "refs/pool.wav".into(),
             tags: vec![],
+            label: String::new(),
         },
     );
     let catalogue = vec!["Thái Sơn".to_string(), "Adam".to_string()];
@@ -552,7 +568,7 @@ fn probe_summary_counts_voices_instead_of_listing_them() {
 }
 
 #[test]
-fn a_box_without_ffmpeg_says_so_before_a_merge_fails() {
+fn a_box_without_ffmpeg_says_so_and_merge_is_withheld() {
     // The failure this prevents: a box provisions cleanly, is offered a
     let present = Probe {
         reachable: true,
