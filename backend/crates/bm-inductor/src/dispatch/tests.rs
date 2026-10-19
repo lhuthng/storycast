@@ -431,8 +431,10 @@ async fn a_box_busy_with_this_row_is_left_alone() {
 #[tokio::test]
 async fn an_undelivered_offer_is_an_event_not_a_silence() {
     // Port 1 answers nothing, ever: the shape of a box that died between
-    // `offer` and the POST. The lease will requeue the row, but the operator
-    // must be told now rather than half an hour later.
+    // `offer` and the POST. The row must go back to the pool now — only
+    // pending rows are ever offered, so a row left assigned waits out its
+    // whole lease (six hours for a render) with every box idle — and the
+    // operator must be told now rather than half an hour later.
     let (_d, st) = state();
     {
         let mut inner = st.lock().await;
@@ -453,5 +455,18 @@ async fn an_undelivered_offer_is_an_event_not_a_silence() {
             .iter()
             .any(|e| e.text.contains("merge:7") && e.text.contains("not delivered")),
         "a dead box must leave a line, not silence"
+    );
+    let t = inner.tasks.get("merge:7").expect("the row is still there");
+    assert_eq!(
+        t.state,
+        bm_proto::TaskState::Pending,
+        "an offer that never landed leaves nobody holding the row"
+    );
+    assert_eq!(t.assigned_to, None);
+    assert_eq!(t.attempts, 0, "an undelivered offer is not the row's fault");
+    assert!(
+        t.detail.contains("not delivered"),
+        "the ledger says why: {}",
+        t.detail
     );
 }

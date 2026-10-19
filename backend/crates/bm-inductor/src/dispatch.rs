@@ -6,11 +6,9 @@ use bm_proto::{Heartbeat, Stage, TaskOffer};
 use std::collections::HashMap;
 use std::time::Duration;
 
-/// How often each worker is asked how it is. Short enough that a task is
-const POLL: Duration = Duration::from_secs(2);
-
-/// How soon after a task **finishes** the worker is offered the next one.
-const HOT: Duration = Duration::from_millis(200);
+/// How often each worker is asked how it is. Every ask costs the box a
+/// process census, so this is the box's budget too.
+const POLL: Duration = Duration::from_millis(200);
 
 /// Asking a question. Anything that has not answered in this long is not
 const ASK: Duration = Duration::from_secs(5);
@@ -101,7 +99,6 @@ async fn drive(state: Shared, layout: Layout, peer: Peer, http: reqwest::Client)
     let base = peer.base();
     // The task runs in its own task, **not** awaited here. Awaiting it would
     let mut job: Option<(String, Stage, tokio::task::JoinHandle<()>)> = None;
-    let mut was_running = false;
     // What this dispatcher has told this box about its sidecar, and what the
     let mut sidecar_book = SidecarBook::default();
     loop {
@@ -195,14 +192,7 @@ async fn drive(state: Shared, layout: Layout, peer: Peer, http: reqwest::Client)
                 ));
             }
         }
-        // Poll hot exactly once after a task completes: the work just drained
-        let running_now = job
-            .as_ref()
-            .map(|(_, _, h)| !h.is_finished())
-            .unwrap_or(false);
-        let just_finished = was_running && !running_now;
-        was_running = running_now;
-        tokio::time::sleep(if just_finished { HOT } else { POLL }).await;
+        tokio::time::sleep(POLL).await;
     }
 }
 
@@ -398,15 +388,22 @@ async fn run_one(
     let response = match sent {
         Ok(r) => r,
         Err(e) => {
-            // Say it where the operator looks. This used to be a stdout line
-            // only, so a box that never took the offer left a row assigned with
-            // nothing in the event pane to explain it — 30 minutes of a merge
-            // lease, silent.
-            state.lock().await.push_event(
-                "warn",
-                format!("[{}] {task_id} not delivered: {e}", peer.addr),
-            );
-            println!("dispatch: {} {task_id} — send failed: {e}", peer.addr);
+            // The offer never landed, so the rows it covers go back to the pool.
+            // The dispatcher only ever hands out **pending** rows, and a row left
+            // assigned waits out its whole lease — six hours for a render — so
+            // an undelivered offer parked the work with every box idle. The
+            // two sibling refusals (busy, render off by policy) release the
+            // same way: strike-free, because the row is not at fault.
+            let line = {
+                let mut inner = state.lock().await;
+                let line = inner.release_offer_rows(&task_id, "offer not delivered");
+                inner.push_event(
+                    "warn",
+                    format!("[{}] {task_id} not delivered: {e}; {line}", peer.addr),
+                );
+                line
+            };
+            println!("dispatch: {} {task_id} — send failed: {e}; {line}", peer.addr);
             return;
         }
     };
