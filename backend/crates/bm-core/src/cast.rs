@@ -282,9 +282,9 @@ pub fn load_cast(
         if options.is_empty() && hint_tags.is_empty() {
             // Unknown gender is still allowed to use a clone when one exists;
             options = pool
-                .keys()
-                .filter(|name| name.as_str() != "Narrator")
-                .cloned()
+                .iter()
+                .filter(|(name, entry)| name.as_str() != "Narrator" && !entry.exclusive)
+                .map(|(name, _)| name.clone())
                 .collect();
         }
         let pick = options
@@ -304,7 +304,12 @@ pub fn load_cast(
             continue;
         }
         // A character with no pool left stays unassigned and fails loudly at
-        let preset: Vec<String> = policy.pool_for_hint(&hint).to_vec();
+        let preset: Vec<String> = policy
+            .pool_for_hint(&hint)
+            .iter()
+            .filter(|v| !pool.get(*v).is_some_and(|e| e.exclusive))
+            .cloned()
+            .collect();
         let pick = preset
             .iter()
             .min_by_key(|v| {

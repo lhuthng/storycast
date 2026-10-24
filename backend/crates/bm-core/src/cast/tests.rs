@@ -143,6 +143,42 @@ fn a_broad_character_tag_does_not_force_a_default_preset() {
 }
 
 #[test]
+fn exclusive_pool_voices_are_not_rolled_for_new_speakers() {
+    let d = tmpdir("exclusive-pool");
+    std::fs::write(
+        d.join("voice-pool.json"),
+        r#"{"reserved":{"file":"refs/reserved.mp3","tags":["male"],"exclusive":true}}"#,
+    )
+    .unwrap();
+    let script = d.join("script-01.json");
+    std::fs::write(
+        &script,
+        r#"{"roster":["Narrator","Owner","New Guy"],"segments":[]}"#,
+    )
+    .unwrap();
+    let bible = d.join("bible.json");
+    std::fs::write(
+        &bible,
+        r#"{"characters":[{"name":"New Guy","voice_hint":"adult male","proper_aliases":[]}]}"#,
+    )
+    .unwrap();
+    let cast_path = d.join("cast-vieneu.json");
+    std::fs::write(&cast_path, r#"{"Owner":"reserved"}"#).unwrap();
+
+    let cast = load_cast(&script, &cast_path, &bible, &vieneu_policy(), None, false).unwrap();
+    assert_eq!(
+        cast.get("Owner").unwrap(),
+        "reserved",
+        "an existing owner keeps the voice"
+    );
+    assert_ne!(
+        cast.get("New Guy").unwrap(),
+        "reserved",
+        "a new speaker skips the reserved voice"
+    );
+}
+
+#[test]
 fn bible_hints_drive_gender_pool() {
     let d = tmpdir("bible");
     let script = d.join("script-01.json");

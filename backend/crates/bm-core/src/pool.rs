@@ -7,6 +7,10 @@ use std::path::{Path, PathBuf};
 /// Tag pairs that can never share a voice. Everything else is free-form: a tag
 const CONFLICTS: [(&str, &str); 3] = [("male", "female"), ("young", "old"), ("strong", "weak")];
 
+fn is_false(b: &bool) -> bool {
+    !*b
+}
+
 /// One pooled sample: the clip enrolled as a clone voice plus its tags.
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub struct PoolEntry {
@@ -16,6 +20,9 @@ pub struct PoolEntry {
     /// What the clone calls itself. Display only: the key is the identity.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub label: String,
+    /// Never auto-assign this voice to a speaker it does not already have.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub exclusive: bool,
 }
 
 /// `name -> entry`. Ordered so the file on disk diffs cleanly.
@@ -99,15 +106,30 @@ pub fn tags_from_hint(hint: &str) -> Vec<String> {
     out
 }
 
-/// Pool members compatible with a character, by name, sorted.
+/// Pool members compatible with a character, by name, sorted. Exclusive
+/// voices are never offered to a new speaker; an existing assignment is kept.
 pub fn candidates(pool: &Pool, character_tags: &[String]) -> Vec<String> {
     let mut out: Vec<String> = pool
         .iter()
-        .filter(|(_, e)| compatible(&e.tags, character_tags))
+        .filter(|(_, e)| !e.exclusive && compatible(&e.tags, character_tags))
         .map(|(name, _)| name.clone())
         .collect();
     out.sort();
     out
+}
+
+/// Reserve a pooled voice for the speakers it already has. A voice outside the
+/// pool has no entry to carry the flag.
+pub fn set_exclusive(path: &Path, voice: &str, exclusive: bool) -> anyhow::Result<()> {
+    let mut pool = load_pool(path);
+    let Some(entry) = pool.get_mut(voice) else {
+        return Ok(());
+    };
+    if entry.exclusive == exclusive {
+        return Ok(());
+    }
+    entry.exclusive = exclusive;
+    write_pool(path, &pool)
 }
 
 /// Read the registry. A missing file is "no pool", not an error — and a broken
@@ -251,12 +273,14 @@ pub fn add_sample(
 
     let pool_path = layout.work.join("voice-pool.json");
     let mut pool = load_pool(&pool_path);
+    let exclusive = pool.get(&name).is_some_and(|e| e.exclusive);
     pool.insert(
         name.clone(),
         PoolEntry {
             file: format!("refs/{filename}"),
             tags: tags.clone(),
             label: String::new(),
+            exclusive,
         },
     );
     write_pool(&pool_path, &pool)?;

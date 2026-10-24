@@ -3260,7 +3260,18 @@ fn a_claim_keeps_the_voice_for_one_speaker_and_moves_the_rest() {
         r#"{"A":"Adam","B":"Adam","C":"Minh Đức"}"#,
     )
     .unwrap();
+    std::fs::write(
+        layout.voice_pool(),
+        r#"{"Adam":{"file":"refs/adam.mp3","tags":["male"]}}"#,
+    )
+    .unwrap();
     let msg = inner.claim_voice_apply("A", "Adam").unwrap();
+    assert!(
+        bm_core::pool::load_pool(&layout.voice_pool())
+            .get("Adam")
+            .is_some_and(|e| e.exclusive),
+        "the claim reserves Adam for its new speaker"
+    );
     let cast = bm_core::cast::read_cast("vieneu", &layout.cast("vieneu"));
     assert_eq!(cast.get("A").map(String::as_str), Some("Adam"), "{msg}");
     let b = cast.get("B").cloned().unwrap_or_default();

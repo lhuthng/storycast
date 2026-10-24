@@ -159,6 +159,7 @@ fn a_reinstall_drops_slots_the_pack_no_longer_declares() {
     pack_clone(&two, "beta", "Beta", b"b");
     install_tree(&f.layout, "demo", &two, &Origin::checkout()).unwrap();
     let mut pool = crate::pool::load_pool(&f.layout.voice_pool());
+    pool.get_mut("demo/unnamed-1").unwrap().exclusive = true;
     pool.insert(
         "Hand Made".into(),
         crate::pool::PoolEntry {
@@ -183,6 +184,10 @@ fn a_reinstall_drops_slots_the_pack_no_longer_declares() {
     assert!(
         pool.contains_key("Hand Made"),
         "a manual entry is not a pack's"
+    );
+    assert!(
+        pool["demo/unnamed-1"].exclusive,
+        "a rebuild keeps the reservation"
     );
     let pinned = &Packs::load(&f.layout).packs[0];
     assert_eq!(pinned.version, "2026-10-20");

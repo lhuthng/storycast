@@ -494,6 +494,7 @@ fn undeclared_voices_names_only_the_strays() {
             file: "refs/pool.wav".into(),
             tags: vec![],
             label: String::new(),
+            exclusive: false,
         },
     );
     let catalogue = vec!["Thái Sơn".to_string(), "Adam".to_string()];

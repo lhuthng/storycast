@@ -436,12 +436,19 @@ fn write_registries(layout: &Layout) -> Result<()> {
         &serde_json::to_string_pretty(&manifest)?,
     )?;
 
-    let mut pool = read_object(&layout.voice_pool());
+    let old = read_object(&layout.voice_pool());
+    let mut pool = old.clone();
     pool.retain(|k, _| k.starts_with('_') || !ours(k));
     for voice in all.iter().filter(|v| !v.file.is_empty()) {
+        let exclusive = old
+            .get(&voice.id)
+            .and_then(|v| v.get("exclusive"))
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
         pool.insert(
             voice.id.clone(),
             serde_json::to_value(crate::pool::PoolEntry {
+                exclusive,
                 file: voice.file.clone(),
                 tags: voice.tags.clone(),
                 label: voice.label.clone(),

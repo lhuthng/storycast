@@ -27,6 +27,8 @@ impl Inner {
         // The owner first: the claim is a swap with an aftermath, and it also
         // assigns the voice to a speaker who never had it.
         let mut line = self.swap_apply(character, &voice)?;
+        // Persist the claim: a new speaker must not roll onto this voice later.
+        bm_core::pool::set_exclusive(&self.layout.voice_pool(), &voice, true)?;
         if others.is_empty() {
             line.push_str(&format!("; {character} is the only speaker on {voice}"));
             return Ok(line);
@@ -105,7 +107,7 @@ fn free_voice(
     options.extend(policy.neutral.iter().cloned());
     let mut seen: Vec<String> = Vec::new();
     options.retain(|v| {
-        if v == keep || seen.contains(v) {
+        if v == keep || seen.contains(v) || pool.get(v).is_some_and(|e| e.exclusive) {
             return false;
         }
         seen.push(v.clone());

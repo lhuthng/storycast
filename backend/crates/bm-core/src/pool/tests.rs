@@ -173,6 +173,7 @@ fn candidates_are_compatible_names_sorted() {
             file: "refs/young-female-1.mp3".into(),
             tags: vec!["young".into(), "female".into()],
             label: String::new(),
+            exclusive: false,
         },
     );
     pool.insert(
@@ -181,6 +182,7 @@ fn candidates_are_compatible_names_sorted() {
             file: "refs/young-female-2.mp3".into(),
             tags: vec!["young".into(), "female".into()],
             label: String::new(),
+            exclusive: false,
         },
     );
     pool.insert(
@@ -189,11 +191,36 @@ fn candidates_are_compatible_names_sorted() {
             file: "refs/old-male-1.mp3".into(),
             tags: vec!["old".into(), "male".into()],
             label: String::new(),
+            exclusive: false,
         },
     );
     let got = candidates(&pool, &["young".to_string(), "female".to_string()]);
     assert_eq!(got, vec!["young-female-1", "young-female-2"]);
     assert!(candidates(&pool, &[]).is_empty());
+}
+
+#[test]
+fn exclusive_voices_are_not_offered_to_new_speakers() {
+    let mut pool = Pool::new();
+    pool.insert(
+        "reserved".into(),
+        PoolEntry {
+            file: "refs/reserved.mp3".into(),
+            tags: vec!["male".into()],
+            label: String::new(),
+            exclusive: true,
+        },
+    );
+    pool.insert(
+        "free".into(),
+        PoolEntry {
+            file: "refs/free.mp3".into(),
+            tags: vec!["male".into()],
+            label: String::new(),
+            exclusive: false,
+        },
+    );
+    assert_eq!(candidates(&pool, &["male".to_string()]), vec!["free"]);
 }
 
 #[test]
