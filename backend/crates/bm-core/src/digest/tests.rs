@@ -2647,6 +2647,50 @@ fn sound_design_gap_catches_an_empty_and_an_unclosed_design() {
     assert!(sound_design_gap(&silent, "Trời hôm nay đẹp.", &pool, &vi_cues()).is_none());
 }
 
+/// ch593's shape: a closed loop can still be too long. Its footstep bed ran
+/// under 110 of 114 lines; a spot bed may not cover most of the chapter.
+#[test]
+fn sound_design_gap_catches_a_bed_that_runs_too_long() {
+    use crate::audio_pool::{ClipPool, Sound};
+    let pool: ClipPool = [(
+        "footstep-forest".to_string(),
+        Sound {
+            id: None,
+            tags: vec!["steps".into()],
+            files: vec!["injects/x.mp3".into()],
+            looped: true,
+            dur_s: Some(3.0),
+            mode: Some("overlap".into()),
+            hold: None,
+            level: None,
+        },
+    )]
+    .into_iter()
+    .collect();
+    let line = |t: &str| json!({"speaker": "Narrator", "text": t});
+    let body: Vec<Value> = (1..=10).map(|i| line(&format!("Line {i}."))).collect();
+    let chapter =
+        "Line 1. Line 2. Line 3. Line 4. Line 5. Line 6. Line 7. Line 8. Line 9. Line 10.";
+
+    let mut long = body.clone();
+    long.insert(1, json!({"sound": "footstep-forest"}));
+    long.insert(10, json!({"stop": "footstep-forest"}));
+    let gap = sound_design_gap(&json!({"segments": long}), chapter, &pool, &[])
+        .expect("a closed bed that covers 8 of 10 lines");
+    assert!(
+        gap.contains("footstep-forest") && gap.contains("80%"),
+        "{gap}"
+    );
+
+    let mut short = body;
+    short.insert(1, json!({"sound": "footstep-forest"}));
+    short.insert(3, json!({"stop": "footstep-forest"}));
+    assert!(
+        sound_design_gap(&json!({"segments": short}), chapter, &pool, &[]).is_none(),
+        "a one-line bed must pass"
+    );
+}
+
 /// ch262's false positive, pinned: bare `chém` is an idiom
 #[test]
 fn bare_chem_is_no_sound_cue() {

@@ -196,16 +196,18 @@ pub(crate) fn field_is_blank(obj: &serde_json::Map<String, Value>, key: &str) ->
         _ => false,
     }
 }
-/// Two sound-design answers that cannot be right, checked in that order: a
-/// `loop`ed bed started and never stopped, then a chapter that stages a sound
-/// and places none.
+/// Three sound-design answers that cannot be right, checked in that order: a
+/// `loop`ed bed started and never stopped, a closed bed that covers too much of
+/// the chapter, then a chapter that stages a sound and places none.
 pub(crate) fn sound_design_gap(
     script: &Value,
     chapter_text: &str,
     pool: &crate::audio_pool::ClipPool,
     cues: &[String],
 ) -> Option<String> {
-    unclosed_beds(script, pool).or_else(|| silent_design(script, chapter_text, "chapter", cues))
+    unclosed_beds(script, pool)
+        .or_else(|| overlong_beds(script, pool))
+        .or_else(|| silent_design(script, chapter_text, "chapter", cues))
 }
 
 /// Rule 1 alone: looping beds a script opened and never stopped, **in the order
@@ -257,6 +259,93 @@ pub(crate) fn open_beds(script: &Value, pool: &crate::audio_pool::ClipPool) -> V
         }
     }
     open.into_iter().map(str::to_string).collect()
+}
+
+/// A looped bed may cover at most this share of the chapter's speech lines.
+const MAX_BED_SHARE: f64 = 0.20;
+
+/// A closed bed that runs too long to be a spot sound. Footsteps left under a
+/// whole conversation are the case this gate exists for.
+pub(crate) fn overlong_beds(script: &Value, pool: &crate::audio_pool::ClipPool) -> Option<String> {
+    let segments = script.get("segments").and_then(|s| s.as_array())?;
+    let lines = segments
+        .iter()
+        .filter(|item| !crate::util::is_sound_item(item))
+        .count();
+    if lines == 0 {
+        return None;
+    }
+    let max = (((lines as f64) * MAX_BED_SHARE).ceil() as usize).max(1);
+    let mut open: Vec<(String, usize)> = Vec::new();
+    let mut over: Vec<String> = Vec::new();
+    let mut line = 0usize;
+    for item in segments {
+        if !crate::util::is_sound_item(item) {
+            line += 1;
+            continue;
+        }
+        if let Some(sound) = item.get("sound").and_then(|v| v.as_str()) {
+            if pool.get(sound).map(|e| e.looped).unwrap_or(false)
+                && !open.iter().any(|(s, _)| s == sound)
+            {
+                open.push((sound.to_string(), line));
+            }
+        }
+        if let Some(tags) = seam_tags(item, "sound_tags") {
+            for (name, entry) in crate::audio_pool::candidates(pool, &tags) {
+                if entry.looped && !open.iter().any(|(s, _)| s == name) {
+                    open.push((name.to_string(), line));
+                }
+            }
+        }
+        if let Some(stop) = item.get("stop").and_then(|v| v.as_str()) {
+            close_bed(&mut open, &mut over, stop, line, lines, max);
+        }
+        if let Some(tags) = seam_tags(item, "stop_tags") {
+            let names: Vec<String> = open
+                .iter()
+                .filter(|(name, _)| {
+                    pool.get(name.as_str())
+                        .is_some_and(|e| e.tags.iter().any(|t| tags.contains(t)))
+                })
+                .map(|(name, _)| name.clone())
+                .collect();
+            for name in names {
+                close_bed(&mut open, &mut over, &name, line, lines, max);
+            }
+        }
+    }
+    if over.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "{} — a looping bed may cover at most {:.0}% of the chapter. Close it on the line \
+         where the action stops, or use a `scene` label for a long place bed",
+        over.join("; "),
+        MAX_BED_SHARE * 100.0
+    ))
+}
+
+fn close_bed(
+    open: &mut Vec<(String, usize)>,
+    over: &mut Vec<String>,
+    name: &str,
+    line: usize,
+    lines: usize,
+    max: usize,
+) {
+    let Some(i) = open.iter().position(|(s, _)| s == name) else {
+        return;
+    };
+    let (_, start) = open.remove(i);
+    let span = line.saturating_sub(start);
+    if span > max {
+        over.push(format!(
+            "{} runs for {span} of {lines} lines ({:.0}%)",
+            name,
+            span as f64 / lines as f64 * 100.0
+        ));
+    }
 }
 
 /// The tags of a written `sound_tags`/`stop_tags` item, as a list.

@@ -12,6 +12,7 @@ use super::prompts::load_map;
 use super::prompts::PreparedChapter;
 use super::sound_fields::carry_forward_fields;
 use super::sound_fields::expand_sound_fields;
+use super::sound_fields::overlong_beds;
 use super::sound_fields::seam_value;
 use super::sound_fields::silent_design;
 use super::sound_fields::unclosed_beds;
@@ -256,6 +257,9 @@ pub(crate) fn parse_sound_script(
     validate_effect_tags(&data, &vocab.effects).map_err(|e| format!("{e:#}"))?;
     validate_injects(&data, &vocab.injects).map_err(|e| format!("{e:#}"))?;
     if let Some(gap) = unclosed_beds(&data, &vocab.injects) {
+        return Err(gap);
+    }
+    if let Some(gap) = overlong_beds(&data, &vocab.injects) {
         return Err(gap);
     }
     if let Some(gap) = silent_design(&data, chapter_text, "chapter", &vocab.sound_cues) {
