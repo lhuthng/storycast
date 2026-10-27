@@ -270,11 +270,7 @@ pub(crate) fn draw_picker(f: &mut ratatui::Frame, app: &mut App, picker: &Picker
                     .take(height)
                     .map(|(i, row)| match row {
                         VoiceRow::Group { tags, count } => Line::from(Span::styled(
-                            format!(
-                                "── {} · {}",
-                                group_label(tags),
-                                plural(*count, "voice")
-                            ),
+                            format!("── {} · {}", group_label(tags), plural(*count, "voice")),
                             style_of(colour, Color::Cyan),
                         )),
                         VoiceRow::Voice { voice: v, users } => {

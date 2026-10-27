@@ -71,7 +71,10 @@ impl StateSnap {
     /// that will not parse lands on its default exactly as it did before. The
     /// fallback for a payload [`RawDoc`] cannot take whole.
     fn from_value(mut v: serde_json::Value) -> Self {
-        fn take<T: serde::de::DeserializeOwned + Default>(v: &mut serde_json::Value, key: &str) -> T {
+        fn take<T: serde::de::DeserializeOwned + Default>(
+            v: &mut serde_json::Value,
+            key: &str,
+        ) -> T {
             v.get_mut(key)
                 .map(std::mem::take)
                 .and_then(|slot| serde_json::from_value(slot).ok())

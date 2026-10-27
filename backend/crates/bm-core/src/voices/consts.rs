@@ -494,10 +494,7 @@ mod tests {
         assert!(supports_nonverbal("vieneu"));
         let tags = nonverbals("vieneu");
         assert_eq!(tags.len(), 3);
-        assert!(
-            tags.iter().any(|n| n.tag == "[hắng giọng]"),
-            "{tags:?}"
-        );
+        assert!(tags.iter().any(|n| n.tag == "[hắng giọng]"), "{tags:?}");
 
         // Gemini declares none, so its prompt carries no rule at all: the
         assert!(!supports_nonverbal("gemini"));

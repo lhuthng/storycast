@@ -170,7 +170,10 @@ async fn same_box_jobs_queue_but_another_box_does_not() {
         !started.contains(&2),
         "the same-box drop must wait for the push: {started:?}"
     );
-    assert_eq!(app.background_jobs[1].activity, "queued · needs box 10.0.0.5");
+    assert_eq!(
+        app.background_jobs[1].activity,
+        "queued · needs box 10.0.0.5"
+    );
 
     gate.notify_one();
     drop(job_tx);

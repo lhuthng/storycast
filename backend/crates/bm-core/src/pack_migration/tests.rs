@@ -28,7 +28,10 @@ fn injects(root: &std::path::Path, body: &str) {
 }
 
 fn script(root: &std::path::Path, chapter: u32, body: &str) -> PathBuf {
-    let path = root.join("data").join("script").join(format!("{chapter}.json"));
+    let path = root
+        .join("data")
+        .join("script")
+        .join(format!("{chapter}.json"));
     std::fs::write(&path, body).unwrap();
     path
 }
@@ -80,7 +83,10 @@ fn the_same_rename_from_two_packs_is_one_rename() {
         history("b", &[("quiet", "calm")], &[]),
     ];
     let merged = merge(&docs).unwrap();
-    assert_eq!(merged.palette.get("quiet").map(String::as_str), Some("calm"));
+    assert_eq!(
+        merged.palette.get("quiet").map(String::as_str),
+        Some("calm")
+    );
 }
 
 #[test]
@@ -129,7 +135,10 @@ fn a_history_that_grew_one_release_at_a_time_lands_on_the_last_name() {
 #[test]
 fn apply_rewrites_the_names_a_script_holds_and_nothing_else() {
     let root = tree("rewrite");
-    palette(&root, r#"{"calm": {"tags": ["soft"]}, "none": {"tags": []}}"#);
+    palette(
+        &root,
+        r#"{"calm": {"tags": ["soft"]}, "none": {"tags": []}}"#,
+    );
     injects(
         &root,
         r#"{"paper-rustle": {"tags": ["paper"], "files": ["injects/p.mp3"]}}"#,
@@ -214,7 +223,10 @@ fn a_target_the_live_tree_never_gained_is_reported_not_written() {
 #[test]
 fn applying_twice_changes_nothing_the_second_time() {
     let root = tree("twice");
-    palette(&root, r#"{"calm": {"tags": ["soft"]}, "none": {"tags": []}}"#);
+    palette(
+        &root,
+        r#"{"calm": {"tags": ["soft"]}, "none": {"tags": []}}"#,
+    );
     script(
         &root,
         7,

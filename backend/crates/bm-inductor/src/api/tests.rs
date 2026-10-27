@@ -114,10 +114,8 @@ fn an_offline_drop_takes_the_box_out_of_both_files() {
     let layout = bm_core::Layout::new(d.path());
     let m = Machine::new("192.168.2.9", "thang", 22, None, "worker");
     {
-        let mut inner = crate::state::Inner::distributing(
-            layout.clone(),
-            bm_core::config::Settings::default(),
-        );
+        let mut inner =
+            crate::state::Inner::distributing(layout.clone(), bm_core::config::Settings::default());
         inner.machines.insert(m.addr.clone(), m.clone());
         inner.save();
         let (bxo, _) = bm_core::provision::split_machine(&m, "box");
@@ -395,7 +393,10 @@ async fn dropping_a_machine_refuses_it_and_rebinding_undoes_that() {
     .await;
     {
         let inner = st.lock().await;
-        assert!(inner.dropped.contains("192.168.2.2"), "the address is refused");
+        assert!(
+            inner.dropped.contains("192.168.2.2"),
+            "the address is refused"
+        );
         assert!(!inner.machines.contains_key("192.168.2.2"));
     }
     let _ = add_machine(

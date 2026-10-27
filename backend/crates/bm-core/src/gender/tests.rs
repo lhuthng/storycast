@@ -142,4 +142,3 @@ fn a_cast_only_name_the_lexicon_knows_is_repaired() {
     assert_eq!(fixes.len(), 1);
     assert_eq!(fixes[0].new_voice.as_deref(), Some("young-female-1"));
 }
-

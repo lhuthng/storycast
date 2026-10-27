@@ -120,8 +120,10 @@ pub(crate) fn seg_text(seg: &Value) -> &str {
 /// merge, which both plan, get the tag. `replaces` was checked against the text at
 /// the gate, so the first occurrence is the one.
 fn speak_as_declared(seg: &Value) -> Value {
-    let (Some(text), Some(sound)) = (seg.get("text").and_then(Value::as_str), seg.get("nonverbal"))
-    else {
+    let (Some(text), Some(sound)) = (
+        seg.get("text").and_then(Value::as_str),
+        seg.get("nonverbal"),
+    ) else {
         return seg.clone();
     };
     let (Some(replaces), Some(tag)) = (

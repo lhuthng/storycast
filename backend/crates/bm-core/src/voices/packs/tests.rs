@@ -173,7 +173,10 @@ fn a_reinstall_drops_slots_the_pack_no_longer_declares() {
     )
     .unwrap();
 
-    let one = pack(&f.layout.root, r#"[{"voice":"Alpha","tags":["old","male"]}]"#);
+    let one = pack(
+        &f.layout.root,
+        r#"[{"voice":"Alpha","tags":["old","male"]}]"#,
+    );
     pack_clone(&one, "alpha", "Alpha", b"a");
     let origin = Origin::published("2026-10-20", "sha", "manifest");
     install_tree(&f.layout, "demo", &one, &origin).unwrap();
@@ -199,7 +202,10 @@ fn a_reinstall_drops_slots_the_pack_no_longer_declares() {
 #[test]
 fn voices_read_back_with_their_tags_label_and_take() {
     let f = fixture();
-    let tree = pack(&f.layout.root, r#"[{"voice":"Alpha","tags":["old","male"]}]"#);
+    let tree = pack(
+        &f.layout.root,
+        r#"[{"voice":"Alpha","tags":["old","male"]}]"#,
+    );
     pack_clone(&tree, "alpha", "Alpha", b"pack-alpha");
     install_tree(&f.layout, "demo", &tree, &Origin::checkout()).unwrap();
 
@@ -208,10 +214,7 @@ fn voices_read_back_with_their_tags_label_and_take() {
     assert_eq!(got[0].id, "demo/unnamed-1");
     assert_eq!(got[0].tags, ["old", "male"]);
     assert_eq!(got[0].label, "Alpha");
-    assert_eq!(
-        got[0].file,
-        "voices/demo/clones/unnamed-1/vieneu-clean.wav"
-    );
+    assert_eq!(got[0].file, "voices/demo/clones/unnamed-1/vieneu-clean.wav");
 }
 
 #[test]

@@ -368,9 +368,7 @@ pub(crate) async fn job_add_sample(
                                 send(&tx, Level::Info, l);
                             }
                         }
-                        Err(e) => {
-                            send(&tx, Level::Error, format!("voice sync task failed: {e}"))
-                        }
+                        Err(e) => send(&tx, Level::Error, format!("voice sync task failed: {e}")),
                     }
                 }
             }

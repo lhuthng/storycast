@@ -142,9 +142,10 @@ impl ReloadingRoster {
     /// changed underneath. The lock is held for `f` only.
     pub fn with<R>(&self, f: impl FnOnce(&Roster) -> Result<R>) -> Result<R> {
         self.refresh();
-        let state = self.state.lock().map_err(|e| {
-            anyhow::anyhow!("the roster lock is poisoned: {e}")
-        })?;
+        let state = self
+            .state
+            .lock()
+            .map_err(|e| anyhow::anyhow!("the roster lock is poisoned: {e}"))?;
         f(&state.0)
     }
 
@@ -277,14 +278,18 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            roster.with(|r| r.resolve(Some("B")).map(|v| v.name.clone())).unwrap(),
+            roster
+                .with(|r| r.resolve(Some("B")).map(|v| v.name.clone()))
+                .unwrap(),
             "B"
         );
         // A torn write mid-rsync parses as nothing: the old roster stays
         // rather than blanking every voice on the box.
         std::fs::write(&p, r#"{"presets":{"A":"#).unwrap();
         assert_eq!(
-            roster.with(|r| r.resolve(Some("B")).map(|v| v.name.clone())).unwrap(),
+            roster
+                .with(|r| r.resolve(Some("B")).map(|v| v.name.clone()))
+                .unwrap(),
             "B",
             "a failed reload keeps the old roster"
         );

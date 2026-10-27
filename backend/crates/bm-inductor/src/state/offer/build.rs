@@ -25,12 +25,15 @@ impl Inner {
     /// this checkout's. Unknown either side is "no opinion", as before: a box
     /// mid-sync waits for render, it is not starved of every other stage.
     fn voices_in_sync(&self, worker_id: &str) -> bool {
-        let Some(want) =
-            bm_core::pool::voices_store_hash(&self.layout.root, &self.settings.engine)
+        let Some(want) = bm_core::pool::voices_store_hash(&self.layout.root, &self.settings.engine)
         else {
             return true;
         };
-        match self.beats.get(worker_id).and_then(|b| b.voices_hash.as_deref()) {
+        match self
+            .beats
+            .get(worker_id)
+            .and_then(|b| b.voices_hash.as_deref())
+        {
             None => true,
             Some(have) => have == want,
         }

@@ -30,14 +30,12 @@ const TAGS: [(&str, &str); 3] = [
 ];
 
 fn gate(dir: &Path, pairs_path: &Path, choice: bool, show: bool) -> Result<()> {
-    let mut judge = Judge::from_dir(dir)?
-        .ok_or_else(|| anyhow!("no judge model in {}", dir.display()))?;
+    let mut judge =
+        Judge::from_dir(dir)?.ok_or_else(|| anyhow!("no judge model in {}", dir.display()))?;
     let (mut pos_hit, mut pos_n) = (0usize, 0usize);
     let (mut neg_hit, mut neg_n) = (0usize, 0usize);
     let mut q = 0usize;
-    for line in std::io::BufRead::lines(std::io::BufReader::new(std::fs::File::open(
-        pairs_path,
-    )?)) {
+    for line in std::io::BufRead::lines(std::io::BufReader::new(std::fs::File::open(pairs_path)?)) {
         let line = line?;
         if line.trim().is_empty() {
             continue;

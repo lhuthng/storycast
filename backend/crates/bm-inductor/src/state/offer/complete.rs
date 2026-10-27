@@ -239,7 +239,8 @@ impl Inner {
                     if let Some(b64) = cues_b64 {
                         use base64::Engine;
                         if let Ok(raw) = base64::engine::general_purpose::STANDARD.decode(&b64) {
-                            let side = bm_core::assemble::cues_path(&self.layout.final_mp3(chapter));
+                            let side =
+                                bm_core::assemble::cues_path(&self.layout.final_mp3(chapter));
                             let tmp = side.with_extension("json.incoming");
                             if std::fs::write(&tmp, &raw).is_ok() {
                                 let _ = std::fs::rename(&tmp, &side);

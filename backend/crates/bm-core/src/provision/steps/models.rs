@@ -310,10 +310,7 @@ echo stopped"#,
     pub fn sync_voice(&self, layout: &Layout, name: &str) -> Result<Vec<String>> {
         let probe = self.probe(&layout.engine);
         if !probe.reachable {
-            anyhow::bail!(
-                "{} unreachable, the next :prov covers it",
-                self.target
-            );
+            anyhow::bail!("{} unreachable, the next :prov covers it", self.target);
         }
         if probe
             .voices
@@ -346,14 +343,14 @@ echo stopped"#,
             .iter()
             .any(|v| v == name || v.starts_with(&format!("{name} ")))
         {
-            log.push(format!(
-                "{} serves {name} with no restart",
-                self.target
-            ));
+            log.push(format!("{} serves {name} with no restart", self.target));
             return Ok(log);
         }
         self.stop_tts()?;
-        log.push(format!("{} stopped TTS to reload the voice store", self.target));
+        log.push(format!(
+            "{} stopped TTS to reload the voice store",
+            self.target
+        ));
         log.push(format!(
             "{} tts: {}",
             self.target,

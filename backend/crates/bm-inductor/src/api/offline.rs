@@ -78,10 +78,7 @@ pub(crate) fn offline_drop_apply(layout: &bm_core::Layout, addr: &str) -> String
     let settings = bm_core::config::Settings::load(&layout.settings());
     let mut inner = Inner::new(layout.clone(), settings);
     inner.load_ledger();
-    format!(
-        "{} [offline — inductor was down]",
-        inner.drop_machine(addr)
-    )
+    format!("{} [offline — inductor was down]", inner.drop_machine(addr))
 }
 
 /// A sound-design write with no scheduler to notice it.

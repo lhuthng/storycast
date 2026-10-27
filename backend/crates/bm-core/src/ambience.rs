@@ -21,9 +21,9 @@ mod types;
 mod usage;
 
 pub use inject::{
-    inject_mode, inject_prompt, inject_take, inject_take_tags, injects_of, loop_copies, loop_filter,
-    loop_filter_with_tail, plan_inject_holds, plan_inject_takes, plan_injects, probe_durs,
-    probe_inject_durs, Inject, InjectEvent, InjectMode,
+    inject_mode, inject_prompt, inject_take, inject_take_tags, injects_of, loop_copies,
+    loop_filter, loop_filter_with_tail, plan_inject_holds, plan_inject_takes, plan_injects,
+    probe_durs, probe_inject_durs, Inject, InjectEvent, InjectMode,
 };
 pub use mix::apply_layers;
 pub use plan::{build_spans, plan_music, plan_windows, MusicRun, Span, Window};

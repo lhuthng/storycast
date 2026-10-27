@@ -103,7 +103,11 @@ async fn another_word_rerolls_a_new_line_on_the_speakers_own_voice() {
     // Hear the candidate, which also picks and holds the line.
     do_command(&mut app, Command::AuditionTry, &http, &job_tx);
     let candidate = last_op(&mut job_rx).expect("dispatched");
-    assert_eq!(candidate.voice.as_deref(), Some("Adam"), "the pointed voice");
+    assert_eq!(
+        candidate.voice.as_deref(),
+        Some("Adam"),
+        "the pointed voice"
+    );
     finish_audition(&mut app, "Adam");
 
     // `:another` / `^T`: a fresh line on the speaker's **own** voice — the

@@ -402,7 +402,12 @@ pub(crate) fn workspace_dir_above_target(
         })
         .and_then(|a| a.parent())
         .map(|p| p.to_path_buf())
-        .ok_or_else(|| anyhow::anyhow!("cannot locate the backend workspace above {}", cand.display()))
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "cannot locate the backend workspace above {}",
+                cand.display()
+            )
+        })
 }
 
 /// Cross builds first (they target older glibc and run anywhere), then the

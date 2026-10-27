@@ -216,11 +216,8 @@ impl R2 {
 
     fn stage(&mut self) -> Result<PathBuf> {
         if self.stage.is_none() {
-            let dir = self
-                .extends
-                .join(format!(".update.{}", std::process::id()));
-            std::fs::create_dir_all(&dir)
-                .with_context(|| format!("creating {}", dir.display()))?;
+            let dir = self.extends.join(format!(".update.{}", std::process::id()));
+            std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
             self.stage = Some(dir);
         }
         Ok(self.stage.as_ref().expect("just made it").clone())
@@ -252,13 +249,10 @@ impl Releases for R2 {
             Some(hash) => {
                 bm_core::artifact::fetch_pack(&release.url, &dest, hash, &release.tag, |_, _| {})
             }
-            None => bm_core::artifact::fetch_pack_unpinned(
-                &release.url,
-                &dest,
-                &release.tag,
-                |_, _| {},
-            )
-            .map(|(landing, _)| landing),
+            None => {
+                bm_core::artifact::fetch_pack_unpinned(&release.url, &dest, &release.tag, |_, _| {})
+                    .map(|(landing, _)| landing)
+            }
         };
         let landing = landing.map_err(|e| {
             anyhow::anyhow!(
@@ -409,8 +403,8 @@ pub fn cmd_fetch(
         }
     };
 
-    let bytes =
-        bm_core::artifact::download(&url, &part, &mut |_, _| {}).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let bytes = bm_core::artifact::download(&url, &part, &mut |_, _| {})
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
     let got = bm_core::artifact::sha256_of(&part)?;
     if let Some(expect) = &expect {
         if &got != expect {
@@ -466,8 +460,7 @@ pub fn cmd_update(
         let (owner, name) = bm_core::artifact::parse_repo(&repo)?;
         Box::new(GitHub::new(&format!("{owner}/{name}"), layout)?)
     };
-    let update =
-        bm_core::pack_update::update(&layout.assets(), source.as_mut(), dry_run, force)?;
+    let update = bm_core::pack_update::update(&layout.assets(), source.as_mut(), dry_run, force)?;
 
     println!("{repo} — {}", update.summary());
     for step in &update.steps {

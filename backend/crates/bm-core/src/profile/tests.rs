@@ -405,7 +405,10 @@ fn restamp_binding_adopts_the_live_tree_without_calling_it_drift() {
         stamped.name, "xianxia",
         "the name is the operator's, not the tree's"
     );
-    assert_eq!(stamped.version, "1", "and so is the version it was loaded as");
+    assert_eq!(
+        stamped.version, "1",
+        "and so is the version it was loaded as"
+    );
     let after = read_binding(&dir).unwrap();
     assert_eq!(after.pack, stamped, "it was written, not just computed");
     assert_eq!(

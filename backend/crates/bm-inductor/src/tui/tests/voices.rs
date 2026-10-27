@@ -320,7 +320,8 @@ async fn x_claims_a_shared_voice_for_the_row_under_the_cursor() {
     match &app.screen {
         Screen::Confirm(c) => {
             assert!(
-                c.body.iter().any(|l| l.contains("Kiên")) && c.body.iter().any(|l| l.contains("Adam")),
+                c.body.iter().any(|l| l.contains("Kiên"))
+                    && c.body.iter().any(|l| l.contains("Adam")),
                 "the confirmation names both: {:?}",
                 c.body
             );

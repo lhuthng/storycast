@@ -47,10 +47,9 @@ fn tags_are_canonical_and_voices_are_deduped() {
 
 #[test]
 fn gender_is_not_a_conflict_but_opposites_are() {
-    let both = VoicePreset::parse(
-        r#"{"label":"Both","voices":[{"voice":"x","tags":["male","female"]}]}"#,
-    )
-    .unwrap();
+    let both =
+        VoicePreset::parse(r#"{"label":"Both","voices":[{"voice":"x","tags":["male","female"]}]}"#)
+            .unwrap();
     assert_eq!(both.voices[0].tags, ["male", "female"]);
     let err =
         VoicePreset::parse(r#"{"label":"Bad","voices":[{"voice":"x","tags":["young","old"]}]}"#)

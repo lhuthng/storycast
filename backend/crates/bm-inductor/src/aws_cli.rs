@@ -59,7 +59,9 @@ pub(crate) fn aws_cmd(root: &std::path::Path, cmd: AwsCmd) -> anyhow::Result<Vec
             out.push("  a security group — EC2 → Security Groups → Create, SSH inbound".into());
             out.push("  only. The account's default group is shared with everything else".into());
             out.push("  in the default VPC, so a rule on it is a rule on all of that too.".into());
-            out.push("  Name yours with `--security-group` — `aws discover` names the default".into());
+            out.push(
+                "  Name yours with `--security-group` — `aws discover` names the default".into(),
+            );
             out.push(String::new());
             out.push("Creating, tagging and terminating boxes is money and destruction — those are `aws up` / `aws down`, next.".into());
             Ok(out)
@@ -101,7 +103,9 @@ pub(crate) fn aws_cmd(root: &std::path::Path, cmd: AwsCmd) -> anyhow::Result<Vec
             out.push("  bm-inductor aws login --access-key-id <that key id>".into());
             out.push("  bm-inductor aws ls       # the check: reaches the API as that user".into());
             out.push(String::new());
-            out.push("What the cluster does with these boxes: docs/ARCHITECTURE.md §Cluster".into());
+            out.push(
+                "What the cluster does with these boxes: docs/ARCHITECTURE.md §Cluster".into(),
+            );
             Ok(out)
         }
         AwsCmd::Login { args } => {

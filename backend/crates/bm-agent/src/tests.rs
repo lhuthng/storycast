@@ -52,7 +52,10 @@ fn the_beat_carries_the_voice_store_hash() {
         bm_core::pool::voices_store_hash(&dir, "vieneu"),
         "the beat reports the store it renders from"
     );
-    assert!(beat.voices_hash.is_some(), "a store on disk is never silent");
+    assert!(
+        beat.voices_hash.is_some(),
+        "a store on disk is never silent"
+    );
     std::fs::remove_dir_all(&dir).ok();
 }
 

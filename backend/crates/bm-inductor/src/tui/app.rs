@@ -398,7 +398,10 @@ impl App {
         if self.play_audition(true, Some(audio)) {
             self.set_status(
                 Level::Info,
-                format!("cached · “{}” ({voice})", bm_core::util::head_chars(text, 48)),
+                format!(
+                    "cached · “{}” ({voice})",
+                    bm_core::util::head_chars(text, 48)
+                ),
             );
         }
         // A replay that failed already left its own status standing; rendering

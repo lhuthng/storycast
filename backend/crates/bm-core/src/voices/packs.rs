@@ -193,7 +193,10 @@ pub fn install(layout: &Layout, name: &str, opts: &Options) -> Result<Report> {
     if let Some(tree) = &opts.tree {
         return install_tree(layout, name, tree, &Origin::checkout());
     }
-    let pinned = Packs::load(layout).packs.into_iter().find(|p| p.name == name);
+    let pinned = Packs::load(layout)
+        .packs
+        .into_iter()
+        .find(|p| p.name == name);
     // A pin is only reusable while the caller is not asking for another version.
     let mut pin = pinned
         .filter(|p| !p.version.is_empty() && !p.sha256.is_empty() && !opts.latest)
@@ -238,8 +241,7 @@ pub fn install(layout: &Layout, name: &str, opts: &Options) -> Result<Report> {
         .join("tmp")
         .join(format!("voices-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&scratch);
-    std::fs::create_dir_all(&scratch)
-        .with_context(|| format!("creating {}", scratch.display()))?;
+    std::fs::create_dir_all(&scratch).with_context(|| format!("creating {}", scratch.display()))?;
     let archive = scratch.join(&file);
     let tree = scratch.join("tree");
     let report = (|| -> Result<Report> {
@@ -366,11 +368,7 @@ fn read_pack(tree: &Path, name: &str) -> Result<Pack> {
 fn pair_slots(slots: &[PresetVoice], clones: &BTreeMap<String, PathBuf>) -> Vec<Option<String>> {
     slots
         .iter()
-        .map(|slot| {
-            clones
-                .contains_key(&slot.voice)
-                .then(|| slot.voice.clone())
-        })
+        .map(|slot| clones.contains_key(&slot.voice).then(|| slot.voice.clone()))
         .collect()
 }
 
@@ -520,7 +518,10 @@ fn retarget_cast(layout: &Layout, aliases: &BTreeMap<String, String>) -> usize {
     let mut changed = 0;
     for entry in entries.flatten() {
         let path = entry.path();
-        let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or_default();
+        let stem = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or_default();
         if !stem.starts_with("cast-") || path.extension().and_then(|e| e.to_str()) != Some("json") {
             continue;
         }

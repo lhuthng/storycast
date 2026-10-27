@@ -403,7 +403,10 @@ async fn run_one(
                 );
                 line
             };
-            println!("dispatch: {} {task_id} — send failed: {e}; {line}", peer.addr);
+            println!(
+                "dispatch: {} {task_id} — send failed: {e}; {line}",
+                peer.addr
+            );
             return;
         }
     };
@@ -471,7 +474,10 @@ async fn run_one(
     if !status.is_success() {
         state.lock().await.push_event(
             "warn",
-            format!("[{}] {task_id} — worker answered {status}: {head}", peer.addr),
+            format!(
+                "[{}] {task_id} — worker answered {status}: {head}",
+                peer.addr
+            ),
         );
         println!(
             "dispatch: {} {task_id} — worker answered {status}: {head}",

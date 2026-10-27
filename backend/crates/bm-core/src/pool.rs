@@ -364,7 +364,10 @@ pub fn enroll_manifest(layout: &crate::Layout) -> Vec<String> {
         }
         match crate::voices::store_kind(&layout.engine) {
             crate::voices::VoiceStore::Presets => {
-                let label = pool.get(&name).map(|e| e.label.as_str()).unwrap_or_default();
+                let label = pool
+                    .get(&name)
+                    .map(|e| e.label.as_str())
+                    .unwrap_or_default();
                 // An entry the store already holds under the clone's own name
                 // carries the encoding this machine cannot rebuild: re-key it
                 // before reaching for a venv that may not be here.
@@ -422,15 +425,16 @@ fn adopt_store_entry(layout: &crate::Layout, name: &str, label: &str) -> bool {
     if let Some(presets) = doc["presets"].as_object_mut() {
         changed |= presets.remove(label).is_some();
     }
-    changed && crate::util::atomic_write(&path, &serde_json::to_string(&doc).unwrap_or_default()).is_ok()
+    changed
+        && crate::util::atomic_write(&path, &serde_json::to_string(&doc).unwrap_or_default())
+            .is_ok()
 }
 
 /// Hash of the baked voice store, computed the same way on both sides of the
 /// render gate: equality means the box speaks everything local speaks. `None`
 /// when the store is not on disk (no engine tree yet): no opinion, not a no.
 pub fn voices_store_hash(root: &Path, engine: &str) -> Option<String> {
-    let bytes =
-        std::fs::read(root.join("engines").join(engine).join("models/voices.json")).ok()?;
+    let bytes = std::fs::read(root.join("engines").join(engine).join("models/voices.json")).ok()?;
     Some(format!("{:x}", Sha256::digest(&bytes)))
 }
 

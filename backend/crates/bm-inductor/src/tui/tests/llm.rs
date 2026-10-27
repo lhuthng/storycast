@@ -182,7 +182,10 @@ async fn the_add_row_is_reached_by_arrows_and_answers_enter_and_n() {
     // No provider key acts on that row, and it says so rather than guessing.
     handle_key(&mut app, key(KeyCode::Char('a')), &http, &jobs).await;
     let cfg = bm_core::config::LlmConfig::load(&app.layout.root);
-    assert!(cfg.active.is_empty(), "the add row is not a provider to activate");
+    assert!(
+        cfg.active.is_empty(),
+        "the add row is not a provider to activate"
+    );
     match app.screen.clone() {
         Screen::Llm(v) => assert_eq!(v.cursor, 1, "the screen stays where it was"),
         other => panic!("a refused key must not leave the screen: {other:?}"),

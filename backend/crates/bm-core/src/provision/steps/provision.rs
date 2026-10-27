@@ -391,7 +391,8 @@ pub fn provision(
         Ok(v) => log.push(format!(
             "[{}] {v}, merge stays disabled on this box until sox is present (apt/dnf install sox)",
             m.id
-        )),        Err(e) => log.push(format!("[{}] sox install check failed: {e}", m.id)),
+        )),
+        Err(e) => log.push(format!("[{}] sox install check failed: {e}", m.id)),
     }
     // The sidecar loads its voice roster at startup. A models push therefore
 

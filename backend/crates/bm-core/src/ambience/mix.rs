@@ -203,7 +203,10 @@ pub fn apply_layers(
     let mut fx_log: Vec<FxReport> = Vec::new();
     // Every take in the pool, so a looped bed knows how long its clip is. The
     let fx_durs = probe_durs(
-        &effect_pool.values().flat_map(|s| s.files.clone()).collect::<Vec<String>>(),
+        &effect_pool
+            .values()
+            .flat_map(|s| s.files.clone())
+            .collect::<Vec<String>>(),
         assets,
         "effect",
     );

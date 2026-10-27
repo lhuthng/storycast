@@ -1,7 +1,7 @@
 use super::mix::clip_path;
+use super::mix::effect_bed_graph;
 use super::mix::layer_graph;
 use super::mix::level_expr;
-use super::mix::effect_bed_graph;
 use super::mix::music_fades;
 use super::mix::music_run_graph;
 use super::mix::music_starts;
@@ -300,13 +300,19 @@ fn inject_usage_reads_the_scripts_and_counts_a_stop() {
         ],
         "named by one chapter, drawn by another's query, and the use says which"
     );
-    assert_eq!(usage.len(), 3, "a clip nothing reaches is reported nowhere: {usage:?}");
+    assert_eq!(
+        usage.len(),
+        3,
+        "a clip nothing reaches is reported nowhere: {usage:?}"
+    );
     assert!(
         !usage.contains_key("unreached"),
         "no query draws `unreached`: {usage:?}"
     );
     assert!(
-        usage.values().all(|uses| !uses.iter().any(|u| u.by.contains("ch11"))),
+        usage
+            .values()
+            .all(|uses| !uses.iter().any(|u| u.by.contains("ch11"))),
         "a malformed item is nobody's use"
     );
 }
@@ -1034,7 +1040,10 @@ fn a_renamed_mood_with_its_id_plays_the_same_take() {
     }
     let before = plan_music(&[slot("quiet", 0.0, 10.0)], &[], 7, &pool, &palette);
     let after = plan_music(&[slot("serene", 0.0, 10.0)], &[], 7, &pool, &palette);
-    assert_eq!(before[0].file, after[0].file, "the seed is the id, not the key");
+    assert_eq!(
+        before[0].file, after[0].file,
+        "the seed is the id, not the key"
+    );
 }
 
 #[test]
@@ -1113,12 +1122,16 @@ fn the_declared_mood_wins_and_the_legacy_shim_covers_scripts_without_one() {
             .map(|(s, m)| json!({"speaker": "A", "scene": s, "music": m, "text": "line"}))
             .collect()
     };
-    let runs_of =
-        |n: usize| crate::assemble::Planned::plan(&vec![json!({"speaker": "A", "text": "line"}); n]).runs();
+    let runs_of = |n: usize| {
+        crate::assemble::Planned::plan(&vec![json!({"speaker": "A", "text": "line"}); n]).runs()
+    };
 
     // Declared values are used as-is.
     let segs = build(&[("street-morning", "battle"), ("street-morning", "battle")]);
-    assert_eq!(run_music(&segs, &runs_of(2), &cfg), vec!["battle", "battle"]);
+    assert_eq!(
+        run_music(&segs, &runs_of(2), &cfg),
+        vec!["battle", "battle"]
+    );
 
     // No value anywhere: the shim scores the scene label instead, so the
     let segs = build(&[("street-morning", ""), ("street-morning", "")]);
@@ -1951,7 +1964,10 @@ fn a_looped_effect_bed_crossfades_its_seams() {
     let cfg = shipped_map();
     let xf = cfg.layers.effect.loop_xfade_s;
     let copies = loop_copies(75.0, 60.0, xf).unwrap();
-    assert!(copies >= 2, "{copies} copies for a 75 s window out of a 60 s bed");
+    assert!(
+        copies >= 2,
+        "{copies} copies for a 75 s window out of a 60 s bed"
+    );
     let g = effect_bed_graph(75.0, 60.0, xf, 0.5);
     assert_eq!(g.matches("acrossfade=").count(), copies - 1, "{g}");
     assert!(!g.contains("stream_loop"), "the loop is a filter: {g}");

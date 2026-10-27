@@ -92,13 +92,7 @@ impl Judge {
     /// `P(yes)`: the sound is the right one for those words. The shipped
     /// question — the claim is scored directly, which is the framing that
     /// carries signal (see `docs/` and the probe's `gate` mode for the numbers).
-    pub fn p_yes(
-        &mut self,
-        raw: &str,
-        tagged: &str,
-        replaces: &str,
-        sound: &str,
-    ) -> Result<f32> {
+    pub fn p_yes(&mut self, raw: &str, tagged: &str, replaces: &str, sound: &str) -> Result<f32> {
         let instructions = claim(raw, tagged, replaces, sound);
         let p = self.score(&instructions, tagged, &NOUL_OPTIONS, Q_NOUL)?;
         Ok(p[1])

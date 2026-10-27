@@ -710,9 +710,7 @@ fn land_pack_with(
         let history = stage.join(crate::pack_migration::MIGRATIONS_FILE);
         let migrations = if history.is_file() {
             let kept = dest.with_extension(crate::pack_migration::MIGRATIONS_FILE);
-            std::fs::copy(&history, &kept)
-                .ok()
-                .map(|_| kept)
+            std::fs::copy(&history, &kept).ok().map(|_| kept)
         } else {
             None
         };

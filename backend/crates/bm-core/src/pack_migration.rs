@@ -120,11 +120,7 @@ impl Report {
 
     /// One line per decision, for the operator.
     pub fn lines(&self) -> Vec<String> {
-        let mut out: Vec<String> = self
-            .applied
-            .iter()
-            .map(|c| c.line("renamed"))
-            .collect();
+        let mut out: Vec<String> = self.applied.iter().map(|c| c.line("renamed")).collect();
         out.extend(self.skipped.iter().map(|c| c.line("kept")));
         out.extend(self.missing.iter().map(|c| c.line("unresolved")));
         out
@@ -142,8 +138,8 @@ pub fn read(tree: &Path) -> Result<Option<Migrations>> {
 
 /// [`read`] for a path the fetcher kept beside the tree.
 pub fn read_file(path: &Path) -> Result<Migrations> {
-    let text = std::fs::read_to_string(path)
-        .with_context(|| format!("reading {}", path.display()))?;
+    let text =
+        std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
     let doc: Migrations =
         serde_json::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
     if doc.format > FORMAT {
@@ -173,7 +169,14 @@ pub fn merge(docs: &[Migrations]) -> Result<Renames> {
                 )?;
             }
             for (from, to) in &step.inject {
-                put(&mut out.inject, from, to, &doc.pack, &step.version, "inject")?;
+                put(
+                    &mut out.inject,
+                    from,
+                    to,
+                    &doc.pack,
+                    &step.version,
+                    "inject",
+                )?;
             }
         }
     }
@@ -275,8 +278,8 @@ pub fn apply(layout: &Layout, renames: &Renames) -> Result<Report> {
     for path in layout.scripts() {
         let text = std::fs::read_to_string(&path)
             .with_context(|| format!("reading {}", path.display()))?;
-        let mut doc: Value = serde_json::from_str(&text)
-            .with_context(|| format!("parsing {}", path.display()))?;
+        let mut doc: Value =
+            serde_json::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
         let touched = rewrite(&mut doc, &active);
         if touched == 0 {
             continue;

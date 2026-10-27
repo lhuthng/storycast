@@ -4,14 +4,14 @@ use crate::tui::{
     input::{op_key, urlencode},
     style::{Level, LogLine},
 };
+#[allow(unused_imports)]
+pub(crate) use aws::instance_machines;
 use aws::job_aws_discover;
 use aws::job_aws_down;
 use aws::job_aws_login;
 pub(crate) use aws::job_aws_pool;
 use aws::job_aws_up;
 use aws::job_relink_machine;
-#[allow(unused_imports)]
-pub(crate) use aws::instance_machines;
 use backend::job_drop_machine;
 use backend::job_save_task_policy;
 use backend::job_set_accepting;
