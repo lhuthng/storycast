@@ -134,7 +134,7 @@ pub(crate) static WORDS: &[Word] = &[
     Word { key: Some('P'), names: &["reprovision", "reprov"], desc: Some("re-provision it, forcing past the skip-if-configured check"), cmd: Command::Provision { force: true } },
     Word { key: Some('d'), names: &["drop", "remove"], desc: Some("drop the selected machine from the cluster registry"), cmd: Command::DropMachine },
     Word { key: None, names: &["relink"], desc: Some("re-point a drifted EC2 box at its current public IP — matched by instance id, then :prov"), cmd: Command::Relink },
-    Word { key: Some('t'), names: &["translate"], desc: Some("enqueue crawl + digest for a chapter range"), cmd: Command::Translate },
+    Word { key: Some('t'), names: &["translate"], desc: Some("enqueue crawl + digest for a chapter range — re-issuing it re-authors the range and trims pending work outside it"), cmd: Command::Translate },
     Word { key: Some('c'), names: &["crawl"], desc: Some("save the URL template, then probe-crawl one chapter"), cmd: Command::CrawlSetup },
     Word { key: Some('i'), names: &["import"], desc: Some("adopt a chapter from a file — `:import 34 /tmp/ch34.txt`"), cmd: Command::Import },
     Word { key: Some('v'), names: &["voices"], desc: Some("re-read the roster and refill gaps"), cmd: Command::Voices },

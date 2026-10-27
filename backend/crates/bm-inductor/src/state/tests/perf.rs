@@ -86,9 +86,10 @@ fn register(inner: &mut Inner, n: u8) {
     inner
         .beats
         .insert(worker.clone(), beat_with_load(&worker, &addr, None));
-    inner
-        .caps
-        .insert(worker.clone(), vec!["render-segments".into(), "merge".into()]);
+    inner.caps.insert(
+        worker.clone(),
+        vec!["render-segments".into(), "merge".into()],
+    );
 }
 
 /// Put the ledger back the way an offer found it, so every run measures the
@@ -208,9 +209,13 @@ fn scheduler_cost_by_ledger_size() {
             .map(|m| m.len())
             .unwrap_or(0);
         let load = timed(&mut inner, |_| {}, reload);
-        let reap = timed(&mut inner, |_| {}, |i| {
-            black_box(i.reap());
-        });
+        let reap = timed(
+            &mut inner,
+            |_| {},
+            |i| {
+                black_box(i.reap());
+            },
+        );
         let cold = timed(&mut inner, unreserve, |i| {
             black_box(i.offer(ASKER));
         });

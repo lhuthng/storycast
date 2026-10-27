@@ -109,8 +109,15 @@ impl Inner {
     }
 
     fn materialize_render_takes_with(&mut self, chapter: u32, adopt: bool) -> Option<RenderPlan> {
-        let engine = self.settings.engine.clone();
         let plan = self.refresh_render_plan(chapter, adopt)?;
+        let live = self.record_render_takes(chapter, &plan);
+        self.prune_render_takes(chapter, &live);
+        Some(plan)
+    }
+
+    /// The plan's takes as ledger rows, returning the positions it names.
+    fn record_render_takes(&mut self, chapter: u32, plan: &RenderPlan) -> Vec<usize> {
+        let engine = self.settings.engine.clone();
         let seg_dir = self.layout.seg_dir(&engine, chapter);
         let now = now_secs();
         // The chapter-granular row is superseded by its takes.
@@ -151,6 +158,11 @@ impl Inner {
                 }
             }
         }
+        live
+    }
+
+    /// Drop take rows the plan no longer names.
+    fn prune_render_takes(&mut self, chapter: u32, live: &[usize]) {
         let stale: Vec<String> = self
             .tasks
             .iter()
@@ -161,7 +173,6 @@ impl Inner {
         for k in stale {
             self.tasks.remove(&k);
         }
-        Some(plan)
     }
 
     /// The offer's payload for one take: everything needed to speak exactly
@@ -199,6 +210,11 @@ impl Inner {
     }
 
     /// Materialise the takes of every chapter the ledger already knows about.
+    /// A chapter whose plan is current is *read*, not re-planned: the rows
+    /// follow the recorded plan, and planning the whole book on every boot is
+    /// minutes. A script written after its plan is replanned as usual.
+    /// shortcut: a cast or bible edited while the backend was down is picked
+    /// up when that chapter is next planned, not here.
     pub(crate) fn materialize_known_render_takes(&mut self, skip: std::ops::Range<u32>) {
         let mut chapters: Vec<u32> = self
             .tasks
@@ -209,9 +225,42 @@ impl Inner {
             .collect();
         chapters.sort_unstable();
         chapters.dedup();
+        let mut pruned: std::collections::HashMap<u32, Vec<usize>> =
+            std::collections::HashMap::new();
         for n in chapters {
-            self.materialize_render_takes(n);
+            match RenderPlan::load(&self.layout.plan(n)) {
+                Some(plan) if !self.script_newer_than(n, plan.generated) => {
+                    pruned.insert(n, self.record_render_takes(n, &plan));
+                }
+                _ => {
+                    self.materialize_render_takes(n);
+                }
+            }
         }
+        // One retain for the whole book: pruning per chapter scans every task.
+        if !pruned.is_empty() {
+            self.tasks.retain(|_, t| {
+                if t.stage != Stage::Render {
+                    return true;
+                }
+                match pruned.get(&t.chapter) {
+                    Some(live) => t.take.map(|p| live.contains(&p)).unwrap_or(false),
+                    None => true,
+                }
+            });
+        }
+    }
+
+    /// Whether the chapter's script was written after the plan was generated.
+    /// Second-granular, like `generated`: an edit inside that same second is
+    /// the one change this check cannot see.
+    fn script_newer_than(&self, chapter: u32, generated: u64) -> bool {
+        std::fs::metadata(self.layout.script(chapter))
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs() > generated)
+            .unwrap_or(false)
     }
 
     /// Establish the render plans the routine pass would have written.

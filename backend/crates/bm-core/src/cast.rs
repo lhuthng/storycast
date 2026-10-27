@@ -5,7 +5,7 @@ use crate::voices::VoicePolicy;
 use anyhow::Result;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ops::{Deref, DerefMut};
 use std::path::Path;
 
@@ -167,6 +167,15 @@ pub fn policy_for_bible(engine: &str, layout: &crate::Layout) -> VoicePolicy {
     }
 }
 
+/// [`crate::digest::resolve_speaker`] with one lookup per surface form: a
+/// chapter repeats its few speakers on every line, and the resolver walks the
+/// whole bible each time.
+fn resolved(bible: &Value, memo: &mut HashMap<String, String>, name: &str) -> String {
+    memo.entry(name.to_string())
+        .or_insert_with(|| crate::digest::resolve_speaker(bible, name))
+        .clone()
+}
+
 /// Resolve the full cast for a chapter, assigning any missing speaker.
 pub fn load_cast(
     script_path: &Path,
@@ -178,11 +187,15 @@ pub fn load_cast(
 ) -> Result<Cast> {
     // --- gather speakers and voice hints -------------------------------------
     let bible = crate::digest::load_bible(bible_path);
+    let mut memo: HashMap<String, String> = HashMap::new();
     let mut hints: BTreeMap<String, String> = BTreeMap::new();
     let mut speakers: Vec<String> = vec!["Narrator".to_string()];
     let mut seen: HashSet<String> = speakers.iter().cloned().collect();
-    let add_speaker = |speakers: &mut Vec<String>, seen: &mut HashSet<String>, name: &str| {
-        let name = crate::digest::resolve_speaker(&bible, name);
+    let add_speaker = |speakers: &mut Vec<String>,
+                       seen: &mut HashSet<String>,
+                       memo: &mut HashMap<String, String>,
+                       name: &str| {
+        let name = resolved(&bible, memo, name);
         if !name.is_empty() && seen.insert(name.clone()) {
             speakers.push(name);
         }
@@ -201,22 +214,22 @@ pub fn load_cast(
                     continue;
                 }
                 hints.insert(
-                    crate::digest::resolve_speaker(&bible, name),
+                    resolved(&bible, &mut memo, name),
                     c.get("voice_hint")
                         .and_then(|h| h.as_str())
                         .unwrap_or("")
                         .to_lowercase(),
                 );
-                add_speaker(&mut speakers, &mut seen, name);
+                add_speaker(&mut speakers, &mut seen, &mut memo, name);
             }
         }
         for name in strings(data.get("roster")) {
-            add_speaker(&mut speakers, &mut seen, &name);
+            add_speaker(&mut speakers, &mut seen, &mut memo, &name);
         }
         if let Some(segments) = data.get("segments").and_then(|s| s.as_array()) {
             for s in segments {
                 if let Some(sp) = s.get("speaker").and_then(|v| v.as_str()) {
-                    add_speaker(&mut speakers, &mut seen, sp);
+                    add_speaker(&mut speakers, &mut seen, &mut memo, sp);
                 }
             }
         }

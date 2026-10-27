@@ -20,6 +20,12 @@ impl Layout {
         self.state_file("ledger.json")
     }
 
+    /// Derived speaker index: which chapters name which speakers. Rebuilt from
+    /// the scripts' own timestamps, so it is a cache, never a source of truth.
+    pub fn speaker_index(&self) -> PathBuf {
+        self.state_file("speaker-index.json")
+    }
+
     /// Workspace state file: under the workspace, except in legacy mode
     fn state_file(&self, name: &str) -> PathBuf {
         if self.work == self.root && !self.root.join("settings.json").is_file() {

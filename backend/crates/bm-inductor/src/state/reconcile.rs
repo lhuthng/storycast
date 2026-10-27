@@ -1,3 +1,4 @@
+use super::index::SpeakerIndex;
 use super::{lease_for, Inner};
 use bm_proto::{now_secs, Machine, MachineState, Stage, Task, TaskState};
 use serde_json::{json, Value};
@@ -184,27 +185,11 @@ impl Inner {
         let mut chapters: Vec<u32> = Vec::new();
         let mut files = 0u32;
         let _ = engine;
-        // Speakers are matched literally *or* through the bible. Literally,
-        let bible = bm_core::digest::load_bible(&self.layout.bible());
-        for (n, sp) in self.script_paths() {
-            let data: Value = bm_core::read_json(&sp).unwrap_or(Value::Null);
-            let segments = data
-                .get("segments")
-                .and_then(|s| s.as_array())
-                .cloned()
-                .unwrap_or_default();
-            let planned = bm_core::assemble::Planned::plan(&segments);
-            let hears = planned.runs().iter().any(|run| {
-                run.speaker == character
-                    || bm_core::digest::resolve_speaker(&bible, &run.speaker) == character
-            });
-            // A chapter can carry this speaker's voice without hearing them:
-            let in_plan = bm_core::assemble::RenderPlan::load(&self.layout.plan(n))
-                .map(|p| p.takes.iter().any(|t| t.speaker == character))
-                .unwrap_or(false);
-            if !hears && !in_plan {
-                continue;
-            }
+        // The index is the whole point: ask which chapters name this speaker
+        // instead of parsing the book. Literal and bible-alias matches are both
+        // already resolved into it, and a plan-only chapter is included too.
+        let index = SpeakerIndex::load(&self.layout);
+        for n in index.chapters_hearing(&[character.to_string()]) {
             let superseded = self.resume_render_after_edit(n, "requeued: voice changed");
             if superseded == 0 && self.render_takes_done(n) {
                 continue;
@@ -221,38 +206,10 @@ impl Inner {
         self.chapters_hearing_names(&[character.to_string()])
     }
 
-    /// The same predicate for a whole plan at once. `chapters_hearing` walks
+    /// Chapters that would hear any of these names, under the name or any
+    /// alias, plus any chapter whose recorded plan still holds the name.
     pub(crate) fn chapters_hearing_names(&self, names: &[String]) -> Vec<u32> {
-        let bible = bm_core::digest::load_bible(&self.layout.bible());
-        self.chapters_hearing(&bible, names)
-    }
-
-    /// Chapters that would hear these names: a script speaking them
-    fn chapters_hearing(&self, bible: &Value, names: &[String]) -> Vec<u32> {
-        let mut out = Vec::new();
-        for (n, sp) in self.script_paths() {
-            let data: Value = bm_core::read_json(&sp).unwrap_or(Value::Null);
-            let segments = data
-                .get("segments")
-                .and_then(|s| s.as_array())
-                .cloned()
-                .unwrap_or_default();
-            let planned = bm_core::assemble::Planned::plan(&segments);
-            let heard = names.iter().any(|name| {
-                planned.runs().iter().any(|run| {
-                    run.speaker == *name
-                        || bm_core::digest::resolve_speaker(bible, &run.speaker) == *name
-                })
-            });
-            let in_plan = bm_core::assemble::RenderPlan::load(&self.layout.plan(n))
-                .map(|p| p.takes.iter().any(|t| names.contains(&t.speaker)))
-                .unwrap_or(false);
-            if (heard || in_plan) && !out.contains(&n) {
-                out.push(n);
-            }
-        }
-        out.sort();
-        out
+        SpeakerIndex::load(&self.layout).chapters_hearing(names)
     }
 
     /// Chapters whose raw text still names any of these (fold-insensitive):
@@ -365,10 +322,8 @@ impl Inner {
         manual: bool,
     ) -> anyhow::Result<String> {
         // No cluster-wide quiet: only the chapters this merge rewrites (plus
-        let scan: Value =
-            bm_core::read_json(&self.layout.bible()).unwrap_or(json!({"characters": []}));
         let absorbs: Vec<String> = merges.iter().flat_map(|(_, a)| a.iter().cloned()).collect();
-        let affected = self.chapters_hearing(&scan, &absorbs);
+        let affected = self.chapters_hearing_names(&absorbs);
         self.ensure_mergeable(&absorbs, &affected)?;
         self.reconcile_apply(merges, manual)
     }

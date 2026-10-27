@@ -273,6 +273,29 @@ impl Inner {
         true
     }
 
+    /// Re-authoring the range is also the way to shrink it: pending work for
+    /// chapters outside `[start, start+count)` was never asked for, so it goes.
+    /// Done rows stay as history, shelved and failed keep their record, and
+    /// what is assigned or running finishes on its own.
+    pub fn trim_outside_range(&mut self, start: u32, count: u32) -> usize {
+        let end = start.saturating_add(count.saturating_sub(1));
+        let before = self.tasks.len();
+        self.tasks.retain(|_, t| {
+            !matches!(t.state, TaskState::Pending) || (start <= t.chapter && t.chapter <= end)
+        });
+        let dropped = before - self.tasks.len();
+        if dropped > 0 {
+            self.push_event(
+                "ok",
+                format!(
+                    "trimmed {dropped} pending task(s) outside ch{start}..ch{end} — the range was re-authored"
+                ),
+            );
+            self.save();
+        }
+        dropped
+    }
+
     /// Enqueue crawl+digest for chapters missing scripts (idempotent).
     pub fn enqueue_translate(&mut self, start: u32, count: u32) -> (usize, usize) {
         let (mut crawls, mut digests) = (0, 0);

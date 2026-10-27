@@ -503,7 +503,8 @@ fn swap_invalidates_only_the_characters_files() {
     inner.materialize_render_takes(1);
 
     let msg = inner.op_swap_voice("A", "Minh Triết").unwrap();
-    assert!(msg.contains("Đức Trí -> Minh Triết"), "{msg}");assert!(!seg.join("0000_Đức Trí.wav").exists(), "stale take goes");
+    assert!(msg.contains("Đức Trí -> Minh Triết"), "{msg}");
+    assert!(!seg.join("0000_Đức Trí.wav").exists(), "stale take goes");
     assert!(!seg.join("0001_Đức Trí.wav").exists(), "stale take goes");
     assert!(
         seg.join("0002_Adam.wav").exists(),
@@ -1170,7 +1171,9 @@ fn merge_offer_requires_the_capability_a_box_without_ffmpeg_lacks() {
             t.state = TaskState::Done;
         }
     }
-    inner.tasks.insert("merge:5".into(), Task::new(5, Stage::Merge));
+    inner
+        .tasks
+        .insert("merge:5".into(), Task::new(5, Stage::Merge));
     inner.workers.insert("bare".into(), "192.0.2.5".into());
     inner.caps.insert(
         "bare".into(),
@@ -2067,6 +2070,62 @@ fn a_render_row_outside_the_reconciled_range_is_materialised_at_startup() {
 }
 
 #[test]
+fn a_current_plan_is_read_but_a_changed_script_is_replanned() {
+    // The sweep runs over every chapter the ledger knows, and planning them
+    // all costs minutes on a book. A plan already on disk is the record of
+    // the same inputs, so the rows are restored from it, not rebuilt.
+    let (_d, mut inner) = fixture();
+    let layout = inner.layout.clone();
+    std::fs::write(
+        layout.script(9),
+        r#"{"segments":[{"speaker":"A","text":"một"}]}"#,
+    )
+    .unwrap();
+    std::fs::write(layout.cast("vieneu"), r#"{"A":"Đức Trí"}"#).unwrap();
+    let plan = inner.materialize_render_takes(9).expect("plannable");
+    assert_eq!(plan.takes.len(), 1);
+    // A merge row keeps the chapter in the sweep; the take row is missing,
+    // the way a crash between the plan write and the ledger save leaves it.
+    inner
+        .tasks
+        .insert("merge:9".into(), Task::new(9, Stage::Merge));
+    inner.tasks.remove("render:9:0");
+    // A script that can no longer be read: a re-plan would give no takes, so
+    // the row coming back proves the stored plan was the source.
+    std::fs::remove_file(layout.script(9)).unwrap();
+
+    inner.materialize_known_render_takes(0..0);
+    assert_eq!(
+        inner.render_take_ids(9),
+        vec!["render:9:0".to_string()],
+        "the recorded plan restores the row without planning"
+    );
+
+    // ...and a script written after the plan *is* replanned: age the plan,
+    // then grow the chapter by one line.
+    std::fs::write(
+        layout.script(9),
+        r#"{"segments":[{"speaker":"A","text":"một"}]}"#,
+    )
+    .unwrap();
+    let mut plan = bm_core::assemble::RenderPlan::load(&layout.plan(9)).unwrap();
+    plan.generated -= 60;
+    plan.save(&layout.plan(9)).unwrap();
+    std::fs::write(
+        layout.script(9),
+        r#"{"segments":[{"speaker":"A","text":"một"},{"speaker":"A","text":"hai"}]}"#,
+    )
+    .unwrap();
+
+    inner.materialize_known_render_takes(0..0);
+    assert_eq!(
+        inner.render_take_ids(9).len(),
+        2,
+        "the changed script's takes replace the plan"
+    );
+}
+
+#[test]
 fn an_unplannable_chapter_names_its_cause() {
     // The generic failure cost this run a diagnosis: 15 chapters reported
     let (_d, inner) = fixture();
@@ -2835,13 +2894,13 @@ fn swap_refuses_while_workers_are_mid_play() {
 /// void.
 #[test]
 fn no_surgery_refuses_a_busy_cluster_and_every_one_of_them_parks() {
-    use bm_proto::ExclusiveOp;        // Each arm the API dispatches. If a new surgery is added to the API
-        // and not listed here, it is free to reintroduce the refusal.
-        // `swap-voice` is absent on purpose: a voice swap never waits, so
-        // there is nothing to park (`a_swap_runs_at_once_even_with_a_box_mid_play`
-        // is its guard).
-        let surgeries: Vec<(&str, ExclusiveOp)> = vec![
-            (
+    use bm_proto::ExclusiveOp; // Each arm the API dispatches. If a new surgery is added to the API
+                               // and not listed here, it is free to reintroduce the refusal.
+                               // `swap-voice` is absent on purpose: a voice swap never waits, so
+                               // there is nothing to park (`a_swap_runs_at_once_even_with_a_box_mid_play`
+                               // is its guard).
+    let surgeries: Vec<(&str, ExclusiveOp)> = vec![
+        (
             "remix",
             ExclusiveOp::Remix {
                 speed: 1.0,
@@ -6510,7 +6569,9 @@ fn dropping_a_box_forgets_it_and_gives_its_rows_back() {
     inner.machines.insert("18.1.1.1".into(), m);
     inner.persist_box("18.1.1.1", "box-1");
     inner.workers.insert("w1".into(), "18.1.1.1".into());
-    inner.caps.insert("w1".into(), vec!["render-segments".into()]);
+    inner
+        .caps
+        .insert("w1".into(), vec!["render-segments".into()]);
     inner
         .beats
         .insert("w1".into(), beat_with_load("w1", "18.1.1.1", None));
@@ -6535,7 +6596,11 @@ fn dropping_a_box_forgets_it_and_gives_its_rows_back() {
     );
     assert!(inner.dropped.contains("18.1.1.1"));
     let t = &inner.tasks["render:7"];
-    assert_eq!(t.state, TaskState::Pending, "the row it held is back in the pool");
+    assert_eq!(
+        t.state,
+        TaskState::Pending,
+        "the row it held is back in the pool"
+    );
     assert!(t.holders().is_empty());
     assert!(t.detail.contains("machine dropped"), "{}", t.detail);
     assert!(line.contains("1 in-flight row(s)"), "{line}");
@@ -7234,4 +7299,39 @@ fn counts_buckets_the_ledger_by_stage_and_state() {
         "a state no row holds is no bucket: {counts:?}"
     );
     assert_eq!(counts.len(), 3, "and a stage with no rows is none either");
+}
+
+#[test]
+fn reauthoring_the_range_trims_the_pending_work_outside_it() {
+    let (_d, mut inner) = fixture();
+    for n in [10u32, 12, 14] {
+        for stage in [Stage::Crawl, Stage::Digest, Stage::Merge] {
+            inner.ensure_task(n, stage);
+        }
+    }
+    // The mistaken range, far outside ch10..ch14.
+    for n in [1006u32, 5000] {
+        for stage in [Stage::Crawl, Stage::Digest, Stage::Merge, Stage::Render] {
+            inner.ensure_task(n, stage);
+        }
+    }
+    // What is in flight or already settled outside the range stays.
+    inner.ensure_task(5000, Stage::Render).state = TaskState::Assigned;
+    inner.ensure_task(1006, Stage::Crawl).state = TaskState::Shelved;
+    inner.ensure_task(5000, Stage::Digest).state = TaskState::Failed;
+    inner.ensure_task(12, Stage::Crawl).state = TaskState::Done;
+
+    let trimmed = inner.trim_outside_range(10, 5);
+    assert_eq!(trimmed, 5, "only the pendings outside go: {trimmed}");
+    assert!(!inner.tasks.contains_key("digest:1006"));
+    assert!(!inner.tasks.contains_key("merge:5000"));
+    assert!(!inner.tasks.contains_key("crawl:5000"));
+    assert!(!inner.tasks.contains_key("render:1006"));
+    assert_eq!(inner.tasks["crawl:12"].state, TaskState::Done);
+    assert_eq!(inner.tasks["merge:14"].state, TaskState::Pending);
+    assert_eq!(inner.tasks["render:5000"].state, TaskState::Assigned);
+    assert_eq!(inner.tasks["crawl:1006"].state, TaskState::Shelved);
+    assert_eq!(inner.tasks["digest:5000"].state, TaskState::Failed);
+    // A second pass with the same range has nothing left to trim.
+    assert_eq!(inner.trim_outside_range(10, 5), 0);
 }

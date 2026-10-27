@@ -7,6 +7,7 @@ use std::collections::{BTreeSet, HashMap, VecDeque};
 
 mod design;
 mod exclusive;
+mod index;
 mod ledger;
 mod observe;
 mod offer;

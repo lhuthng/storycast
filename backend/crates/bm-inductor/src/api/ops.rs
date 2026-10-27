@@ -40,6 +40,10 @@ pub(crate) async fn op(State(st): State<Shared>, Json(req): Json<OpRequest>) -> 
                 }
             };
             let mut inner = st.lock().await;
+            // Re-authoring the range is also the correction for a mistaken one:
+            // pending work outside the new bounds was never asked for, and it
+            // goes before the reconcile and the index scan a smaller range.
+            let trimmed = inner.trim_outside_range(start, count);
             // Reconcile first: enqueue alone only tops up crawl+digest, so a
             inner.reconcile(start, count);
             // The operator just named the range, so from here this process works
@@ -51,8 +55,14 @@ pub(crate) async fn op(State(st): State<Shared>, Json(req): Json<OpRequest>) -> 
             } else {
                 String::new()
             };
+            let trim_note = if trimmed > 0 {
+                let end = start.saturating_add(count.saturating_sub(1));
+                format!("; trimmed {trimmed} pending task(s) outside ch{start}..ch{end}")
+            } else {
+                String::new()
+            };
             Json(OpResult::ok(format!(
-                "translate ch{start}..: {crawls} crawls + {digests} digests queued{absent_note}{index_note}"
+                "translate ch{start}..: {crawls} crawls + {digests} digests queued{absent_note}{trim_note}{index_note}"
             )))
         }
         bm_proto::Op::Import => {
