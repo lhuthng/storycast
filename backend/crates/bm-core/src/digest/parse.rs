@@ -113,6 +113,67 @@ fn normalize_attribution_metadata(
     bible: &Value,
     prepared: &PreparedChapter,
 ) -> Vec<String> {
+    // A mention map is evidence for later books, not a join table needed by this
+    let source = prepared
+        .events
+        .iter()
+        .map(|event| event.text.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let raw_mentions = data
+        .get("mentions")
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    // A description is scene-local. If the chapter only calls a figure "người
+    // áo đen" and never names them, a bible alias must not name them either.
+    let mut described_only: HashSet<String> = HashSet::new();
+    for (form, owner) in &raw_mentions {
+        let Some(owner) = owner
+            .as_str()
+            .map(str::trim)
+            .filter(|owner| !owner.is_empty())
+        else {
+            continue;
+        };
+        let resolved = resolve_speaker(bible, owner);
+        if !is_anonymous_speaker(owner)
+            && !is_anonymous_speaker(&resolved)
+            && resolved != "Narrator"
+            && canon::is_descriptive_epithet(form)
+            && !canon::named_in_source(&source, &resolved, bible, &raw_mentions)
+        {
+            described_only.insert(owner.to_string());
+            described_only.insert(resolved);
+        }
+    }
+    // Rule 1 tells the model to leave descriptions out of `mentions`, so check
+    // the cast too: a roster name the chapter never names, whose only match is
+    // a descriptive bible alias, is the same unnamed figure.
+    let mut candidates: HashSet<&str> = HashSet::new();
+    if let Some(roster) = data.get("roster").and_then(Value::as_array) {
+        candidates.extend(roster.iter().filter_map(Value::as_str).map(str::trim));
+    }
+    if let Some(speakers) = data.get("speakers").and_then(Value::as_object) {
+        candidates.extend(speakers.values().filter_map(Value::as_str).map(str::trim));
+    }
+    for name in candidates {
+        if name.is_empty() || name == "Narrator" || is_anonymous_speaker(name) {
+            continue;
+        }
+        let resolved = resolve_speaker(bible, name);
+        if resolved == "Narrator"
+            || is_anonymous_speaker(&resolved)
+            || canon::named_in_source(&source, &resolved, bible, &raw_mentions)
+        {
+            continue;
+        }
+        if canon::describes_in_source(&source, &resolved, bible) {
+            described_only.insert(name.to_string());
+            described_only.insert(resolved);
+        }
+    }
+
     let mut roster: Vec<String> = data
         .get("roster")
         .and_then(Value::as_array)
@@ -120,7 +181,7 @@ fn normalize_attribution_metadata(
         .flatten()
         .filter_map(Value::as_str)
         .map(|name| name.trim().to_string())
-        .filter(|name| !name.is_empty())
+        .filter(|name| !name.is_empty() && !described_only.contains(name))
         .collect();
     roster.dedup();
     if let Some(speakers) = data.get("speakers").and_then(Value::as_object) {
@@ -149,7 +210,7 @@ fn normalize_attribution_metadata(
         else {
             continue;
         };
-        if !new_names.insert(name.clone()) {
+        if described_only.contains(&name) || !new_names.insert(name.clone()) {
             continue;
         }
 
@@ -230,35 +291,63 @@ fn normalize_attribution_metadata(
         }));
     }
 
-    // A mention map is evidence for later books, not a join table needed by this
-    let source = prepared
-        .events
-        .iter()
-        .map(|event| event.text.as_str())
-        .collect::<Vec<_>>()
-        .join("\n");
     let known_owner = |owner: &str| {
         owner == "Narrator"
             || roster.iter().any(|name| name == owner)
             || known_bible_name(owner)
             || new_names.contains(owner)
     };
-    let mentions = data
-        .get("mentions")
-        .and_then(Value::as_object)
-        .into_iter()
-        .flat_map(|map| map.iter())
+    let mentions = raw_mentions
+        .iter()
         .filter_map(|(form, owner)| {
             let form = form.trim();
             let owner = owner.as_str()?.trim();
             // A mentions object has chapter scope but no scenario key, so it
             (!form.is_empty()
+                && !described_only.contains(owner)
                 && !canon::is_scenario_dependent(form)
+                && !canon::is_descriptive_epithet(form)
                 && source.contains(form)
                 && known_owner(owner))
             .then(|| (form.to_string(), json!(owner)))
         })
         .collect::<serde_json::Map<_, _>>();
+
+    // A figure the chapter only describes is the reserved anonymous speaker,
+    // even when a bible alias names them. Rewrite before validation, so the
+    // answer is accepted instead of re-asked with the same names.
+    if !described_only.is_empty() {
+        if let Some(speakers) = data.get_mut("speakers").and_then(Value::as_object_mut) {
+            for speaker in speakers.values_mut() {
+                let Some(name) = speaker.as_str().map(str::trim) else {
+                    continue;
+                };
+                if described_only.contains(name)
+                    || described_only.contains(&resolve_speaker(bible, name))
+                {
+                    *speaker = json!(ANONYMOUS_SPEAKER);
+                }
+            }
+        }
+        let used_anonymous: HashSet<String> = data
+            .get("speakers")
+            .and_then(Value::as_object)
+            .map(|speakers| {
+                speakers
+                    .values()
+                    .filter_map(|speaker| speaker.as_str())
+                    .filter(|name| is_anonymous_speaker(name))
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default();
+        roster.retain(|name| !is_anonymous_speaker(name) || used_anonymous.contains(name));
+        for name in used_anonymous {
+            if !roster.iter().any(|entry| entry == &name) {
+                roster.push(name);
+            }
+        }
+    }
 
     data["roster"] = json!(roster);
     data["mentions"] = Value::Object(mentions);
@@ -466,7 +555,10 @@ pub(crate) fn resolve_nonverbals(data: &mut Value, engine: &str) {
             continue;
         };
         let decl = decls.iter().find(|n| n.key == key.as_str());
-        if let (Some(decl), Some(sound)) = (decl, segment.get_mut("nonverbal").and_then(Value::as_object_mut)) {
+        if let (Some(decl), Some(sound)) = (
+            decl,
+            segment.get_mut("nonverbal").and_then(Value::as_object_mut),
+        ) {
             sound.insert("tag".to_string(), json!(decl.tag));
         }
     }

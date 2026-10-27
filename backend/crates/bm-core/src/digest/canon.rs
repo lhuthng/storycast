@@ -272,7 +272,105 @@ fn alias_owner(form: &str, owner: &str, bible: &Value) -> Option<String> {
 
 /// Whether a surface form's owner depends on the local scene rather than the
 pub(crate) fn is_scenario_dependent(form: &str) -> bool {
-    ALIAS_STOP.contains(&form.trim().to_lowercase().as_str())
+    let low = form.trim().to_lowercase();
+    // A bare title ("lão tổ", "trưởng lão") is an office, not a name: every
+    // sect has one and impersonations wear them, so the chapter decides who it
+    // addresses. A surname-decorated form ("Trần công tử") stays claimable.
+    ALIAS_STOP.contains(&low.as_str()) || TITLE_SUFFIXES.contains(&low.as_str())
+}
+
+/// Heads of descriptions that point at a figure by garb, body or age. They are
+/// scene-local even when a bible alias happens to list the form: "người áo
+/// đen" in this chapter need not be the character that alias names elsewhere.
+const DESCRIPTIVE_HEADS: [&str; 17] = [
+    "người",
+    "kẻ",
+    "tên",
+    "gã",
+    "nữ tử",
+    "nam tử",
+    "cô gái",
+    "thiếu nữ",
+    "thiếu niên",
+    "lão giả",
+    "lão nhân",
+    "lão đầu",
+    "thanh niên",
+    "nam nhân",
+    "nữ nhân",
+    "hán tử",
+    "đại hán",
+];
+
+/// A description, not a name: "người áo đen", "nữ tử áo trắng", "lão giả gầy
+/// gò". Bare heads are already in `ALIAS_STOP`; this catches the decorated
+/// forms.
+pub(crate) fn is_descriptive_epithet(form: &str) -> bool {
+    let low = form.trim().to_lowercase();
+    low.split_whitespace().count() >= 3
+        && DESCRIPTIVE_HEADS.iter().any(|&head| {
+            low.strip_prefix(head)
+                .is_some_and(|rest| rest.starts_with(' '))
+        })
+}
+
+/// Whether the chapter itself names this character: its canonical name or a
+/// name-bearing alias occurs in the source. Pronouns and descriptions do not
+/// name anyone, however many bible aliases list them.
+pub(crate) fn named_in_source(
+    source: &str,
+    owner: &str,
+    bible: &Value,
+    mentions: &serde_json::Map<String, Value>,
+) -> bool {
+    let source = source.to_lowercase();
+    let has = |form: &str| {
+        let form = form.trim().to_lowercase();
+        !form.is_empty() && source.contains(form.as_str())
+    };
+    if has(owner) {
+        return true;
+    }
+    let name_bearing = |form: &str| !is_scenario_dependent(form) && !is_descriptive_epithet(form);
+    let aliases = bible
+        .get("characters")
+        .and_then(|c| c.as_array())
+        .into_iter()
+        .flatten()
+        .find(|c| c.get("name").and_then(|n| n.as_str()) == Some(owner))
+        .and_then(|c| c.get("proper_aliases"))
+        .and_then(|a| a.as_array());
+    if aliases
+        .into_iter()
+        .flatten()
+        .filter_map(|a| a.as_str())
+        .any(|a| a != owner && name_bearing(a) && has(a))
+    {
+        return true;
+    }
+    mentions
+        .iter()
+        .any(|(form, o)| o.as_str() == Some(owner) && name_bearing(form) && has(form))
+}
+
+/// Whether a descriptive alias of this character occurs in the source. Used
+/// when the model obeys rule 1 and leaves the description out of `mentions`:
+/// the roster entry still has no name-bearing support in the chapter.
+pub(crate) fn describes_in_source(source: &str, owner: &str, bible: &Value) -> bool {
+    let source = source.to_lowercase();
+    let aliases = bible
+        .get("characters")
+        .and_then(|c| c.as_array())
+        .into_iter()
+        .flatten()
+        .find(|c| c.get("name").and_then(|n| n.as_str()) == Some(owner))
+        .and_then(|c| c.get("proper_aliases"))
+        .and_then(|a| a.as_array());
+    aliases
+        .into_iter()
+        .flatten()
+        .filter_map(|a| a.as_str())
+        .any(|a| is_descriptive_epithet(a) && source.contains(&a.trim().to_lowercase()))
 }
 
 /// Proper-name forms may join the bible; pronouns/generics stay chapter-local.
@@ -331,7 +429,7 @@ fn strip_stopped_aliases(name: &str, aliases: &mut Vec<String>) {
     let name_low = name.trim().to_lowercase();
     aliases.retain(|a| {
         let low = a.trim().to_lowercase();
-        low == name_low || !ALIAS_STOP.contains(&low.as_str())
+        low == name_low || !is_scenario_dependent(&low)
     });
 }
 

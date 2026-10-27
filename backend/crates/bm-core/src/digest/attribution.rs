@@ -273,7 +273,7 @@ pub(crate) fn build_attribution_prompt(
         &mut body,
         "1. mentions is chapter-local",
         "2. new_characters",
-        "1. `mentions` is chapter-local evidence, not a chapter-wide identity table.\n   Include only exact, name-bearing surface forms that identify the same owner\n   wherever they occur. Omit pronouns and context-dependent role or address terms\n   such as `Đồ nhi`, `đệ tử`, `sư tôn`, or `sư phụ`: different scenes in one chapter\n   can give the same form different owners. A mention never determines who speaks\n   a quote; use the explicit tag in the quote's nearby narration first.\n",
+        "1. `mentions` is chapter-local evidence, not a chapter-wide identity table.\n   Include only exact, name-bearing surface forms that identify the same owner\n   wherever they occur. Omit pronouns, descriptions of garb, body or age, and\n   context-dependent role or address terms such as `Đồ nhi`, `đệ tử`, `sư tôn`,\n   or `sư phụ`: different scenes in one chapter can give the same form different\n   owners. A bare title is the same kind of local: `lão tổ`, `trưởng lão`,\n   `đại nhân` address whoever holds the office in this chapter, and the bible's\n   `proper_aliases` list is hints from past chapters, never an override. A\n   mention never determines who speaks a quote; use the explicit tag in the\n   quote's nearby narration first.\n",
     ) {
         missed.push("rule 1 (mentions)".into());
     }
@@ -281,7 +281,7 @@ pub(crate) fn build_attribution_prompt(
         &mut body,
         "2. new_characters",
         "3. TITLE:",
-        "2. `new_characters` and `new_aliases` are for established identities. A quote\n   whose speaker cannot be identified at all is an anonymous dialogue speaker, not\n   a new character: never create one for a pronoun or for a role that never speaks.\n   A fixed label the dialogue or narration actually uses as a speaker — `Vân mẫu`,\n   `Mẹ Vân`, `Nữ tử áo đen`, `Lão giả` — is a speaking identity, so describe it in\n   `new_characters` (or report the form in `new_aliases` if it is an existing\n   character) rather than leaving it out. Every speaker in `roster` other than\n   `Narrator` and `Anonymous` must have an entry in `new_characters` or already be\n   in INPUT 1.\n",
+        "2. `new_characters` and `new_aliases` are for established identities. A quote\n   whose speaker cannot be identified at all is an anonymous dialogue speaker, not\n   a new character: never create one for a pronoun or for a role that never speaks.\n   A fixed label the chapter itself uses as a name — `Vân mẫu`, `Mẹ Vân` — is a\n   speaking identity, so describe it in `new_characters`. A description of garb,\n   body, age or species — `Nữ tử áo đen`, `Lão giả`, `người áo đen` — is not a\n   name and never ties a figure to a Bible character: if the chapter does not name\n   that figure, cast them as `Anonymous`. Never report a description in\n   `new_aliases`, and never a bare title either: a title is an office someone\n   holds for a scene, not an identity, so the bible keeps no alias that is only\n   a title. Every speaker in `roster` other than `Narrator` and `Anonymous`\n   must have an entry in `new_characters` or already be in INPUT 1.\n",
     ) {
         missed.push("rule 2 (new_characters)".into());
     }
@@ -367,12 +367,13 @@ no narration ids, no invented ids, no dropped line.
   same person twice on two consecutive lines. They are two events with two ids:
   answer both, and never merge, drop, or reuse one answer for the other.
 - `Anonymous` is the one speaker for a person the source never names — a street
-  crowd, a shopkeeper, a voice in the dark. Every unnamed speaker is `Anonymous`;
-  never number them, never invent a second one, and never describe them as a
-  character. Someone unnamed is not a Bible character and `Anonymous` never
-  appears in `mentions`. Choose a named cast member whenever the dialogue tag,
-  self-reference or surrounding action identifies one — `Anonymous` is the
-  answer to "nobody is named", not to "I am unsure".
+  crowd, a shopkeeper, a voice in the dark, a figure the chapter only describes
+  by garb, body or age. Every unnamed speaker is `Anonymous`; never number them,
+  never invent a second one, and never describe them as a character. Someone
+  unnamed is not a Bible character and `Anonymous` never appears in `mentions`.
+  Choose a named cast member only when the dialogue tag, self-reference or
+  surrounding action actually names one — `Anonymous` is the answer to "nobody
+  is named", not to "I am unsure".
 - **`decided_by` is already resolved for you, and it is the first thing to
   read.** It names the context holding this quote's own explicit named dialogue
   tag: `"previous_context"` means the narration before the quote hands the floor
@@ -418,9 +419,11 @@ no narration ids, no invented ids, no dropped line.
   use. When a character's `proper_aliases` list holds the form you can see in the
   prose (`Ninh Huyền Vũ` under `Huyền Vũ lão tổ`, `Lạc Ly` under `Doãn Lạc Ly`,
   `Sở Cuồng sư` under `Sở Cuồng`), answer with the canonical `name` and put the
-  surface form in `mentions`. An alias where a canonical name belongs is refused,
-  which costs the whole round: a rejected answer is re-asked from scratch, so
-  copying the chapter's spelling is slower than reading the bible.
+  surface form in `mentions`. A description in that list is not a name: do not
+  use it to name a figure the chapter only describes. An alias where a canonical
+  name belongs is refused, which costs the whole round: a rejected answer is
+  re-asked from scratch, so copying the chapter's spelling is slower than
+  reading the bible.
 - Correctness priority is `speakers` first, title second, and cast metadata last.
   Give every named speaker in `roster` a `new_characters` entry (unless it is
   already in INPUT 1) with a `voice_hint` whose head is the gender/age read from

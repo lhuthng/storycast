@@ -11,11 +11,11 @@ use super::manual::Vocabulary;
 use super::prompts::load_map;
 use super::prompts::PreparedChapter;
 use super::sound_fields::carry_forward_fields;
+use super::sound_fields::drop_open_bed_openings;
+use super::sound_fields::cap_overlong_beds;
 use super::sound_fields::expand_sound_fields;
-use super::sound_fields::overlong_beds;
+use super::sound_fields::sound_design_gap;
 use super::sound_fields::seam_value;
-use super::sound_fields::silent_design;
-use super::sound_fields::unclosed_beds;
 use super::*;
 
 /// The staged lines as the sound answer's world: one entry per speakable
@@ -166,6 +166,41 @@ pub(crate) fn parse_sound_script(
     chapter_text: &str,
     vocab: &Vocabulary,
 ) -> Result<Vec<Value>, String> {
+    let data = parse_sound_raw(raw, staged, vocab)?;
+    if let Some(gap) = sound_design_gap(&data, chapter_text, &vocab.injects, &vocab.sound_cues) {
+        return Err(gap);
+    }
+    Ok(data["segments"].as_array().cloned().unwrap_or_default())
+}
+
+/// The same answer re-read with the drifted bed settled, then the gates judged
+/// again on what is left. A seam the model re-drops through every try is one it
+/// cannot see: a still-open bed loses its opening, and a bed that keeps running
+/// past the cap is closed at the cap. The next gates still get their say.
+pub(crate) fn trim_open_beds(
+    raw: &str,
+    staged: &[Value],
+    chapter_text: &str,
+    vocab: &Vocabulary,
+    refusal: &str,
+) -> Result<Vec<Value>, String> {
+    let mut data = parse_sound_raw(raw, staged, vocab)?;
+    if drop_open_bed_openings(&mut data, &vocab.injects) || cap_overlong_beds(&mut data, &vocab.injects) > 0
+    {
+        if let Some(gap) = sound_design_gap(&data, chapter_text, &vocab.injects, &vocab.sound_cues) {
+            return Err(gap);
+        }
+        return Ok(data["segments"].as_array().cloned().unwrap_or_default());
+    }
+    Err(format!(
+        "no drift repair fits this refusal ({refusal}): the answer has no unclosed bed to trim \
+         and no overlong bed to drop"
+    ))
+}
+
+/// Parse and field-validate one sound answer into the script shape the design
+/// gates read: everything the accept path and the drift trim share.
+fn parse_sound_raw(raw: &str, staged: &[Value], vocab: &Vocabulary) -> Result<Value, String> {
     let data = parse_json_repaired(strip_fences(raw))
         .map_err(|e| format!("sound answer is not valid JSON: {e}"))?;
     let entries = data
@@ -256,16 +291,7 @@ pub(crate) fn parse_sound_script(
     validate_music(&data, &vocab.palette).map_err(|e| format!("{e:#}"))?;
     validate_effect_tags(&data, &vocab.effects).map_err(|e| format!("{e:#}"))?;
     validate_injects(&data, &vocab.injects).map_err(|e| format!("{e:#}"))?;
-    if let Some(gap) = unclosed_beds(&data, &vocab.injects) {
-        return Err(gap);
-    }
-    if let Some(gap) = overlong_beds(&data, &vocab.injects) {
-        return Err(gap);
-    }
-    if let Some(gap) = silent_design(&data, chapter_text, "chapter", &vocab.sound_cues) {
-        return Err(gap);
-    }
-    Ok(data["segments"].as_array().cloned().unwrap_or_default())
+    Ok(data)
 }
 
 #[cfg(test)]

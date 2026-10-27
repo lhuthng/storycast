@@ -30,12 +30,12 @@ struct StoredParts {
 }
 
 /// The parts of one chapter that are already staged, and the file that survives
+/// a failure so the next attempt resumes at that part. One window is stored
+/// too: a sound failure after a short chapter must not re-stage it.
 pub(crate) struct Parts {
     pub(crate) done: Vec<Part>,
     pub(crate) path: PathBuf,
     pub(crate) key: String,
-    /// Whether there is a boundary to resume from at all. A one-window chapter
-    pub(crate) store: bool,
 }
 
 impl Parts {
@@ -50,18 +50,8 @@ impl Parts {
     ) -> Parts {
         let path = layout.data().join(format!(".digest-parts-ch{n}.json"));
         let key = parts_key(text, bible, windows, settings);
-        let store = windows.len() > 1;
-        let done = if store {
-            load_parts(&path, &key, windows)
-        } else {
-            Vec::new()
-        };
-        Parts {
-            done,
-            path,
-            key,
-            store,
-        }
+        let done = load_parts(&path, &key, windows);
+        Parts { done, path, key }
     }
 
     pub(crate) fn len(&self) -> usize {
@@ -79,9 +69,6 @@ impl Parts {
     }
 
     fn save(&self) -> Result<()> {
-        if !self.store {
-            return Ok(());
-        }
         let stored = StoredParts {
             key: self.key.clone(),
             parts: self.done.clone(),
@@ -91,9 +78,7 @@ impl Parts {
 
     /// Forget the checkpoint. Called when the chapter is finished, so a
     pub(crate) fn clear(&self) {
-        if self.store {
-            let _ = std::fs::remove_file(&self.path);
-        }
+        let _ = std::fs::remove_file(&self.path);
     }
 }
 
@@ -549,7 +534,6 @@ pub(crate) async fn stage_part(
         let context = match run_g(Round::Attribution, &mut ctx, None, calls).await {
             Ok(context) => context,
             Err(Fail::Dead(e)) => return Err(Fail::Dead(e)),
-            Err(Fail::Back(Round::Repair, why)) => return Err(Fail::Back(Round::Repair, why)),
             Err(Fail::Back(blame, why)) => {
                 return Err(Fail::Dead(anyhow::anyhow!(
                     "digest attribution gate blamed another step ({}: {why})",
@@ -561,17 +545,19 @@ pub(crate) async fn stage_part(
             Ok(script) => return Ok((context, script)),
             Err(Fail::Dead(e)) => return Err(Fail::Dead(e)),
             Err(Fail::Back(Round::Repair, why)) => {
-                return Err(Fail::Back(Round::Repair, why));
+                return Err(Fail::Dead(anyhow::anyhow!(
+                    "digest staging blamed the proofread ({why}); only the repair step may re-run it"
+                )));
             }
             Err(Fail::Back(_, why)) => {
-                // The cast owns that — unless a fresh cast just changed
+                // The cast owns that, unless a fresh cast just changed
                 // nothing: the same staging complaint twice means the cast is
-                // innocent, and blame walks out to the proofread instead.
+                // innocent, and the chapter stops rather than re-running the
+                // proofread from a non-repair step.
                 if last_staging_why.as_deref() == Some(why.as_str()) {
-                    return Err(Fail::Back(
-                        Round::Repair,
-                        format!("{why}; a fresh cast changed nothing, so the text owns that"),
-                    ));
+                    return Err(Fail::Dead(anyhow::anyhow!(
+                        "digest staging failed twice ({why}); a fresh cast changed nothing"
+                    )));
                 }
                 last_staging_why = Some(why.clone());
                 ctx.report(

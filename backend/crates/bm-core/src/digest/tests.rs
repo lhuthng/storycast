@@ -1,4 +1,3 @@
-use crate::assemble::Planned;
 use super::attribution::attribution_view;
 use super::attribution::build_attribution_prompt;
 use super::attribution::replace_or_miss;
@@ -15,13 +14,13 @@ use super::json::parse_json_repaired;
 use super::json::strip_fences;
 use super::manual::vocabulary;
 use super::parse::attach_fixed_speakers;
-use super::parse::resolve_nonverbals;
 use super::parse::lift_thought_stingers;
 use super::parse::merge_rounds;
 use super::parse::not_speech_ids;
 use super::parse::parse_attribution;
 use super::parse::parse_attribution_gated;
 use super::parse::parse_staged_script;
+use super::parse::resolve_nonverbals;
 use super::parse::ANONYMOUS_SPEAKER;
 use super::parse::EXCERPT_CHARS;
 use super::parts::merge_contexts;
@@ -45,6 +44,7 @@ use super::validate::complete_roster;
 use super::validate::validate_attributions;
 use super::validate::validate_digest_identity;
 use super::*;
+use crate::assemble::Planned;
 
 /// A bible that knows one character, for the tests that need a named
 fn bible_with_phong() -> Value {
@@ -226,7 +226,8 @@ fn a_raw_control_character_is_repaired_rather_than_reported() {
 /// A chapter's proofread came back exactly this way, object intact inside.
 #[test]
 fn json_repair_reads_an_object_that_was_escaped_twice() {
-    let object = r#"{"text": "Anh ấy nói: \"Đi thôi\".\nRồi đi.", "changes": ["wrapped the line"]}"#;
+    let object =
+        r#"{"text": "Anh ấy nói: \"Đi thôi\".\nRồi đi.", "changes": ["wrapped the line"]}"#;
     let doubled = object.replace('\\', "\\\\").replace('"', "\\\"");
     assert!(
         serde_json::from_str::<Value>(&doubled).is_err(),
@@ -602,6 +603,91 @@ fn attribution_normalizes_optional_cast_metadata_without_touching_speakers() {
         "an unused anonymous placeholder is metadata, not a cast decision"
     );
     assert_eq!(data["speakers"]["e0003"], json!("Hệ thống"));
+}
+
+/// ch748's shape: the bible knows the man in black by name, but the chapter
+/// never names him, so the script casts the description as `Anonymous`. A
+/// canonical name or a proper alias in the prose still resolves.
+#[test]
+fn a_description_never_names_a_bible_character_for_the_script() {
+    let bible = json!({"characters": [{
+        "name": "Lâu Bản Vĩ",
+        "proper_aliases": ["Lâu Bản Vĩ", "Khô Lâu đại nhân", "Người áo đen"]
+    }]});
+    let cases = [
+        (
+            "Chương 1: Bóng đen\n\nNàng đứng đó. Người áo đen nói:\n\"Đi đi.\"",
+            json!({"Người áo đen": "Lâu Bản Vĩ", "nàng": "Lâu Bản Vĩ"}),
+            "Anonymous",
+        ),
+        (
+            "Chương 1: Bóng đen\n\nNgười áo đen nói:\n\"Đi đi.\"",
+            json!({}),
+            "Anonymous",
+        ),
+        (
+            "Chương 1: Bóng đen\n\nLâu Bản Vĩ nói:\n\"Đi đi.\"",
+            json!({}),
+            "Lâu Bản Vĩ",
+        ),
+        (
+            "Chương 1: Bóng đen\n\nKhô Lâu đại nhân nói:\n\"Đi đi.\"",
+            json!({}),
+            "Lâu Bản Vĩ",
+        ),
+    ];
+    for (chapter, mentions, expected) in cases {
+        let prepared = prepare_chapter(chapter);
+        let id = prepared
+            .events
+            .iter()
+            .find(|event| event.kind == "dialogue")
+            .expect("the quote is dialogue")
+            .id
+            .clone();
+        let mut speakers = serde_json::Map::new();
+        speakers.insert(id.clone(), json!("Lâu Bản Vĩ"));
+        let raw = json!({
+            "title": "Bóng Đen",
+            "atmosphere": "A quiet hall.",
+            "roster": ["Narrator", "Lâu Bản Vĩ"],
+            "mentions": mentions,
+            "new_characters": [],
+            "new_aliases": {},
+            "speakers": Value::Object(speakers),
+        })
+        .to_string();
+        let data = parse_attribution(&raw, &bible, &prepared, false).unwrap();
+        assert_eq!(data["speakers"][&id], json!(expected), "{chapter}");
+        if expected == "Anonymous" {
+            assert_eq!(data["mentions"], json!({}), "{chapter}");
+            assert!(
+                data["roster"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|name| name == "Anonymous"),
+                "{chapter}"
+            );
+            assert!(
+                !data["roster"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|name| name == "Lâu Bản Vĩ"),
+                "{chapter}"
+            );
+        } else {
+            assert!(
+                data["roster"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|name| name == "Lâu Bản Vĩ"),
+                "{chapter}"
+            );
+        }
+    }
 }
 
 #[test]
@@ -1161,7 +1247,10 @@ fn a_declared_thought_sound_must_exist_in_the_inject_pool() {
     std::fs::write(dir.join("assets/scene-map.json"), map("coin")).unwrap();
     let layout = Layout::new(&dir);
     assert_eq!(
-        vocabulary(&layout, "vieneu").unwrap().thought_stinger.as_deref(),
+        vocabulary(&layout, "vieneu")
+            .unwrap()
+            .thought_stinger
+            .as_deref(),
         Some("coin")
     );
 
@@ -1477,7 +1566,13 @@ fn a_quoted_title_in_narration_can_be_retracted_to_the_narrator() {
         {"source_id": "e0003", "speaker": "Narrator", "text": "bất ngờ với nội dung bên trong."},
         {"source_id": "e0004", "speaker": "Narrator", "text": "Dịch Phong ngẩng đầu."}
     ], "fixes": []});
-    validate_source_alignment(&script, &prepared, &not_speech_ids(&data).unwrap(), "vieneu").unwrap();
+    validate_source_alignment(
+        &script,
+        &prepared,
+        &not_speech_ids(&data).unwrap(),
+        "vieneu",
+    )
+    .unwrap();
 }
 
 /// A span too short to be speech never becomes a dialogue event at all:
@@ -2127,7 +2222,8 @@ fn a_declared_sound_is_checked_against_the_engine_and_the_line() {
     assert!(err.to_string().contains("appears 0 times"), "{err}");
 
     // A stretch the line holds twice is ambiguous, not a declaration.
-    let twice = prepare_chapter("Chương 1: Gặp gỡ\n\n\"Ha ha, Ha ha, thật à.\" Thanh Sơn lão tổ nói.");
+    let twice =
+        prepare_chapter("Chương 1: Gặp gỡ\n\n\"Ha ha, Ha ha, thật à.\" Thanh Sơn lão tổ nói.");
     let ambiguous = answer_declaring(
         &twice,
         "Thanh Sơn lão tổ",
@@ -2138,7 +2234,10 @@ fn a_declared_sound_is_checked_against_the_engine_and_the_line() {
 
     // An engine that voices nothing has no key to name.
     let err = validate_source_alignment(&ok, &ch346, &HashSet::new(), "gemini").unwrap_err();
-    assert!(err.to_string().contains("voices no non-verbal sounds"), "{err}");
+    assert!(
+        err.to_string().contains("voices no non-verbal sounds"),
+        "{err}"
+    );
 }
 
 /// Whitespace is not a change and a different word is: that is the whole of the
@@ -2149,7 +2248,10 @@ fn source_text_matches_ignores_whitespace_and_nothing_else() {
         "Hắn đứng đợi. Ài...",
         &["Hắn đứng đợi.  Ài...".into()]
     ));
-    assert!(source_text_matches("Hắn đi.", &["Hắn ".into(), "đi.".into()]));
+    assert!(source_text_matches(
+        "Hắn đi.",
+        &["Hắn ".into(), "đi.".into()]
+    ));
     assert!(!source_text_matches("Hắn đi.", &["Hắn đi và về.".into()]));
     assert!(!source_text_matches("Ài...", &["Ơi...".into()]));
 }
@@ -2570,7 +2672,10 @@ fn the_sound_gate_reads_its_cues_from_the_adapter() {
         vocab.sound_cues
     );
     std::fs::remove_file(dir.join("prompts/sound-cues.json")).unwrap();
-    assert!(vocabulary(&Layout::new(&dir), "vieneu").unwrap().sound_cues.is_empty());
+    assert!(vocabulary(&Layout::new(&dir), "vieneu")
+        .unwrap()
+        .sound_cues
+        .is_empty());
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -2600,7 +2705,8 @@ fn sound_design_gap_catches_an_empty_and_an_unclosed_design() {
         line("Sau một hồi cảm khái, hai người liền đi đến phòng bếp."),
         line("Thanh Sơn lão tổ tìm thấy chiếc dao phay."),
     ]});
-    let gap = sound_design_gap(&silent, chapter, &pool, &vi_cues()).expect("a staged chapter with none");
+    let gap =
+        sound_design_gap(&silent, chapter, &pool, &vi_cues()).expect("a staged chapter with none");
     assert!(gap.contains("phòng bếp"), "{gap}");
 
     // ch15 names a cleaver while asking for one to be forged later; an
@@ -2853,7 +2959,11 @@ fn the_manual_rounds_ask_for_the_right_prompt_and_refuse_a_paste_out_of_order() 
     // chapter that has not had one whatever the scan made of it, because the
     // operator replaces the model's transport and nothing else.
     let first = manual_prompt(&layout, "vieneu", 51, None).unwrap();
-    assert_eq!(first.round, Round::Repair, "the proofread opens the chapter");
+    assert_eq!(
+        first.round,
+        Round::Repair,
+        "the proofread opens the chapter"
+    );
     assert!(
         first.text.contains("Fixture proofread prompt"),
         "the proofread template, as the fixture ships it: {}",
@@ -2875,13 +2985,20 @@ fn the_manual_rounds_ask_for_the_right_prompt_and_refuse_a_paste_out_of_order() 
     );
 
     // A paste for round 2 with no cast is refused by name, rather than
-    let err =
-        manual_accept(&layout, "vieneu", 51, Round::Staging, "{}", None).expect_err("round 2 needs round 1");
+    let err = manual_accept(&layout, "vieneu", 51, Round::Staging, "{}", None)
+        .expect_err("round 2 needs round 1");
     assert!(err.to_string().contains("round 1's cast"), "{err}");
 
     // A garbage paste fails the *worker's* validator, the same one, and
-    let err = manual_accept(&layout, "vieneu", 51, Round::Attribution, "not json at all", None)
-        .expect_err("not JSON");
+    let err = manual_accept(
+        &layout,
+        "vieneu",
+        51,
+        Round::Attribution,
+        "not json at all",
+        None,
+    )
+    .expect_err("not JSON");
     assert!(err.to_string().contains("not valid JSON"), "{err:#}");
 
     // The proofread's answer lands, and round 2 is the attribution pass —
@@ -3558,6 +3675,7 @@ fn the_parts_checkpoint_resumes_what_matches_and_forgets_what_does_not() {
         chunk_chars: 0,
         answer_tokens: 0,
         judge: crate::config::JudgeSettings::default(),
+        repair_judge: crate::config::RepairJudgeSettings::default(),
     };
     let other = plan_windows(&prepared, &chunkier);
     assert_ne!(other.len(), windows.len());
@@ -3607,6 +3725,39 @@ fn the_parts_checkpoint_resumes_what_matches_and_forgets_what_does_not() {
     );
 }
 
+/// A one-window chapter's staged part is checkpointed too: a sound failure
+/// after a short chapter resumes at sound instead of staging it again.
+#[test]
+fn a_one_window_chapter_keeps_its_staged_part() {
+    let (_dir, layout, text) = long_layout("one-window-parts", 3);
+    let settings = Settings::load(&layout.settings());
+    let bible = json!({"characters": []});
+    let prepared = prepare_chapter(&text);
+    let windows = plan_windows(&prepared, &settings.digest);
+    assert_eq!(windows.len(), 1);
+
+    let mut parts = Parts::open(&layout, 51, &text, &bible, &windows, &settings);
+    assert_eq!(parts.len(), 0);
+    parts
+        .push(staged_part(
+            windows[0].from,
+            windows[0].to,
+            json!({"title": "T", "summary": "câu chuyện mở ra"}),
+            json!([{"source_id": prepared.events[windows[0].from].id, "text": "x"}]),
+        ))
+        .unwrap();
+
+    let reopened = Parts::open(&layout, 51, &text, &bible, &windows, &settings);
+    assert_eq!(reopened.len(), 1, "the staged part is not paid for twice");
+
+    reopened.clear();
+    assert_eq!(
+        Parts::open(&layout, 51, &text, &bible, &windows, &settings).len(),
+        0,
+        "a finished chapter starts clean"
+    );
+}
+
 /// The gates name the part that owes an answer: the one that opened the
 #[test]
 fn the_gate_names_the_part_that_owes_an_answer() {
@@ -3631,8 +3782,14 @@ fn the_gate_names_the_part_that_owes_an_answer() {
     let quiet = json!({"segments": [line("Trời tối."), {"sound": "coin"}]});
     let opens = json!({"segments": [line("Hai người đến phòng bếp."), {"sound": "food-prep"}, line("Rồi đi ra.")]});
     let scripts = [&quiet, &opens];
-    let (gap, owner) =
-        sound_gap(&scripts, &["Trời tối.", "Hai người."], &pool, &vi_cues(), "part").expect("an open bed");
+    let (gap, owner) = sound_gap(
+        &scripts,
+        &["Trời tối.", "Hai người."],
+        &pool,
+        &vi_cues(),
+        "part",
+    )
+    .expect("an open bed");
     assert_eq!(owner, 1, "the part that opened it");
     assert!(
         gap.contains("food-prep") && gap.contains("stops dead"),
@@ -3657,8 +3814,14 @@ fn the_gate_names_the_part_that_owes_an_answer() {
 
     // A chapter that did not split goes through `sound_design_gap` itself, so
     let scripts = [&silent];
-    let gap = sound_gap(&scripts, &["Hắn đi đến phòng bếp."], &pool, &vi_cues(), "chapter")
-        .expect("a staged chapter with none");
+    let gap = sound_gap(
+        &scripts,
+        &["Hắn đi đến phòng bếp."],
+        &pool,
+        &vi_cues(),
+        "chapter",
+    )
+    .expect("a staged chapter with none");
     assert!(gap.0.contains("chapter"), "{}", gap.0);
 }
 
@@ -3700,7 +3863,11 @@ fn a_long_chapter_is_staged_in_parts_and_merges_into_one_script() {
     // (3) The flow, part by part, exactly as the TUI and the backup runner
     // runs it — and it opens on the proofread, the worker's own first prompt.
     let first = manual_prompt(&layout, "vieneu", 51, None).unwrap();
-    assert_eq!(first.round, Round::Repair, "the proofread opens the chapter");
+    assert_eq!(
+        first.round,
+        Round::Repair,
+        "the proofread opens the chapter"
+    );
     manual_accept(
         &layout,
         "vieneu",
@@ -3732,8 +3899,15 @@ fn a_long_chapter_is_staged_in_parts_and_merges_into_one_script() {
         part_prompts.push(step.text.clone());
         prompts.push(step);
 
-        let accepted =
-            manual_accept(&layout, "vieneu", 51, Round::Attribution, &cast_answer(&slice), None).unwrap();
+        let accepted = manual_accept(
+            &layout,
+            "vieneu",
+            51,
+            Round::Attribution,
+            &cast_answer(&slice),
+            None,
+        )
+        .unwrap();
         assert!(
             accepted.prompt.is_none(),
             "round 2 is asked for by the caller"
@@ -3842,8 +4016,15 @@ fn a_part_that_leaves_a_bed_open_is_refused_without_moving_on() {
     assert!(windows.len() > 1);
     for (i, w) in windows.iter().enumerate() {
         let slice = w.prepared(&prepared);
-        let accepted =
-            manual_accept(&layout, "vieneu", 51, Round::Attribution, &cast_answer(&slice), None).unwrap();
+        let accepted = manual_accept(
+            &layout,
+            "vieneu",
+            51,
+            Round::Attribution,
+            &cast_answer(&slice),
+            None,
+        )
+        .unwrap();
         let cast = accepted.cast.unwrap();
         // The last part's staging answer opens a bed and never closes it.
         let mut answer: Value = serde_json::from_str(&script_answer(&slice)).unwrap();
@@ -3873,7 +4054,8 @@ fn a_part_that_leaves_a_bed_open_is_refused_without_moving_on() {
 
 /// **The severity rule, every cell.** The ladder is only as honest as this
 #[test]
-fn a_failure_is_retried_in_place_or_handed_back_by_whoever_owns_it() {    // Its own fault: one more ask in place, then the chapter is over.
+fn a_failure_is_retried_in_place_or_handed_back_by_whoever_owns_it() {
+    // Its own fault: one more ask in place, then the chapter is over.
     assert_eq!(route(Round::Staging, Round::Staging, 0), Route::Retry);
     assert_eq!(route(Round::Staging, Round::Staging, 1), Route::Die);
     // Someone else's fault: never a retry, and **not on the last attempt
@@ -3883,12 +4065,12 @@ fn a_failure_is_retried_in_place_or_handed_back_by_whoever_owns_it() {    // Its
     assert_eq!(route(Round::Staging, Round::Attribution, 0), Route::Back);
 }
 
-/// Blame walks one step out: staging re-resolves the cast, attribution
-/// re-reads the text. Repair and sound have nowhere out to go.
+/// Blame walks one step out at most: staging re-resolves the cast. Nothing
+/// outside repair may walk back to it, and repair itself has nowhere to go.
 #[test]
 fn blame_walks_outward_one_step() {
     assert_eq!(outer(Round::Staging), Some(Round::Attribution));
-    assert_eq!(outer(Round::Attribution), Some(Round::Repair));
+    assert_eq!(outer(Round::Attribution), None);
     assert_eq!(outer(Round::Repair), None);
     assert_eq!(outer(Round::Sound), None);
 }
@@ -3908,7 +4090,17 @@ fn an_identical_second_failure_escalates() {
     assert_eq!(escalate(Round::Staging, None, &same), None);
     // Someone else's fault was already handed back, not escalated.
     let theirs = Complaint::new(Round::Attribution, "e0058 changed");
-    assert_eq!(escalate(Round::Staging, Some("e0058 changed"), &theirs), None);
+    assert_eq!(
+        escalate(Round::Staging, Some("e0058 changed"), &theirs),
+        None
+    );
+    // Attribution has nowhere out to go: the chapter dies instead of paying
+    // for another proofread.
+    let attribution = Complaint::new(Round::Attribution, "e0010 unknown");
+    assert_eq!(
+        escalate(Round::Attribution, Some("e0010 unknown"), &attribution),
+        None
+    );
     // Nowhere out to go: the chapter dies instead.
     let repair = Complaint::new(Round::Sound, "sound refused");
     assert_eq!(escalate(Round::Sound, Some("sound refused"), &repair), None);
@@ -3963,12 +4155,12 @@ fn a_gate_says_whose_fault_it_is() {
 fn the_chapter_budget_refuses_rather_than_spending_forever() {
     let mut calls = GCalls::new(7);
     // The phrase pass gets its own three asks; each part then gets four, and
-    // the chapter-level sound pass adds its own two on top.
+    // the chapter-level sound pass adds its own five on top.
     assert_eq!(calls.left, 3, "the phrase pass alone");
     calls.allow_parts(2);
     assert_eq!(
-        calls.left, 13,
-        "two parts at four apiece, plus the sound pass's two"
+        calls.left, 16,
+        "two parts at four apiece, plus the sound pass's five"
     );
     let allowed = calls.left;
     for i in 0..allowed {
@@ -3985,3 +4177,42 @@ fn the_chapter_budget_refuses_rather_than_spending_forever() {
     assert_eq!(calls.spent, allowed, "the refused call is not counted");
 }
 
+#[test]
+fn a_title_the_chapter_recasts_stands_over_the_bibles_claim() {
+    // ch727's shape: nobody owns "Trần trưởng lão"; the bible's "Trần công tử"
+    // claims it only through the bare-surname key collision. The chapter's
+    // canonical casting stands.
+    let bible = json!({"characters": [
+        {"name": "Trần công tử", "proper_aliases": ["Trần Uy", "Trần công tử"]},
+        {"name": "Trần Tiên Huyền", "proper_aliases": []},
+    ]});
+    let data = json!({
+        "roster": ["Narrator", "Trần Tiên Huyền"],
+        "mentions": {"Trần trưởng lão": "Trần Tiên Huyền"},
+        "segments": [{"speaker": "Trần Tiên Huyền", "text": "Trưởng lão đã tỉnh."}],
+    });
+    validate_digest_identity(&data, &bible).unwrap();
+
+    // ch854/858's shape: "lão tổ" is aliased to one character globally, but the
+    // chapter's bearer is someone else (the impersonation).
+    let bible = json!({"characters": [
+        {"name": "Trịnh Vũ", "proper_aliases": []},
+        {"name": "Lý Anh Liên", "proper_aliases": ["lão tổ"]},
+    ]});
+    let data = json!({
+        "roster": ["Narrator", "Trịnh Vũ", "Lý Anh Liên"],
+        "mentions": {"lão tổ": "Trịnh Vũ"},
+        "segments": [{"speaker": "Trịnh Vũ", "text": "Bản tôn chưa từng nói vậy."}],
+    });
+    validate_digest_identity(&data, &bible).unwrap();
+
+    // The downgrade is for canonical owners only: a surface form or a
+    // description in the owner slot is still refused.
+    let stranger = json!({
+        "roster": ["Narrator", "Trịnh Vũ", "Lý Anh Liên"],
+        "mentions": {"lão tổ": "Lão tổ"},
+        "segments": [{"speaker": "Trịnh Vũ", "text": "Bản tôn chưa từng nói vậy."}],
+    });
+    let err = validate_digest_identity(&stranger, &bible).unwrap_err();
+    assert!(err.to_string().contains("owned by"), "{err}");
+}

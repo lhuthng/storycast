@@ -210,142 +210,309 @@ pub(crate) fn sound_design_gap(
         .or_else(|| silent_design(script, chapter_text, "chapter", cues))
 }
 
-/// Rule 1 alone: looping beds a script opened and never stopped, **in the order
-pub(crate) fn unclosed_beds(script: &Value, pool: &crate::audio_pool::ClipPool) -> Option<String> {
-    let open = open_beds(script, pool);
-    if open.is_empty() {
-        return None;
-    }
-    Some(format!(
-        "{} is a looping bed started with no `stop_after` — it plays once and stops dead. \
-         Close it on the line where the scene moves on",
-        open.join(", ")
-    ))
+/// One bed still open when the script ends, with the seam that opened it: the
+/// complaint has to point at words the model wrote, not at a clip it never
+/// named.
+struct OpenBed {
+    name: String,
+    /// The 1-based number of the speech line the opening seam follows, as the
+    /// sound answer's own ids count them.
+    line: usize,
+    /// The opening item's index in `segments`, for a deterministic trim.
+    at: usize,
+    by: OpenedBy,
 }
 
-/// Rule 1's finding on its own: the looping beds still open when the script
-pub(crate) fn open_beds(script: &Value, pool: &crate::audio_pool::ClipPool) -> Vec<String> {
+/// How the opening was written: a named clip opens itself, while a query opens
+/// every looped clip in the best-matching set, so the complaint must quote it.
+enum OpenedBy {
+    Named,
+    Query(String),
+}
+
+fn open_bed_findings(script: &Value, pool: &crate::audio_pool::ClipPool) -> Vec<OpenBed> {
     let Some(segments) = script.get("segments").and_then(|s| s.as_array()) else {
         return Vec::new();
     };
-    let mut open: Vec<&str> = Vec::new();
-    for item in segments {
-        if let Some(sound) = item.get("sound").and_then(|v| v.as_str()) {
-            if pool.get(sound).map(|e| e.looped).unwrap_or(false) {
-                open.push(sound);
-            }
-        }
-        // A query opens every looped clip it can draw: a bed the pool chose is
-        // still a bed, and one nobody stops still stops dead.
-        if let Some(tags) = seam_tags(item, "sound_tags") {
-            for (name, entry) in crate::audio_pool::candidates(pool, &tags) {
-                if entry.looped && !open.contains(&name) {
-                    open.push(name);
-                }
-            }
-        }
-        if let Some(stop) = item.get("stop").and_then(|v| v.as_str()) {
-            if let Some(i) = open.iter().position(|s| *s == stop) {
-                open.remove(i);
-            }
-        }
-        // A query closes every open bed whose own tags answer it.
-        if let Some(tags) = seam_tags(item, "stop_tags") {
-            open.retain(|name| {
-                !pool
-                    .get(*name)
-                    .is_some_and(|e| e.tags.iter().any(|t| tags.contains(t)))
-            });
-        }
-    }
-    open.into_iter().map(str::to_string).collect()
-}
-
-/// A looped bed may cover at most this share of the chapter's speech lines.
-const MAX_BED_SHARE: f64 = 0.20;
-
-/// A closed bed that runs too long to be a spot sound. Footsteps left under a
-/// whole conversation are the case this gate exists for.
-pub(crate) fn overlong_beds(script: &Value, pool: &crate::audio_pool::ClipPool) -> Option<String> {
-    let segments = script.get("segments").and_then(|s| s.as_array())?;
-    let lines = segments
-        .iter()
-        .filter(|item| !crate::util::is_sound_item(item))
-        .count();
-    if lines == 0 {
-        return None;
-    }
-    let max = (((lines as f64) * MAX_BED_SHARE).ceil() as usize).max(1);
-    let mut open: Vec<(String, usize)> = Vec::new();
-    let mut over: Vec<String> = Vec::new();
+    let mut open: Vec<OpenBed> = Vec::new();
     let mut line = 0usize;
-    for item in segments {
+    for (at, item) in segments.iter().enumerate() {
         if !crate::util::is_sound_item(item) {
             line += 1;
             continue;
         }
         if let Some(sound) = item.get("sound").and_then(|v| v.as_str()) {
             if pool.get(sound).map(|e| e.looped).unwrap_or(false)
-                && !open.iter().any(|(s, _)| s == sound)
+                && !open.iter().any(|b| b.name == sound)
             {
-                open.push((sound.to_string(), line));
+                open.push(OpenBed {
+                    name: sound.to_string(),
+                    line,
+                    at,
+                    by: OpenedBy::Named,
+                });
             }
         }
+        // A query opens every looped clip it can draw: a bed the pool chose is
+        // still a bed, and one nobody stops still stops dead.
         if let Some(tags) = seam_tags(item, "sound_tags") {
             for (name, entry) in crate::audio_pool::candidates(pool, &tags) {
-                if entry.looped && !open.iter().any(|(s, _)| s == name) {
-                    open.push((name.to_string(), line));
+                if entry.looped && !open.iter().any(|b| b.name == name) {
+                    open.push(OpenBed {
+                        name: name.to_string(),
+                        line,
+                        at,
+                        by: OpenedBy::Query(format!("{TAGS_PREFIX}{}", tags.join(","))),
+                    });
                 }
             }
         }
         if let Some(stop) = item.get("stop").and_then(|v| v.as_str()) {
-            close_bed(&mut open, &mut over, stop, line, lines, max);
+            open.retain(|b| b.name != stop);
+        }
+        // A query closes every open bed whose own tags answer it.
+        if let Some(tags) = seam_tags(item, "stop_tags") {
+            open.retain(|b| {
+                !pool
+                    .get(b.name.as_str())
+                    .is_some_and(|e| e.tags.iter().any(|t| tags.contains(t)))
+            });
+        }
+    }
+    open
+}
+
+/// Rule 1 alone: looping beds a script opened and never stopped, **in the order
+pub(crate) fn unclosed_beds(script: &Value, pool: &crate::audio_pool::ClipPool) -> Option<String> {
+    let open = open_bed_findings(script, pool);
+    if open.is_empty() {
+        return None;
+    }
+    Some(
+        open.iter()
+            .map(|bed| match &bed.by {
+                OpenedBy::Named => format!(
+                    "{} is a looping bed started after line {} with no `stop_after`: it plays \
+                     once and stops dead. Close it on the line where the scene moves on",
+                    bed.name, bed.line
+                ),
+                OpenedBy::Query(query) => format!(
+                    "{} is a looping bed your `{}` after line {} opened: a tags query starts \
+                     every looped clip in the best-matching set, not just the one you meant, and \
+                     a bed nobody stops plays once and stops dead. Name the clip, or write a \
+                     `stop_after` for {}",
+                    bed.name, query, bed.line, bed.name
+                ),
+            })
+            .collect::<Vec<_>>()
+            .join(" "),
+    )
+}
+
+/// Rule 1's finding on its own: the looping beds still open when the script
+pub(crate) fn open_beds(script: &Value, pool: &crate::audio_pool::ClipPool) -> Vec<String> {
+    open_bed_findings(script, pool)
+        .into_iter()
+        .map(|b| b.name)
+        .collect()
+}
+
+/// Remove the items that opened each bed still open at the end: the escape
+/// hatch for a seam that drifted the same way through every try. The whole seam
+/// goes, so a query that drew a closed hit too silences that hit as well; the
+/// remaining gates judge what is left.
+pub(crate) fn drop_open_bed_openings(
+    script: &mut Value,
+    pool: &crate::audio_pool::ClipPool,
+) -> bool {
+    let mut ats: Vec<usize> = open_bed_findings(script, pool)
+        .into_iter()
+        .map(|b| b.at)
+        .collect();
+    ats.sort_unstable();
+    ats.dedup();
+    if ats.is_empty() {
+        return false;
+    }
+    let Some(segments) = script.get_mut("segments").and_then(Value::as_array_mut) else {
+        return false;
+    };
+    for at in ats.into_iter().rev() {
+        segments.remove(at);
+    }
+    true
+}
+
+/// A looped bed may cover at most this share of the chapter's speech lines.
+const MAX_BED_SHARE: f64 = 0.20;
+
+/// One closed bed that ran past the cap, with the items that bracket it.
+struct OverlongBed {
+    name: String,
+    span: usize,
+    lines: usize,
+    max: usize,
+    /// The speech line the bed opened after.
+    open_line: usize,
+    stop_at: usize,
+}
+
+fn overlong_findings(script: &Value, pool: &crate::audio_pool::ClipPool) -> Vec<OverlongBed> {
+    let segments = match script.get("segments").and_then(|s| s.as_array()) {
+        Some(s) => s,
+        None => return Vec::new(),
+    };
+    let lines = segments
+        .iter()
+        .filter(|item| !crate::util::is_sound_item(item))
+        .count();
+    if lines == 0 {
+        return Vec::new();
+    }
+    let max = (((lines as f64) * MAX_BED_SHARE).ceil() as usize).max(1);
+    let mut open: Vec<(String, usize, usize)> = Vec::new();
+    let mut out: Vec<OverlongBed> = Vec::new();
+    let mut line = 0usize;
+    for (at, item) in segments.iter().enumerate() {
+        if !crate::util::is_sound_item(item) {
+            line += 1;
+            continue;
+        }
+        if let Some(sound) = item.get("sound").and_then(|v| v.as_str()) {
+            if pool.get(sound).map(|e| e.looped).unwrap_or(false)
+                && !open.iter().any(|(s, _, _)| s == sound)
+            {
+                open.push((sound.to_string(), line, at));
+            }
+        }
+        if let Some(tags) = seam_tags(item, "sound_tags") {
+            for (name, entry) in crate::audio_pool::candidates(pool, &tags) {
+                if entry.looped && !open.iter().any(|(s, _, _)| s == name) {
+                    open.push((name.to_string(), line, at));
+                }
+            }
+        }
+        if let Some(stop) = item.get("stop").and_then(|v| v.as_str()) {
+            close_overlong(&mut open, &mut out, stop, line, at, lines, max);
         }
         if let Some(tags) = seam_tags(item, "stop_tags") {
             let names: Vec<String> = open
                 .iter()
-                .filter(|(name, _)| {
+                .filter(|(name, _, _)| {
                     pool.get(name.as_str())
                         .is_some_and(|e| e.tags.iter().any(|t| tags.contains(t)))
                 })
-                .map(|(name, _)| name.clone())
+                .map(|(name, _, _)| name.clone())
                 .collect();
             for name in names {
-                close_bed(&mut open, &mut over, &name, line, lines, max);
+                close_overlong(&mut open, &mut out, &name, line, at, lines, max);
             }
         }
     }
+    out
+}
+
+/// Close one bed and record it when the run exceeded the cap.
+fn close_overlong(
+    open: &mut Vec<(String, usize, usize)>,
+    out: &mut Vec<OverlongBed>,
+    name: &str,
+    line: usize,
+    stop_at: usize,
+    lines: usize,
+    max: usize,
+) {
+    let Some(i) = open.iter().position(|(s, _, _)| s == name) else {
+        return;
+    };
+    let (name, start, _) = open.remove(i);
+    let span = line.saturating_sub(start);
+    if span > max {
+        out.push(OverlongBed {
+            name,
+            span,
+            lines,
+            max,
+            open_line: start,
+            stop_at,
+        });
+    }
+}
+
+/// A closed bed that runs too long to be a spot sound. Footsteps left under a
+/// whole conversation are the case this gate exists for.
+pub(crate) fn overlong_beds(script: &Value, pool: &crate::audio_pool::ClipPool) -> Option<String> {
+    let over = overlong_findings(script, pool);
     if over.is_empty() {
         return None;
     }
     Some(format!(
         "{} — a looping bed may cover at most {:.0}% of the chapter. Close it on the line \
          where the action stops, or use a `scene` label for a long place bed",
-        over.join("; "),
+        over.iter()
+            .map(|b| {
+                let pct = b.span as f64 / b.lines as f64 * 100.0;
+                format!(
+                    "{name} runs for {span} of {lines} lines ({pct:.0}%), past the {max}-line cap",
+                    name = b.name,
+                    span = b.span,
+                    lines = b.lines,
+                    max = b.max
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("; "),
         MAX_BED_SHARE * 100.0
     ))
 }
 
-fn close_bed(
-    open: &mut Vec<(String, usize)>,
-    over: &mut Vec<String>,
-    name: &str,
-    line: usize,
-    lines: usize,
-    max: usize,
-) {
-    let Some(i) = open.iter().position(|(s, _)| s == name) else {
-        return;
-    };
-    let (_, start) = open.remove(i);
-    let span = line.saturating_sub(start);
-    if span > max {
-        over.push(format!(
-            "{} runs for {span} of {lines} lines ({:.0}%)",
-            name,
-            span as f64 / lines as f64 * 100.0
-        ));
+/// The drift repair for a bed that keeps running past the cap: each named bed's
+/// stop moves up to the cap line, keeping the sound but shortening the run. A
+/// stop shared by several beds lands at the earliest cap, which trims all of
+/// them. Returns how many beds were capped.
+pub(crate) fn cap_overlong_beds(script: &mut Value, pool: &crate::audio_pool::ClipPool) -> usize {
+    let beds = overlong_findings(script, pool);
+    if beds.is_empty() {
+        return 0;
     }
+    // One stop item may close several beds: it moves once, to the earliest cap.
+    let mut stop_caps: BTreeMap<usize, usize> = BTreeMap::new();
+    for b in &beds {
+        let cap_line = (b.open_line + b.max).min(b.lines);
+        stop_caps
+            .entry(b.stop_at)
+            .and_modify(|l| *l = (*l).min(cap_line))
+            .or_insert(cap_line);
+    }
+    let Some(segments) = script.get_mut("segments").and_then(Value::as_array_mut) else {
+        return 0;
+    };
+    let items: Vec<Value> = segments.clone();
+    let stops: std::collections::HashMap<usize, Value> = stop_caps
+        .keys()
+        .map(|&at| (at, items[at].clone()))
+        .collect();
+    let mut out: Vec<Value> = Vec::with_capacity(items.len());
+    let mut line = 0usize;
+    for (at, item) in items.iter().enumerate() {
+        // The old stop is lifted; it goes back after its cap line.
+        if stop_caps.contains_key(&at) {
+            continue;
+        }
+        if !crate::util::is_sound_item(item) {
+            line += 1;
+        }
+        out.push(item.clone());
+        if !crate::util::is_sound_item(item) {
+            for (&stop_at, &cap) in &stop_caps {
+                if cap == line {
+                    out.push(stops[&stop_at].clone());
+                }
+            }
+        }
+    }
+    *segments = out;
+    beds.len()
 }
 
 /// The tags of a written `sound_tags`/`stop_tags` item, as a list.

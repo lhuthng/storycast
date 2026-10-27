@@ -3,7 +3,9 @@
 //! CI: it needs `BM_LIVE_ROOT` and the analyzer's key in the environment.
 
 use bm_core::config::Settings;
-use bm_core::digest::{generate, manual_accept, manual_prompt, preview_split, quote_findings, Round};
+use bm_core::digest::{
+    generate, manual_accept, manual_prompt, preview_split, quote_findings, Round,
+};
 use bm_core::Layout;
 
 /// The sidecar keeps the model's change list first, its chapter after it.
@@ -38,7 +40,12 @@ async fn live_repair_one_chapter() {
         println!("marks {} paragraphs {}", marks(text), paras(text));
         for f in quote_findings(text) {
             let head: String = f.text.chars().take(90).collect();
-            println!("  [{}] para {}: {}", f.kind, f.paragraph, head.replace('\n', "|"));
+            println!(
+                "  [{}] para {}: {}",
+                f.kind,
+                f.paragraph,
+                head.replace('\n', "|")
+            );
         }
         println!("{}", preview_split(text));
         return;
@@ -63,8 +70,16 @@ async fn live_repair_one_chapter() {
     println!("{}", preview_split(&original));
 
     let step = manual_prompt(&layout, &settings.engine, n, None).expect("a first round");
-    assert_eq!(step.round, Round::Repair, "the proofread must open the chapter");
-    println!("=== prompt 1 is {:?}, {} chars", step.round, step.text.len());
+    assert_eq!(
+        step.round,
+        Round::Repair,
+        "the proofread must open the chapter"
+    );
+    println!(
+        "=== prompt 1 is {:?}, {} chars",
+        step.round,
+        step.text.len()
+    );
 
     let (raw, backend) = generate(&step.text, &settings.analyzer, &settings)
         .await

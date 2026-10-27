@@ -176,10 +176,15 @@ async fn ask(
             head_chars(&body, 200)
         ));
     }
-    let doc: Value = serde_json::from_str(&body)
-        .map_err(|e| format!("the judge's answer is not JSON: {e}"))?;
+    let doc: Value =
+        serde_json::from_str(&body).map_err(|e| format!("the judge's answer is not JSON: {e}"))?;
     doc.get("p_yes")
         .and_then(Value::as_f64)
         .map(|p| p as f32)
-        .ok_or_else(|| format!("the judge's answer carries no p_yes: {}", head_chars(&body, 200)))
+        .ok_or_else(|| {
+            format!(
+                "the judge's answer carries no p_yes: {}",
+                head_chars(&body, 200)
+            )
+        })
 }

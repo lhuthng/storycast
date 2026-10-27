@@ -8,6 +8,7 @@ use crate::book::cmd_excerpts;
 use crate::book::BackupOpts;
 use crate::book::ExcerptOpts;
 use crate::commands::cmd_provision;
+use crate::commands::cmd_quote_scan;
 use crate::commands::cmd_retag;
 use crate::commands::cmd_roster_add_sample;
 use crate::commands::cmd_roster_migrate_cast;
@@ -68,6 +69,7 @@ async fn main() -> anyhow::Result<()> {
             | Cmd::Crawl { .. }
             | Cmd::Backup { .. }
             | Cmd::Excerpts { .. }
+            | Cmd::QuoteScan { .. }
             | Cmd::Workspace { .. }
             | Cmd::Aws { .. }
             | Cmd::Asset { .. }
@@ -211,6 +213,11 @@ async fn main() -> anyhow::Result<()> {
             )
             .await
         }
+        Cmd::QuoteScan {
+            semantic,
+            analyzer,
+            verbose,
+        } => cmd_quote_scan(&layout, &settings, analyzer.as_deref(), verbose, semantic).await,
         Cmd::Link {
             name,
             addr,
@@ -246,9 +253,7 @@ async fn main() -> anyhow::Result<()> {
         }
         Cmd::Roster { cmd } => match cmd {
             RosterCmd::MigrateCast { dry_run } => cmd_roster_migrate_cast(&layout, dry_run),
-            RosterCmd::RepairGender { dry_run } => {
-                cmd_roster_repair_gender(&layout, dry_run)
-            }
+            RosterCmd::RepairGender { dry_run } => cmd_roster_repair_gender(&layout, dry_run),
             RosterCmd::AddSample { path, tags, name } => {
                 cmd_roster_add_sample(&layout, &path, tags, name)
             }

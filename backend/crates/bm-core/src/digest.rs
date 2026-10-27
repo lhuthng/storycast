@@ -27,7 +27,7 @@ pub(crate) use prepare::prepare_chapter;
 pub use prepare::preview_split;
 pub use prompts::{build_prompt, build_script_prompt};
 pub(crate) use prompts::{PreparedChapter, PreparedEvent};
-pub use quotes::{quote_findings, QuoteFinding};
+pub use quotes::{judge_proofread, quote_findings, ProofreadVerdict, QuoteFinding};
 pub use run::{analyze_chapter, digest_chapter, Complaint, Round};
 
 pub use canon::{
@@ -36,12 +36,12 @@ pub use canon::{
 };
 pub use llm::{fetch_models, generate, parse_retry_delay, retry_wait, GenError};
 pub use reconcile::{cast_only_folds, parse_reconcile_merges, reconcile_plan, ReconcilePlan};
+pub(crate) use tags::validate_inline_tags;
 pub use tags::{
     apply_tag_aliases, discard_unknown_effect_tags, retag_text, tags_of, validate_context,
     validate_effect_tags, validate_injects, validate_music, validate_script, validate_title,
     warn_vietnamese, TagAliases,
 };
-pub(crate) use tags::validate_inline_tags;
 
 #[cfg(test)]
 mod tests;
@@ -126,6 +126,7 @@ mod parts;
 mod prepare;
 mod prompts;
 mod quotes;
+mod resume;
 mod run;
 mod sound;
 mod sound_fields;

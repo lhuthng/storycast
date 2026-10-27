@@ -15,7 +15,6 @@ use super::prepare::prepare_chapter;
 use super::prompts::build_staging_prompt;
 use super::prompts::load_map;
 use super::prompts::PreparedChapter;
-use super::quotes::RepairVerdict;
 use super::quotes::build_repair_prompt;
 use super::quotes::effective_text;
 use super::quotes::judge_repair;
@@ -23,6 +22,7 @@ use super::quotes::keep_repaired;
 use super::quotes::needs_proofread;
 use super::quotes::quote_findings;
 use super::quotes::repair_complaint;
+use super::quotes::RepairVerdict;
 use super::run::assemble_outcome;
 use super::run::Round;
 use super::*;
@@ -82,7 +82,12 @@ fn sound_cues(layout: &Layout) -> Vec<String> {
         Ok(v) => v
             .get("cues")
             .and_then(Value::as_array)
-            .map(|a| a.iter().filter_map(Value::as_str).map(str::to_string).collect())
+            .map(|a| {
+                a.iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_string)
+                    .collect()
+            })
             .unwrap_or_default(),
         Err(e) => {
             eprintln!(
@@ -155,8 +160,7 @@ pub fn manual_prompt(
     cast: Option<&Value>,
 ) -> Result<ManualPrompt> {
     let session = ManualSession::open(layout, n)?;
-    if cast.is_none() && session.parts.len() == 0 && needs_proofread(layout, n, &session.original)
-    {
+    if cast.is_none() && session.parts.len() == 0 && needs_proofread(layout, n, &session.original) {
         return proofread_step(layout, &session);
     }
     round_step(layout, engine, &session, cast)

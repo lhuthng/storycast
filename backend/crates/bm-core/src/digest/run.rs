@@ -21,16 +21,17 @@ use super::parts::PartCtx;
 use super::parts::Parts;
 use super::prepare::prepare_chapter;
 use super::prompts::build_staging_prompt;
-use super::quotes::effective_text;
-use super::quotes::needs_proofread;
 use super::quotes::quote_findings;
 use super::quotes::repair_quotes;
-use super::quotes::repaired_record;
-use super::quotes::repaired_txt;
 use super::quotes::structural;
 use super::sound::build_sound_prompt;
 use super::sound::parse_sound_script;
+use super::sound::trim_open_beds;
 use super::*;
+
+mod passes;
+pub(crate) use passes::{proofread_text, run_sound, SOUND_TRIES};
+
 /// **One G**: build the prompt, spend a call from the chapter's budget, ask,
 pub(crate) async fn run_g(
     round: Round,
@@ -135,12 +136,9 @@ pub(crate) async fn run_g(
                 // The code has checked the shape; the judge is the one check it
                 // cannot make, and it is asked on a chapter that otherwise passed.
                 if round == Round::Staging {
-                    let judged = judge::check(
-                        &value,
-                        &ctx.settings.engine,
-                        &ctx.settings.digest.judge,
-                    )
-                    .await;
+                    let judged =
+                        judge::check(&value, &ctx.settings.engine, &ctx.settings.digest.judge)
+                            .await;
                     if let Some(why) = &judged.skipped {
                         ctx.report(to, format!("{}{why} (no verdict)", part_prefix(ctx.part)));
                     }
@@ -232,133 +230,6 @@ pub(crate) async fn run_g(
     unreachable!("run_g leaves on its first or second attempt")
 }
 
-/// The chapter's sound pass: one G over every staged line, then one repair if a
-/// gate refuses the answer. Sound design is chapter-wide, so this runs once for
-/// the whole chapter rather than per part.
-#[allow(clippy::too_many_arguments)]
-async fn run_sound(
-    layout: &Layout,
-    n: u32,
-    analyzer: &str,
-    settings: &Settings,
-    context: &Value,
-    staged: &Value,
-    chapter_text: &str,
-    vocab: &Vocabulary,
-    calls: &mut GCalls,
-    progress: &mut (dyn FnMut(f32, String) + Send),
-) -> Result<Vec<Value>> {
-    let mut segments = staged
-        .get("segments")
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default();
-    // The sound pass owns these now: drop whatever a staging answer left on a
-    // line, so a stray field cannot survive the pass that replaces it.
-    for line in segments.iter_mut() {
-        if let Some(object) = line.as_object_mut() {
-            for key in ["scene", "music", "sound_after", "stop_after"] {
-                object.remove(key);
-            }
-        }
-    }
-    let mut complaint: Option<String> = None;
-    for attempt in 0..2 {
-        let prompt = build_sound_prompt(layout, context, &segments)?;
-        // A G like any other: it spends from the same chapter budget, so a
-        // chapter cannot buy its way past a gate with extra calls.
-        calls.spend(Round::Sound.as_str())?;
-        let raw = if attempt == 0 {
-            generate_retrying(&prompt, analyzer, settings, progress, 0.88, 0.96).await?
-        } else {
-            repair_once(
-                &prompt,
-                &anyhow::anyhow!(complaint.clone().unwrap_or_default()),
-                analyzer,
-                settings,
-            )
-            .await?
-        };
-        let dump = if attempt == 0 {
-            "digest-sound"
-        } else {
-            "digest-sound-retry"
-        };
-        dump_raw(layout, dump, &raw);
-        match parse_sound_script(&raw, &segments, chapter_text, vocab) {
-            Ok(lines) => return Ok(lines),
-            Err(why) if attempt == 0 => {
-                progress(
-                    0.96,
-                    format!("digest ch{n} sound gate said {why}, asking for one repair"),
-                );
-                complaint = Some(why);
-            }
-            Err(why) => {
-                let dump = layout.data().join(".last-analyze-raw.json");
-                let _ = atomic_write(&dump, &raw);
-                anyhow::bail!(
-                    "digest sound invalid ({why}); raw saved to {}",
-                    dump.display()
-                );
-            }
-        }
-    }
-    unreachable!("run_sound leaves on its first or second attempt")
-}
-
-/// The chapter's proofread: the text every later pass reads. Run once per
-/// chapter version — and re-run once when a later gate blames the text, which
-/// is what `analyze_chapter` does on a `Back(Repair)`.
-#[allow(clippy::too_many_arguments)]
-pub(crate) async fn proofread_text(
-    layout: &Layout,
-    n: u32,
-    original: &str,
-    analyzer: &str,
-    settings: &Settings,
-    calls: &mut GCalls,
-    progress: &mut (dyn FnMut(f32, String) + Send),
-) -> Result<String> {
-    // The proofread is the chapter's first prompt and it runs on every chapter,
-    // faulted or not: a satisfied scan is not a clean text, and every step after
-    // this one reads what this pass returns. A chapter that already carries one
-    // has had the pass — the operator's own paste and this call are the same
-    // pass, so it is not paid for twice.
-    let text = effective_text(layout, n, original);
-    if !needs_proofread(layout, n, original) {
-        return Ok(text);
-    }
-    let findings = quote_findings(&text);
-    let faulted = findings.iter().any(structural);
-    match repair_quotes(
-        layout,
-        n,
-        &text,
-        &findings,
-        analyzer,
-        settings,
-        calls,
-        progress,
-    )
-    .await
-    {
-        Ok(fixed) => Ok(fixed),
-        // Nothing the scan can fault, so nothing to stop the chapter for: a
-        // model that answers in prose instead of JSON had nothing to answer.
-        Err(e) if !faulted => {
-            eprintln!("ch{n} proofread returned nothing usable ({e:#}); the text stands");
-            progress(0.02, format!("ch{n} proofread: nothing to change"));
-            Ok(text)
-        }
-        Err(e) => Err(e.context(format!(
-            "ch{n} the proofread could not put the quotation structure right ({} \
-             finding(s)); the chapter is not digested",
-            findings.len()
-        ))),
-    }
-}
-
 /// Ask the analyzer for one chapter through two constrained passes, once per
 pub async fn analyze_chapter(
     layout: &Layout,
@@ -373,20 +244,32 @@ pub async fn analyze_chapter(
         .with_context(|| format!("reading {}", chapter_path.display()))?;
     // One budget for every G this chapter runs, including the phrase pass below.
     let mut calls = GCalls::new(n);
-    let mut text = proofread_text(layout, n, &original, analyzer, settings, &mut calls, progress).await?;
-    // A later gate can blame the text: one fresh proofread, then the chapter
-    // is staged again from it. Past that the proofread itself is disputed and
-    // the chapter stops instead of ping-ponging paid calls.
-    let mut reproofs = 0;
-    let (parts, vocab, windows, prepared, total) = loop {
-        let prepared = prepare_chapter(&text);
-        let vocab = vocabulary(layout, &settings.engine)?;
-        let windows = plan_windows(&prepared, &settings.digest);
-        let total = windows.len();
-        // The parts are known, so the rest of the budget can be sized against
-        // them — again after a reproof, which spends a whole second run.
-        calls.allow_parts(total);
-        let mut parts = Parts::open(layout, n, &text, bible, &windows, settings);
+    // A retry after a later step failed keeps the proofread it got: it resumes
+    // at that step, and the repair never runs twice for one chapter.
+    let text = match resume::kept(layout, n, &original) {
+        Some((text, step)) => {
+            progress(
+                0.02,
+                format!("ch{n} resuming at {step}: the accepted proofread is kept"),
+            );
+            text
+        }
+        None => {
+            let text = proofread_text(
+                layout, n, &original, analyzer, settings, &mut calls, progress,
+            )
+            .await?;
+            resume::keep(layout, n, &original);
+            text
+        }
+    };
+    let prepared = prepare_chapter(&text);
+    let vocab = vocabulary(layout, &settings.engine)?;
+    let windows = plan_windows(&prepared, &settings.digest);
+    let total = windows.len();
+    // The parts are known, so the rest of the budget can be sized against them.
+    calls.allow_parts(total);
+    let mut parts = Parts::open(layout, n, &text, bible, &windows, settings);
     if total > 1 {
         // Before any call, because the number of calls is the operator's
         progress(0.05, plan_line(n, analyzer, &windows, &prepared, settings));
@@ -404,9 +287,6 @@ pub async fn analyze_chapter(
 
     // 0.08..0.82, spent evenly across the parts, so the bar moves at the same
     let per = 0.74 / total as f32;
-    // Set when a part blames the proofread: the for loop stops and the whole
-    // chapter is staged again from the fresh text below.
-    let mut redo = false;
     for (i, window) in windows.iter().enumerate().skip(parts.len()) {
         let at = part_of(i, total);
         let from = 0.08 + i as f32 * per;
@@ -438,37 +318,19 @@ pub async fn analyze_chapter(
         .await
         {
             Ok(done) => done,
-            Err(Fail::Dead(e)) => return Err(e),
-            Err(Fail::Back(Round::Repair, why)) => {
-                if reproofs > 0 {
-                    return Err(anyhow::anyhow!(
-                        "digest ch{n} still misaligned after a fresh proofread ({why}); \
-                         the proofread itself is disputed, shelve it"
-                    ));
-                }
-                reproofs += 1;
-                // The sidecar is the blamed evidence: drop it so the next
-                // proofread is a new one, and forget staged parts, which were
-                // staged against the old text.
-                parts.clear();
-                let _ = std::fs::remove_file(repaired_txt(layout, n));
-                let _ = std::fs::remove_file(repaired_record(layout, n));
-                progress(
-                    0.05,
-                    format!("ch{n} staging blames the proofread ({why}); one fresh proofread"),
-                );
-                calls.left += 3;
-                text = proofread_text(
-                    layout, n, &original, analyzer, settings, &mut calls, progress,
-                )
-                .await?;
-                redo = true;
-                break;
+            Err(Fail::Dead(e)) => {
+                // The proofread stands; the retry starts at the cast or staging
+                // part that failed, and never reads the chapter again.
+                resume::stop(layout, n, &original, "staging");
+                return Err(e);
             }
+            // Only the repair step may run the repair. A part gate that names
+            // it stops the chapter instead of paying for another proofread.
             Err(Fail::Back(blame, why)) => {
+                resume::stop(layout, n, &original, blame.as_str());
                 return Err(anyhow::anyhow!(
-                    "digest {} owns that ({why}), out of the parts loop's reach",
-                    blame.as_str()
+                    "digest ch{n} via {analyzer} failed on a non-repair step \
+                     ({blame}: {why}); the chapter is not digested"
                 ));
             }
         };
@@ -487,13 +349,6 @@ pub async fn analyze_chapter(
             script,
         })?;
     }
-    // A part that blamed the proofread restarts the chapter from the fresh
-    // text; otherwise the staged parts are the chapter's.
-    if redo {
-        continue;
-    }
-    break (parts, vocab, windows, prepared, total);
-    };
 
     // ---- the sound pass, once the whole chapter is staged ------------------
     // Sound is chapter-wide — a bed that opens in one part closes in another, a
@@ -502,13 +357,30 @@ pub async fn analyze_chapter(
     let (context, conflicts) = merge_contexts(&parts.done);
     let mut script = merge_scripts(parts.done.iter().map(|p| &p.script));
     progress(0.88, format!("digest ch{n} via {analyzer}: sound"));
-    let lines = run_sound(
+    let lines = match run_sound(
         layout, n, analyzer, settings, &context, &script, &text, &vocab, &mut calls, progress,
     )
-    .await?;
+    .await
+    {
+        Ok(lines) => lines,
+        Err(e) => {
+            // The staged parts are sound's to reuse; nothing before it re-runs.
+            resume::stop(layout, n, &original, "sound");
+            return Err(e);
+        }
+    };
     script["segments"] = json!(lines);
 
-    let mut outcome = assemble_outcome(bible, &context, &script, &text)?;
+    let mut outcome = match assemble_outcome(bible, &context, &script, &text) {
+        Ok(outcome) => outcome,
+        Err(e) => {
+            // A staged answer the merge cannot read is staging's to fix: drop
+            // the parts so the next attempt stages again, but keeps the text.
+            parts.clear();
+            resume::stop(layout, n, &original, "staging");
+            return Err(e);
+        }
+    };
     // A disagreement between parts is the operator's to settle, so it is said
     for w in conflicts {
         outcome.log.push(format!("   WARN: {w}"));
@@ -525,6 +397,7 @@ pub async fn analyze_chapter(
     }
     // From here the chapter is a finished script and `digest_chapter` writes it,
     parts.clear();
+    resume::clear(layout, n);
     progress(1.0, format!("digest ch{n} done"));
     Ok(outcome)
 }
@@ -734,13 +607,12 @@ pub(crate) fn route(blame: Round, running: Round, attempt: u32) -> Route {
 }
 
 /// The step outward from `round`: where blame walks when a repair changes
-/// nothing. Staging re-resolves the cast, attribution re-reads the text.
-/// Repair and sound have no outward step from here.
+/// nothing. Staging re-resolves the cast; everything else stops, because a
+/// failure outside repair must never re-run the repair.
 pub(crate) fn outer(round: Round) -> Option<Round> {
     match round {
         Round::Staging => Some(Round::Attribution),
-        Round::Attribution => Some(Round::Repair),
-        Round::Repair | Round::Sound => None,
+        Round::Attribution | Round::Repair | Round::Sound => None,
     }
 }
 
@@ -772,9 +644,9 @@ impl GCalls {
     }
 
     /// Add a part's worth of calls once the windows are known, plus the
-    /// chapter-level sound pass's own ask. Called once.
+    /// chapter-level sound pass's own asks. Called once.
     pub(crate) fn allow_parts(&mut self, parts: usize) {
-        self.left += 4 * parts + 2;
+        self.left += 4 * parts + SOUND_TRIES;
     }
 
     /// Spend one call, or refuse the chapter rather than make it. The label is

@@ -1,6 +1,38 @@
 use super::*;
 
 #[test]
+fn quote_scan_names_sidecars_the_scan_faults_and_their_scripts() {
+    let root = std::env::temp_dir().join(format!("bm-quote-scan{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let layout = Layout::new(&root);
+    std::fs::create_dir_all(layout.data()).unwrap();
+    std::fs::create_dir_all(layout.script_dir()).unwrap();
+    let bad = "Chương 1\n\"Ta sẽ đi.";
+    let good = "Chương 1\n\"Ta sẽ đi.\"";
+    std::fs::write(layout.data().join("ch01-repaired.txt"), bad).unwrap();
+    std::fs::write(layout.data().join("ch02-repaired.txt"), good).unwrap();
+    std::fs::write(layout.data().join("ch03-repaired.txt"), bad).unwrap();
+    std::fs::write(layout.script(3), "{}").unwrap();
+
+    let found = crate::commands::scan_proofreads(&layout).expect("the scan reads the data dir");
+    assert_eq!(found.len(), 3, "every sidecar, faulted or not");
+    assert_eq!((found[0].chapter, found[0].script), (1, false));
+    assert_eq!(found[1].chapter, 2);
+    assert_eq!(found[2].chapter, 3);
+    assert!(found[2].script, "the third sidecar has a script");
+    assert!(
+        found[1].findings.is_empty(),
+        "the clean sidecar stays clean"
+    );
+    assert!(
+        found[0].findings.iter().any(|f| f.kind == "unclosed quote"),
+        "the finding is the scan's own: {:?}",
+        found[0].findings
+    );
+    std::fs::remove_dir_all(&root).ok();
+}
+
+#[test]
 fn profile_check_says_whether_this_checkout_can_cook_its_language() {
     // The question `Inner::voice_gate` answers for the scheduler, asked
     let root = std::env::temp_dir().join(format!("bm-profile-check{}", std::process::id()));

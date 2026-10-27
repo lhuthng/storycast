@@ -210,10 +210,29 @@ pub(crate) fn validate_digest_identity(data: &Value, bible: &Value) -> Result<()
             }
             // Deliberately *not* checked against `roster`. `roster` is the
             let owners = alias_owners(&characters, form);
+            // The chapter saw the scene; the alias map only saw past chapters.
+            // When the model's owner is a canonical name, its casting stands:
+            // a title's holder changes from chapter to chapter, and a
+            // surname-decorated form can key-collide with an unrelated alias.
+            let canonical_owner = new_names.contains(&owner) || bible_names.contains(&owner);
             if owners.len() > 1 {
+                if canonical_owner {
+                    eprintln!(
+                        "attribution: mention {form:?} cast as {owner:?} here, though the bible \
+                         leaves it ambiguous between {owners:?}; the chapter's casting stands"
+                    );
+                    continue;
+                }
                 anyhow::bail!("mention {form:?} is ambiguous between {owners:?}");
             }
             if !owners.is_empty() && !owners.contains(owner) {
+                if canonical_owner {
+                    eprintln!(
+                        "attribution: mention {form:?} cast as {owner:?} here, though the bible \
+                         lists it as {owners:?}; the chapter's casting stands"
+                    );
+                    continue;
+                }
                 anyhow::bail!(
                     "mention {form:?} is owned by {owners:?}, not {owner:?} — a mention's owner must be that character's canonical name"
                 );

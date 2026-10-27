@@ -1,0 +1,9 @@
+Fixture proofread judge. Mark the repair faithful only when the chapter's words,
+speakers and narration are unchanged apart from quotation marks, paragraph
+breaks and whitespace.
+
+ORIGINAL:
+{original}
+
+REPAIRED:
+{repaired}

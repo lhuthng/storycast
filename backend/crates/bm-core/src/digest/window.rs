@@ -242,6 +242,7 @@ mod tests {
             chunk_chars: chars,
             answer_tokens: tokens,
             judge: crate::config::JudgeSettings::default(),
+            repair_judge: crate::config::RepairJudgeSettings::default(),
         }
     }
 

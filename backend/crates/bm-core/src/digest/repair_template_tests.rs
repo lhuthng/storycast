@@ -1,4 +1,5 @@
 use super::attribution::build_attribution_prompt;
+use super::quotes::build_proofread_judge_prompt;
 use super::quotes::build_repair_prompt;
 use super::*;
 use crate::paths::Layout;
@@ -52,17 +53,59 @@ fn the_repair_pass_renders_from_the_prompt_file_not_a_hardcoded_string() {
             prompt.contains(shown.trim()),
             "the whole chapter is proofread, not a window"
         );
-        // The contract states the shape code reads back, and nothing else: the
-        // words and the marks belong to the model, so no rejection rule may be
-        // claimed that code does not enforce.
+        // The contract states the shape code reads back and the one rule code
+        // enforces: the returned chapter must pass the scan again.
         assert!(prompt.contains("---REPAIR OUTPUT CONTRACT---"), "{prompt}");
         assert!(
             prompt.contains("\"changes\""),
             "the answer's shape must be stated: {prompt}"
         );
         assert!(
+            prompt.contains("The scanner reads `text` again"),
+            "the scan the code enforces must be stated: {prompt}"
+        );
+        assert!(
             !prompt.contains("REJECTED"),
             "a rail code does not enforce must not be claimed: {prompt}"
+        );
+        std::fs::remove_dir_all(&root).ok();
+    }
+}
+
+#[test]
+fn the_judge_renders_from_the_adapters_template_and_licence() {
+    // Language and genre are the pack's: the judge must not carry a
+    // Vietnamese-only rule into an English adapter, nor a stricter one than
+    // that adapter's repair pass is allowed to make.
+    for adapter in ["vi-VN", "xianxia-en-US", "jnovel-en-US"] {
+        let root = workspace().join(format!("judge-{adapter}"));
+        std::fs::remove_dir_all(&root).ok();
+        let prompts = root.join("prompts");
+        std::fs::create_dir_all(&prompts).unwrap();
+        let source = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(format!(
+            "../../../adapters/{adapter}/prompts/repair-judge.txt"
+        ));
+        std::fs::copy(&source, prompts.join("repair-judge.txt"))
+            .expect("the judge template ships with every adapter");
+        let layout = Layout {
+            adapter: adapter.into(),
+            ..Layout::new(&root)
+        };
+        let prompt = build_proofread_judge_prompt(&layout, "SOURCE", "FIXED").unwrap();
+        assert!(prompt.contains("SOURCE"), "{adapter}: {prompt}");
+        assert!(prompt.contains("FIXED"), "{adapter}: {prompt}");
+        assert!(
+            !prompt.contains("{original}") && !prompt.contains("{repaired}"),
+            "{adapter} left a placeholder unrendered: {prompt}"
+        );
+        let language = if adapter == "vi-VN" {
+            "Vietnamese"
+        } else {
+            "English"
+        };
+        assert!(
+            prompt.contains(language),
+            "{adapter} must speak as its own language, not another: {prompt}"
         );
         std::fs::remove_dir_all(&root).ok();
     }

@@ -1,10 +1,15 @@
+use super::quotes::build_proofread_judge_prompt;
 use super::quotes::effective_text;
 use super::quotes::judge_repair;
-use super::quotes::repair_complaint;
 use super::quotes::keep_repaired;
 use super::quotes::needs_proofread;
+use super::quotes::parse_proofread_verdict;
+use super::quotes::repair_complaint;
 use super::quotes::repaired_txt;
+use super::quotes::ProofreadVerdict;
 use super::quotes::RepairVerdict;
+use super::run::proofread_text;
+use super::run::GCalls;
 use super::*;
 use crate::paths::Layout;
 
@@ -121,7 +126,9 @@ thì các ngươi tự quyết định!\" Dịch Phong thong thả nói.\n";
     // And the same words welded mid-line still fire.
     let welded = text.replacen("không thấy ai cả\n\n", "không thấy ai cả ", 1);
     assert!(
-        quote_findings(&welded).iter().any(|f| f.kind == "welded prose"),
+        quote_findings(&welded)
+            .iter()
+            .any(|f| f.kind == "welded prose"),
         "the mid-line weld is the fault gate 2 is for: {:?}",
         quote_findings(&welded)
     );
@@ -152,15 +159,24 @@ fn repair_answer(text: &str) -> String {
 }
 
 #[test]
-fn the_repair_takes_any_answered_chapter_and_refuses_a_non_answer() {
-    // The pass is semantic, so code checks one thing only: that a chapter came
-    // back. Which words and which marks belong where is the model's call, and a
-    // rail that guessed at it would only ever refuse a correct proofread.
+fn the_repair_takes_a_clean_chapter_and_refuses_a_mispaired_one() {
+    // The pass is semantic, but the scanner's findings are facts: a returned
+    // chapter that still leaves a speech open is the damage this pass exists to
+    // fix, so it is not accepted. 738 is the reported case: a clean chapter came
+    // back with one closer removed and the rest of its speeches flipped.
     let fixed = "Chương 77: Cô đơn\nHắn nhìn ra cửa sổ.\n\"Ta sẽ đi.\"\nHắn quay lưng bước đi.";
     assert!(matches!(
         judge_repair(&repair_answer(fixed)),
         RepairVerdict::Fixed(..)
     ));
+    let broken = "Chương 77: Cô đơn\nHắn nhìn ra cửa sổ.\n\"Ta sẽ đi.\nHắn quay lưng bước đi.";
+    assert!(
+        matches!(
+            judge_repair(&repair_answer(broken)),
+            RepairVerdict::Reject(ref why) if why.contains("unclosed quote")
+        ),
+        "a chapter the scan still faults is not a repaired chapter"
+    );
     for non_answer in [
         "not json at all",
         "{}",
@@ -174,17 +190,78 @@ fn the_repair_takes_any_answered_chapter_and_refuses_a_non_answer() {
     }
 }
 
+#[test]
+fn the_semantic_judge_reads_faithful_and_unfaithful_answers() {
+    assert_eq!(
+        parse_proofread_verdict(r#"{"faithful": true, "problems": []}"#),
+        ProofreadVerdict::Faithful
+    );
+    assert_eq!(
+        parse_proofread_verdict(
+            r#"{"faithful": false, "problems": ["the repair moved Hùng's speech"]}"#
+        ),
+        ProofreadVerdict::Unfaithful(vec!["the repair moved Hùng's speech".to_string()])
+    );
+    assert!(matches!(
+        parse_proofread_verdict("not json"),
+        ProofreadVerdict::Unjudged(_)
+    ));
+    assert!(
+        matches!(
+            parse_proofread_verdict(r#"{"problems": []}"#),
+            ProofreadVerdict::Unjudged(_)
+        ),
+        "a verdict without `faithful` is not a verdict"
+    );
+}
 
 #[test]
-fn a_repaired_chapter_is_reused_and_the_original_is_never_touched() {
+fn the_semantic_judge_prompt_carries_both_chapters_and_the_rule() {
+    let dir = std::env::temp_dir().join(format!("bm-quote-judge-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("prompts")).unwrap();
+    std::fs::write(
+        dir.join("prompts/repair-judge.txt"),
+        "Judge the adapter's own rule.\nORIGINAL:\n{original}\n\nREPAIRED:\n{repaired}\n",
+    )
+    .unwrap();
+    let layout = Layout::resolve(&dir).expect("a workspace layout");
+    let prompt =
+        build_proofread_judge_prompt(&layout, "Chương gốc", "Chương đã sửa").expect("a template");
+    assert!(prompt.contains("ORIGINAL:\nChương gốc"), "{prompt}");
+    assert!(prompt.contains("REPAIRED:\nChương đã sửa"), "{prompt}");
+    assert!(
+        prompt.contains("Judge the adapter's own rule"),
+        "the adapter's text, not a crate-side rule: {prompt}"
+    );
+
+    // No template: the judge is unavailable, and the caller falls back to the
+    // static gate instead of judging without the chapters.
+    let bare = Layout::new(dir.join("bare"));
+    assert!(build_proofread_judge_prompt(&bare, "a", "b").is_err());
+
+    // A template that drops a chapter is broken too, not silently rendered.
+    std::fs::write(
+        dir.join("prompts/repair-judge.txt"),
+        "ORIGINAL:\n{original}\n",
+    )
+    .unwrap();
+    let err =
+        build_proofread_judge_prompt(&layout, "a", "b").expect_err("both chapters are required");
+    assert!(err.to_string().contains("{repaired}"), "{err}");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn the_manual_flow_reuses_a_clean_proofread_and_the_original_is_never_touched() {
     let dir = std::env::temp_dir().join(format!("bm-quote-gate-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(dir.join("data/chapters")).unwrap();
     let layout = Layout::resolve(&dir).expect("a workspace layout");
     std::fs::write(layout.chapter_txt(77), BROKEN).unwrap();
 
-    // First digest: unbalanced, no proofread yet, so the crawled chapter is what
-    // the pipeline reads and the pass is still owed.
+    // First manual digest: unbalanced, no proofread yet, so the crawled chapter
+    // is what the pipeline reads and the pass is still owed.
     assert!(needs_proofread(&layout, 77, BROKEN));
     assert_eq!(effective_text(&layout, 77, BROKEN), BROKEN);
     assert!(!quote_findings(BROKEN).is_empty());
@@ -192,7 +269,10 @@ fn a_repaired_chapter_is_reused_and_the_original_is_never_touched() {
     // The accepted proofread is recorded, and the digest reads it from then on.
     let fixed = "Chương 77: Cô đơn\nHắn nhìn ra cửa sổ.\n\"Ta sẽ đi.\"\nHắn quay lưng bước đi.";
     keep_repaired(&layout, 77, BROKEN, fixed, &json!(["closed the speech"]));
-    assert!(!needs_proofread(&layout, 77, BROKEN), "the pass is behind it");
+    assert!(
+        !needs_proofread(&layout, 77, BROKEN),
+        "the pass is behind it"
+    );
     let text = effective_text(&layout, 77, BROKEN);
     assert!(quote_findings(&text).is_empty());
     assert_eq!(text, fixed);
@@ -213,6 +293,75 @@ fn a_repaired_chapter_is_reused_and_the_original_is_never_touched() {
 }
 
 #[test]
+fn a_stored_proofread_that_the_scan_faults_is_not_read_back() {
+    // 738's failure persisted in the sidecar: the digest keeps reading a
+    // proofread that broke the pairing, so a re-digest must treat it as absent
+    // and ask for a fresh one instead.
+    let dir = std::env::temp_dir().join(format!("bm-quote-gate-dirty-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("data/chapters")).unwrap();
+    let layout = Layout::resolve(&dir).expect("a workspace layout");
+    let original = "Chương 77: Cô đơn\n\"Ôi trời.\"\n\nHắn quay lưng bước đi.";
+    std::fs::write(layout.chapter_txt(77), original).unwrap();
+    let damaged = original.replacen("\"Ôi trời.\"", "\"Ôi trời.", 1);
+    keep_repaired(
+        &layout,
+        77,
+        original,
+        &damaged,
+        &json!(["broke the pairing"]),
+    );
+
+    assert!(
+        needs_proofread(&layout, 77, original),
+        "a proofread the scan faults is owed again"
+    );
+    assert_eq!(
+        effective_text(&layout, 77, original),
+        original,
+        "and its damage is never the text the digest reads"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[tokio::test]
+async fn the_worker_asks_for_a_fresh_proofread_even_when_a_clean_sidecar_exists() {
+    let dir = std::env::temp_dir().join(format!("bm-quote-fresh-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    crate::profile::install_fixture(&dir).expect("fixture profile");
+    let layout = Layout::new(&dir);
+    std::fs::create_dir_all(layout.chapters()).unwrap();
+    let original = "Chương 77: Cô đơn\nHắn nhìn ra cửa sổ.\n\"Ta sẽ đi.\"\nHắn quay lưng bước đi.";
+    std::fs::write(layout.chapter_txt(77), original).unwrap();
+    let cached = original.replace("Ta sẽ đi", "Ta phải đi");
+    keep_repaired(&layout, 77, original, &cached, &json!(["cached"]));
+    assert!(
+        !needs_proofread(&layout, 77, original),
+        "the manual flow would read the cached chapter"
+    );
+
+    // With the template gone the fresh ask fails before any network call; the
+    // clean original must stand, never the sidecar left by the earlier digest.
+    std::fs::remove_file(layout.repair_prompt()).unwrap();
+    let settings = crate::config::Settings::load(&layout.settings());
+    let mut calls = GCalls::new(77);
+    let mut progress = |_f: f32, _s: String| {};
+    let text = proofread_text(
+        &layout,
+        77,
+        original,
+        "vieneu",
+        &settings,
+        &mut calls,
+        &mut progress,
+    )
+    .await
+    .expect("a clean chapter stands when the proofread cannot be asked");
+    assert_eq!(text, original, "the worker does not reuse the sidecar");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
 fn the_manual_flow_asks_the_proofread_first_instead_of_refusing() {
     // The reported failure: `:digest` refused a chapter the worker would have
     // proofread. Prompt 1 is that proofread, and it owns the text.
@@ -224,8 +373,15 @@ fn the_manual_flow_asks_the_proofread_first_instead_of_refusing() {
     std::fs::write(layout.chapter_txt(77), BROKEN).unwrap();
 
     let first = manual_prompt(&layout, "vieneu", 77, None).expect("a first round");
-    assert_eq!(first.round, Round::Repair, "the proofread opens the chapter");
-    assert!(first.text.contains("\"Ta sẽ đi."), "the chapter rides along");
+    assert_eq!(
+        first.round,
+        Round::Repair,
+        "the proofread opens the chapter"
+    );
+    assert!(
+        first.text.contains("\"Ta sẽ đi."),
+        "the chapter rides along"
+    );
     assert!(
         !first.text.contains("{chapter_text}"),
         "no placeholder leaks"
@@ -234,8 +390,15 @@ fn the_manual_flow_asks_the_proofread_first_instead_of_refusing() {
     // A pasted proofread lands in the sidecar — never over the chapter — and
     // hands back the cast prompt for the corrected text.
     let fixed = "Chương 77: Cô đơn\nHắn nhìn ra cửa sổ.\n\"Ta sẽ đi.\"\nHắn quay lưng bước đi.";
-    let answer = manual_accept(&layout, "vieneu", 77, Round::Repair, &repair_answer(fixed), None)
-        .expect("the proofread is usable");
+    let answer = manual_accept(
+        &layout,
+        "vieneu",
+        77,
+        Round::Repair,
+        &repair_answer(fixed),
+        None,
+    )
+    .expect("the proofread is usable");
     assert!(quote_findings(&effective_text(&layout, 77, BROKEN)).is_empty());
     assert_eq!(
         std::fs::read_to_string(layout.chapter_txt(77)).unwrap(),
@@ -248,8 +411,8 @@ fn the_manual_flow_asks_the_proofread_first_instead_of_refusing() {
         "round 1's cast prompt follows the proofread"
     );
 
-    // Whatever chapter the model returned is taken: judging a proofread is
-    // the operator's review, not a rail's.
+    // A pasted chapter that drops a speech is still a chapter: this pass fixes
+    // the pairing, not the staging, and the cast prompt will see what is left.
     std::fs::remove_file(repaired_txt(&layout, 77)).ok();
     manual_accept(
         &layout,
@@ -260,5 +423,21 @@ fn the_manual_flow_asks_the_proofread_first_instead_of_refusing() {
         None,
     )
     .expect("any answered chapter");
+
+    // A pasted chapter the scan still faults is refused outright: accepting it
+    // is how 738's clean text became a chapter with its second half flipped.
+    std::fs::remove_file(repaired_txt(&layout, 77)).ok();
+    let refused = manual_accept(
+        &layout,
+        "vieneu",
+        77,
+        Round::Repair,
+        &repair_answer(
+            "Chương 77: Cô đơn\nHắn nhìn ra cửa sổ.\n\"Ta sẽ đi.\nHắn quay lưng bước đi.",
+        ),
+        None,
+    )
+    .expect_err("a mispaired proofread is not usable");
+    assert!(refused.to_string().contains("unclosed quote"), "{refused}");
     std::fs::remove_dir_all(&dir).ok();
 }

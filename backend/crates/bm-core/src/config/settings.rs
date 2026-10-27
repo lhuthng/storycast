@@ -103,6 +103,10 @@ pub struct DigestSettings {
     /// `refuse`. See [`JudgeSettings`].
     #[serde(default)]
     pub judge: JudgeSettings,
+    /// What the proofread's semantic judge is allowed to do: `off`, `advise`
+    /// or `refuse`. See [`RepairJudgeSettings`].
+    #[serde(default)]
+    pub repair_judge: RepairJudgeSettings,
 }
 
 /// The declared-sound judge: an AI asked whether each declared non-verbal sound
@@ -133,6 +137,29 @@ impl Default for JudgeSettings {
     }
 }
 
+/// The proofread's semantic judge: an LLM asked whether a repaired chapter
+/// kept its speakers and its words (see `digest::quotes`). The prompt is the
+/// adapter's `prompts/repair-judge.txt`, so its language and the repair licence
+/// it checks are the pack's.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RepairJudgeSettings {
+    /// `off` never asks; `advise` logs the verdict; `refuse` makes an
+    /// unfaithful verdict a repair complaint, so the model is asked again.
+    pub mode: String,
+    /// Analyzer for the verdict; empty uses the digest's own analyzer.
+    pub analyzer: String,
+}
+
+impl Default for RepairJudgeSettings {
+    fn default() -> Self {
+        RepairJudgeSettings {
+            mode: "refuse".into(),
+            analyzer: String::new(),
+        }
+    }
+}
+
 impl Default for DigestSettings {
     fn default() -> Self {
         DigestSettings {
@@ -141,6 +168,7 @@ impl Default for DigestSettings {
             // Under the 16384 every backend enforces, with room for a model
             answer_tokens: DEFAULT_ANSWER_TOKENS,
             judge: JudgeSettings::default(),
+            repair_judge: RepairJudgeSettings::default(),
         }
     }
 }

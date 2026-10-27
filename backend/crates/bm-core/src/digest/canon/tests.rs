@@ -186,8 +186,14 @@ fn a_characters_own_name_beats_another_characters_alias_for_it() {
 fn resolve_entry_folds_diacritics_and_aliases_onto_the_bible_spelling() {
     let bible = bible_with("Thủy Hành", &["Thủy Hành", "Hành lão"]);
     // The other Vietnamese tone order — the spelling the operator sees elsewhere.
-    assert_eq!(resolve_entry(&bible, "Thuỷ Hành").as_deref(), Some("Thủy Hành"));
-    assert_eq!(resolve_entry(&bible, "Hành lão").as_deref(), Some("Thủy Hành"));
+    assert_eq!(
+        resolve_entry(&bible, "Thuỷ Hành").as_deref(),
+        Some("Thủy Hành")
+    );
+    assert_eq!(
+        resolve_entry(&bible, "Hành lão").as_deref(),
+        Some("Thủy Hành")
+    );
     assert_eq!(resolve_entry(&bible, "Nobody"), None);
 }
 
@@ -383,4 +389,48 @@ fn alias_list(bible: &Value, name: &str) -> Vec<String> {
         .iter()
         .filter_map(|a| a.as_str().map(String::from))
         .collect()
+}
+
+#[test]
+fn a_bare_title_is_local_but_a_decorated_one_is_claimable() {
+    assert!(is_scenario_dependent("lão tổ"));
+    assert!(is_scenario_dependent("Trưởng Lão"));
+    assert!(is_scenario_dependent("đại nhân"));
+    assert!(is_scenario_dependent("đạo hữu"));
+    assert!(!is_scenario_dependent("Trần công tử"));
+    assert!(!is_scenario_dependent("Huyền Vũ lão tổ"));
+    assert!(!is_scenario_dependent("Khô Lâu đại nhân"));
+}
+
+#[test]
+fn the_scrub_drops_title_aliases_the_chapter_must_own() {
+    let mut bible = json!({"characters": [
+        {"name": "Lý Anh Liên", "proper_aliases": ["Lý Anh Liên", "lão tổ"]},
+        {"name": "Trần công tử", "proper_aliases": ["Trần công tử", "Trần Uy"]},
+    ]});
+    let log = scrub_ambiguous_aliases(&mut bible);
+    assert_eq!(log.len(), 1, "{log:?}");
+    let aliases = |n: &str| -> Vec<String> {
+        bible["characters"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["name"] == n)
+            .unwrap()["proper_aliases"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|a| a.as_str().map(String::from))
+            .collect()
+    };
+    assert_eq!(
+        aliases("Lý Anh Liên"),
+        vec!["Lý Anh Liên"],
+        "a bare title is an office, not this character's name"
+    );
+    assert_eq!(
+        aliases("Trần công tử"),
+        vec!["Trần công tử", "Trần Uy"],
+        "surname-decorated call-names stay"
+    );
 }

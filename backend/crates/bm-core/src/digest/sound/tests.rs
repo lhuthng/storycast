@@ -326,3 +326,111 @@ fn the_sound_rules_come_from_the_adapter_template() {
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn a_drifted_query_complaint_names_the_seam_it_opened() {
+    let segments = vec![
+        staged("e0001", "Hai người liền đi đến phòng bếp."),
+        staged("e0002", "Rồi họ đi ra ngoài."),
+    ];
+    let answer = json!({"segments": [
+        {"id": 1, "sound_after": "tags:kitchen"},
+        {"id": 2}
+    ]})
+    .to_string();
+    let err = parse_sound_script(&answer, &segments, CHAPTER, &vocab()).unwrap_err();
+    assert!(
+        err.contains("tags:kitchen")
+            && err.contains("line 1")
+            && err.contains("food-prep")
+            && err.contains("cooking")
+            && err.contains("stops dead"),
+        "{err}"
+    );
+}
+
+#[test]
+fn the_drifted_seam_is_trimmed_and_the_rest_kept() {
+    let segments = vec![
+        staged("e0001", "Hai người liền đi đến phòng bếp."),
+        staged("e0002", "Rồi họ đi ra ngoài."),
+    ];
+    let answer = json!({"segments": [
+        {"id": 1, "sound_after": "tags:kitchen"},
+        {"id": 2, "sound_after": "page-turn"}
+    ]})
+    .to_string();
+    let got = trim_open_beds(&answer, &segments, CHAPTER, &vocab(), "the old refusal").expect("the drift trims");
+    assert_eq!(got.len(), 3, "{got:?}");
+    assert_eq!(got[2], json!({"sound": "page-turn"}));
+
+    // A named bed that drifts trims the same way: the opening goes, the line
+    // stays.
+    let answer = json!({"segments": [
+        {"id": 1, "sound_after": "food-prep"},
+        {"id": 2}
+    ]})
+    .to_string();
+    assert!(parse_sound_script(&answer, &segments, CHAPTER, &vocab()).is_err());
+    let got = trim_open_beds(&answer, &segments, CHAPTER, &vocab(), "the old refusal").expect("the named drift trims");
+    assert_eq!(got.len(), 2, "{got:?}");
+}
+
+#[test]
+fn a_trim_that_breaks_the_next_gate_is_refused() {
+    let segments = (1..=20)
+        .map(|i| staged(&format!("e{i:04}"), &format!("Dòng {i}.")))
+        .collect::<Vec<_>>();
+    let mut entries = (1..=20)
+        .map(|i| json!({"id": i}))
+        .collect::<Vec<_>>();
+    entries[0] = json!({"id": 1, "sound_after": "cooking"});
+    entries[1] = json!({"id": 2, "sound_after": "food-prep"});
+    entries[19] = json!({"id": 20, "stop_after": "food-prep"});
+    let answer = json!({ "segments": entries }).to_string();
+    // The unclosed bed decides the first refusal.
+    let err = parse_sound_script(&answer, &segments, CHAPTER, &vocab()).unwrap_err();
+    assert!(err.contains("cooking"), "{err}");
+    // The trim lifts that opening, and the next gate still gets its say: the
+    // food-prep bed now runs 18 of 20 lines, past the 4-line cap.
+    let err = trim_open_beds(&answer, &segments, CHAPTER, &vocab(), "the old refusal").unwrap_err();
+    assert!(err.contains("cap"), "{err}");
+}
+
+#[test]
+fn an_overlong_bed_that_drifts_is_closed_at_the_cap() {
+    // ch958's shape: the bed opens at line 2 and stops at line 20, so the
+    // overlong gate refuses the same answer every try. The trim closes it at
+    // the cap instead of deleting the chapter's only sound.
+    let segments = (1..=20)
+        .map(|i| staged(&format!("e{i:04}"), &format!("Dòng {i}.")))
+        .collect::<Vec<_>>();
+    let mut entries = (1..=20).map(|i| json!({"id": i})).collect::<Vec<_>>();
+    entries[1] = json!({"id": 2, "sound_after": "food-prep"});
+    entries[19] = json!({"id": 20, "stop_after": "food-prep"});
+    let answer = json!({ "segments": entries }).to_string();
+    let err = parse_sound_script(&answer, &segments, CHAPTER, &vocab()).unwrap_err();
+    assert!(err.contains("cap"), "{err}");
+    // The repair keeps the design and closes it at the cap: the stop lands
+    // after speech line 2 + 4, and the remaining gates accept what is left.
+    let got = trim_open_beds(&answer, &segments, CHAPTER, &vocab(), &err).expect("the drift caps");
+    assert_eq!(got.len(), 22, "{got:?}");
+    assert_eq!(got[2], json!({"sound": "food-prep"}));
+    assert_eq!(got[7], json!({"stop": "food-prep"}));
+}
+
+#[test]
+fn a_refusal_no_repair_fits_is_named_in_the_trim_error() {
+    // A chapter that keeps answering with no sound at all: nothing the trim
+    // can take out, so the error says what actually refused.
+    let segments = vec![staged("e0001", CHAPTER)];
+    let answer = json!({"segments": [{"id": 1}]}).to_string();
+    let vocab = Vocabulary {
+        sound_cues: vec!["võ thư".into()],
+        ..vocab()
+    };
+    let err = parse_sound_script(&answer, &segments, CHAPTER, &vocab).unwrap_err();
+    assert!(err.contains("places none"), "{err}");
+    let why = trim_open_beds(&answer, &segments, CHAPTER, &vocab, &err).unwrap_err();
+    assert!(why.contains("no drift repair fits") && why.contains("places none"), "{why}");
+}

@@ -2,6 +2,167 @@ use super::provision::carry_task_policy;
 use super::provision::provision_machine;
 use super::*;
 
+/// One proofread sidecar, with the static scan's findings and whether a script
+/// was digested from it.
+pub(crate) struct ProofreadSidecar {
+    pub(crate) chapter: u32,
+    pub(crate) text: String,
+    pub(crate) findings: Vec<bm_core::digest::QuoteFinding>,
+    pub(crate) script: bool,
+}
+
+/// Every proofread sidecar in the workspace, in chapter order.
+pub(crate) fn scan_proofreads(layout: &Layout) -> anyhow::Result<Vec<ProofreadSidecar>> {
+    let data = layout.data();
+    if !data.is_dir() {
+        return Ok(Vec::new());
+    }
+    let mut found = Vec::new();
+    for entry in std::fs::read_dir(&data)? {
+        let path = entry?.path();
+        let Some(name) = path.file_name().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        let Some(n) = name
+            .strip_prefix("ch")
+            .and_then(|s| s.strip_suffix("-repaired.txt"))
+            .and_then(|s| s.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        let text = std::fs::read_to_string(&path)?;
+        let findings = bm_core::digest::quote_findings(&text);
+        found.push(ProofreadSidecar {
+            chapter: n,
+            text,
+            findings,
+            script: layout.script(n).is_file(),
+        });
+    }
+    found.sort_by_key(|c| c.chapter);
+    Ok(found)
+}
+
+/// Report proofread sidecars that fail the static scan, and with `semantic`
+/// also ask the analyzer whether each structurally-clean sidecar kept the
+/// original chapter's speakers and words. Read-only: it names the chapters to
+/// re-digest instead of re-digesting them itself.
+pub(crate) async fn cmd_quote_scan(
+    layout: &Layout,
+    settings: &Settings,
+    analyzer: Option<&str>,
+    verbose: bool,
+    semantic: bool,
+) -> anyhow::Result<()> {
+    let (analyzer, settings) = if semantic {
+        let llm = bm_core::config::LlmConfig::load_or_seed(&layout.root, settings);
+        if let Some(flag) = analyzer {
+            if llm.backend_for(flag).is_none() {
+                anyhow::bail!("unknown analyzer {flag:?} — pick one with `tui` (L)");
+            }
+        }
+        let (active, asettings) = llm.offer_analyzer(settings);
+        let analyzer = analyzer.unwrap_or(active.as_str()).to_string();
+        if analyzer.is_empty() {
+            anyhow::bail!("no LLM provider is active — add a key with `tui` (L), then retry");
+        }
+        (analyzer, settings.with_analyzer_settings(&asettings))
+    } else {
+        (String::new(), settings.clone())
+    };
+    let rows = scan_proofreads(layout)?;
+    if semantic && !layout.repair_judge_prompt().is_file() {
+        anyhow::bail!(
+            "no proofread judge template at {} — this adapter cannot judge \
+             semantically; add the file or scan without --semantic",
+            layout.repair_judge_prompt().display()
+        );
+    }
+    let mut structural = 0;
+    let mut semantic_bad = 0;
+    let mut clean = 0;
+    let mut unjudged = 0;
+    for row in &rows {
+        let state = if row.script {
+            "script on disk"
+        } else {
+            "no script yet"
+        };
+        if !row.findings.is_empty() {
+            structural += 1;
+            println!(
+                "ch{}: structural — {} finding(s) — {state}",
+                row.chapter,
+                row.findings.len()
+            );
+            if verbose {
+                for f in &row.findings {
+                    println!(
+                        "    paragraph {} ({}): {}",
+                        f.paragraph,
+                        f.kind,
+                        f.text.chars().take(120).collect::<String>()
+                    );
+                }
+            }
+            continue;
+        }
+        if !semantic {
+            clean += 1;
+            if verbose {
+                println!("ch{}: structurally clean", row.chapter);
+            }
+            continue;
+        }
+        let original = match std::fs::read_to_string(layout.chapter_txt(row.chapter)) {
+            Ok(text) => text,
+            Err(e) => {
+                unjudged += 1;
+                println!(
+                    "ch{}: unjudged — no chapter text to compare ({e})",
+                    row.chapter
+                );
+                continue;
+            }
+        };
+        match bm_core::digest::judge_proofread(layout, &original, &row.text, &analyzer, &settings)
+            .await
+        {
+            bm_core::digest::ProofreadVerdict::Faithful => {
+                clean += 1;
+                if verbose {
+                    println!("ch{}: faithful", row.chapter);
+                }
+            }
+            bm_core::digest::ProofreadVerdict::Unfaithful(problems) => {
+                semantic_bad += 1;
+                println!("ch{}: semantic — {state}", row.chapter);
+                for problem in &problems {
+                    println!("    {problem}");
+                }
+            }
+            bm_core::digest::ProofreadVerdict::Unjudged(why) => {
+                unjudged += 1;
+                println!("ch{}: unjudged — {why}", row.chapter);
+            }
+        }
+    }
+    if semantic {
+        println!(
+            "quote scan: {structural} structural, {semantic_bad} semantic, {clean} clean, \
+             {unjudged} unjudged ({} sidecar(s))",
+            rows.len()
+        );
+    } else {
+        println!(
+            "quote scan: {structural} structural, {clean} clean ({} sidecar(s); --semantic \
+             asks the analyzer)",
+            rows.len()
+        );
+    }
+    Ok(())
+}
+
 /// Rewrite interjections into engine tags via the live inductor API.
 pub(crate) async fn cmd_retag(api: &str, dry_run: bool) -> anyhow::Result<()> {
     let client = reqwest::Client::builder()
@@ -273,8 +434,8 @@ pub(crate) fn cmd_roster_repair_gender(layout: &Layout, dry_run: bool) -> anyhow
     let engine = settings.engine.clone();
     let policy = bm_core::cast::policy_for_bible(&engine, layout);
     let bible_path = layout.bible();
-    let mut bible: serde_json::Value = bm_core::read_json(&bible_path)
-        .unwrap_or_else(|_| serde_json::json!({"characters": []}));
+    let mut bible: serde_json::Value =
+        bm_core::read_json(&bible_path).unwrap_or_else(|_| serde_json::json!({"characters": []}));
     let cast = bm_core::cast::read_cast(&engine, &layout.cast(&engine));
     let pool = bm_core::pool::load_pool(&layout.voice_pool());
     let lexicon = bm_core::gender::load_lexicon(layout.adapter_home().as_deref());
@@ -332,9 +493,10 @@ pub(crate) fn cmd_roster_repair_gender(layout: &Layout, dry_run: bool) -> anyhow
             let Some(hint) = fix.new_hint.as_deref() else {
                 continue;
             };
-            let Some(entry) = chars.iter_mut().find(|c| {
-                c.get("name").and_then(|n| n.as_str()) == Some(fix.character.as_str())
-            }) else {
+            let Some(entry) = chars
+                .iter_mut()
+                .find(|c| c.get("name").and_then(|n| n.as_str()) == Some(fix.character.as_str()))
+            else {
                 continue;
             };
             entry["voice_hint"] = serde_json::json!(hint);

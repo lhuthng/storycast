@@ -51,6 +51,12 @@ impl Layout {
         self.prompts_dir().join("repair.txt")
     }
 
+    /// The proofread judge's template: its language and its licence to change
+    /// words are the adapter's, not this crate's.
+    pub fn repair_judge_prompt(&self) -> PathBuf {
+        self.prompts_dir().join("repair-judge.txt")
+    }
+
     /// The chapter-level sound template: the place, the music and the spot
     /// sounds, rendered once over every staged line.
     pub fn sound_prompt(&self) -> PathBuf {

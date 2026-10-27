@@ -176,6 +176,19 @@ pub(crate) enum Cmd {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Find proofread sidecars whose quotation structure still fails the scan.
+    QuoteScan {
+        /// Also ask an analyzer whether each structurally-clean proofread kept
+        /// the original chapter's speakers and words.
+        #[arg(long)]
+        semantic: bool,
+        /// Analyzer for the semantic verdict. Default: the active provider.
+        #[arg(long)]
+        analyzer: Option<String>,
+        /// Print every finding, not just the chapters it faults.
+        #[arg(long)]
+        verbose: bool,
+    },
     /// Check a link before you build a workspace around it: one request, and a
     Check {
         /// The URL to check. A chapter, not a book index: the question is whether
