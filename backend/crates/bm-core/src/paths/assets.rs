@@ -1,12 +1,18 @@
 use super::*;
 
 impl Layout {
+    /// Where rendered takes live: `data/audio/` unless the workspace points
+    /// `segments_dir` elsewhere.
     pub fn audio(&self) -> PathBuf {
-        self.data().join("audio")
+        let s = crate::config::Settings::load(&self.settings());
+        Self::resolve_dir(&self.work, &s.segments_dir).unwrap_or_else(|| self.data().join("audio"))
     }
 
+    /// Where finished pairs land: `output/` unless the workspace points
+    /// `output_dir` elsewhere.
     pub fn output(&self) -> PathBuf {
-        self.work.join("output")
+        let s = crate::config::Settings::load(&self.settings());
+        Self::resolve_dir(&self.work, &s.output_dir).unwrap_or_else(|| self.work.join("output"))
     }
 
     /// The directory the live `prompts/` tree hangs off: the workspace when it

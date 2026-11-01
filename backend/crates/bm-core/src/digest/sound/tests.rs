@@ -360,7 +360,8 @@ fn the_drifted_seam_is_trimmed_and_the_rest_kept() {
         {"id": 2, "sound_after": "page-turn"}
     ]})
     .to_string();
-    let got = trim_open_beds(&answer, &segments, CHAPTER, &vocab(), "the old refusal").expect("the drift trims");
+    let got = trim_open_beds(&answer, &segments, CHAPTER, &vocab(), "the old refusal")
+        .expect("the drift trims");
     assert_eq!(got.len(), 3, "{got:?}");
     assert_eq!(got[2], json!({"sound": "page-turn"}));
 
@@ -372,7 +373,8 @@ fn the_drifted_seam_is_trimmed_and_the_rest_kept() {
     ]})
     .to_string();
     assert!(parse_sound_script(&answer, &segments, CHAPTER, &vocab()).is_err());
-    let got = trim_open_beds(&answer, &segments, CHAPTER, &vocab(), "the old refusal").expect("the named drift trims");
+    let got = trim_open_beds(&answer, &segments, CHAPTER, &vocab(), "the old refusal")
+        .expect("the named drift trims");
     assert_eq!(got.len(), 2, "{got:?}");
 }
 
@@ -381,9 +383,7 @@ fn a_trim_that_breaks_the_next_gate_is_refused() {
     let segments = (1..=20)
         .map(|i| staged(&format!("e{i:04}"), &format!("Dòng {i}.")))
         .collect::<Vec<_>>();
-    let mut entries = (1..=20)
-        .map(|i| json!({"id": i}))
-        .collect::<Vec<_>>();
+    let mut entries = (1..=20).map(|i| json!({"id": i})).collect::<Vec<_>>();
     entries[0] = json!({"id": 1, "sound_after": "cooking"});
     entries[1] = json!({"id": 2, "sound_after": "food-prep"});
     entries[19] = json!({"id": 20, "stop_after": "food-prep"});
@@ -432,5 +432,8 @@ fn a_refusal_no_repair_fits_is_named_in_the_trim_error() {
     let err = parse_sound_script(&answer, &segments, CHAPTER, &vocab).unwrap_err();
     assert!(err.contains("places none"), "{err}");
     let why = trim_open_beds(&answer, &segments, CHAPTER, &vocab, &err).unwrap_err();
-    assert!(why.contains("no drift repair fits") && why.contains("places none"), "{why}");
+    assert!(
+        why.contains("no drift repair fits") && why.contains("places none"),
+        "{why}"
+    );
 }

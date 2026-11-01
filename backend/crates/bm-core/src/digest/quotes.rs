@@ -181,8 +181,50 @@ pub(crate) enum RepairVerdict {
     Reject(String),
 }
 
+/// Give every paragraph of a multi-paragraph speech its own pair. The marks say
+/// the span is speech, so this is structural; terms, unclosed quotes and
+/// single-paragraph speeches are untouched.
+pub(crate) fn split_paragraph_speeches(text: &str) -> String {
+    let clean = crate::crawl::sanitize_chapter_text(text);
+    let mut out = String::with_capacity(clean.len());
+    let mut last = 0usize;
+    let mut quote: Option<(char, usize, usize)> = None;
+    for (at, ch) in clean.char_indices() {
+        let is_open = matches!(ch, '"' | '“' | '「');
+        let is_close = matches!(ch, '"' | '”' | '」');
+        if is_open && quote.is_none() {
+            quote = Some((ch, at, at + ch.len_utf8()));
+            continue;
+        }
+        let Some((opener, opener_at, inner_start)) = quote else {
+            continue;
+        };
+        if !is_close {
+            continue;
+        }
+        quote = None;
+        let inner = &clean[inner_start..at];
+        if !inner.contains("\n\n") {
+            continue;
+        }
+        out.push_str(&clean[last..opener_at]);
+        for (i, part) in inner.split("\n\n").enumerate() {
+            if i > 0 {
+                out.push_str("\n\n");
+            }
+            out.push(opener);
+            out.push_str(part);
+            out.push(ch);
+        }
+        last = at + ch.len_utf8();
+    }
+    out.push_str(&clean[last..]);
+    out
+}
+
 /// The one thing code may say about a proofread beyond its shape: whether the
-/// scanner still faults the chapter it returned. Which words and which marks
+/// scanner still faults the chapter it returned. A speech over a paragraph break
+/// is split into one pair per paragraph first. Which words and which marks
 /// belong where is semantic work, but a returned chapter that leaves a speech
 /// running over a paragraph break or a mark unpaired is the exact damage this
 /// pass exists to fix, and accepting it is how a clean chapter is broken.
@@ -200,6 +242,7 @@ pub(crate) fn judge_repair(raw: &str) -> RepairVerdict {
     if fixed.trim().is_empty() {
         return RepairVerdict::Reject("an empty chapter".to_string());
     }
+    let fixed = split_paragraph_speeches(&fixed);
     let findings = quote_findings(&fixed);
     if !findings.is_empty() {
         return RepairVerdict::Reject(format!(
@@ -333,9 +376,10 @@ pub(crate) fn repair_complaint(findings: &[QuoteFinding]) -> String {
 fn symptom(kind: &str) -> &str {
     match kind {
         "swallowed paragraph" => {
-            "swallowed paragraph — a speech runs over a paragraph break, and every paragraph of a \
-             speech needs its own pair of marks, or the staging cannot tell the speaker from the \
-             narrator"
+            "swallowed paragraph: a speech runs over a paragraph break. The span below begins \
+             with the speech and runs on into what follows; close the speech at its last spoken \
+             paragraph, reopen a pair on the next paragraph only if that paragraph is still the \
+             same speech, and leave the narration that follows the speech outside the marks"
         }
         "welded prose" => {
             "welded prose — narration runs straight into a speech with no mark between them"

@@ -1,5 +1,6 @@
 //! `:` commands: names for keys, direct runs for gated operator actions.
 use crate::tui::input::runconfig::run_preview;
+use crate::tui::input::runconfig::stage_dir_raw;
 use crate::tui::{
     app::App,
     input::{audition, dispatch, dispatch_op},
@@ -68,6 +69,10 @@ pub(crate) enum Command {
     PacksRelease,
     /// How many of one chapter's takes a single render offer carries. Saved to
     RenderBatch,
+    /// Where finished pairs land (`output/` when unset).
+    OutputDir,
+    /// Where rendered takes live (`data/audio/` when unset).
+    SegmentsDir,
     /// The selected box's TTS sidecar thread count (`None` opens the prompt,
     TtsThreads {
         threads: Option<Option<u16>>,
@@ -171,6 +176,8 @@ pub(crate) static WORDS: &[Word] = &[
     Word { key: None, names: &["release", "modelsrelease"], desc: Some("GitHub owner/name whose releases hold the model artifact, so a box fetches the weights from a CDN instead of your uplink (empty = push)"), cmd: Command::ModelsRelease },
     Word { key: None, names: &["packrelease", "packsrelease"], desc: Some("GitHub owner/name whose releases hold the profile pack, so a box fetches assets/ from a CDN instead of your uplink — the tag comes from the loaded profile's version (empty = push)"), cmd: Command::PacksRelease },
     Word { key: None, names: &["batch", "renderbatch"], desc: Some("how many of one chapter's takes one render offer carries (default 5)"), cmd: Command::RenderBatch },
+    Word { key: None, names: &["output", "outdir"], desc: Some("where finished mp3+cues pairs land (`output/` in this workspace when empty); may not be the segment folder"), cmd: Command::OutputDir },
+    Word { key: None, names: &["segments", "segdir"], desc: Some("where rendered takes live (`data/audio/` in this workspace when empty); may not be the output folder"), cmd: Command::SegmentsDir },
     Word { key: None, names: &["threads", "ttsthreads"], desc: Some("the selected box's TTS sidecar threads — `:threads 8` sets 1-64 directly, `:threads clear` restores the sidecar's own default, bare opens the prompt; the box's sidecar restarts on its next render"), cmd: Command::TtsThreads { threads: None } },
     Word { key: Some('q'), names: &["quit", "exit", "q"], desc: None, cmd: Command::Key(KeyCode::Char('q')) },
     Word { key: None, names: &["inspect"], desc: None, cmd: Command::Key(KeyCode::Char('i')) },

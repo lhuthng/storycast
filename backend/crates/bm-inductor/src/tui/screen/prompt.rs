@@ -21,6 +21,10 @@ pub(crate) enum TextKind {
     PacksRelease,
     /// Render batch size (`:batch`): how many of one chapter's takes a single
     RenderBatch,
+    /// The folder finished pairs land in (`:output`): save-only, per workspace.
+    OutputDir,
+    /// The folder rendered takes live in (`:segments`): save-only, per workspace.
+    SegmentsDir,
     /// One box's TTS sidecar thread count (`:threads`): the ONNX threads its
     TtsThreads,
     /// Mix levels (`:mix`): story speed plus the two layer volumes, saved to
@@ -277,6 +281,11 @@ pub(crate) enum ConfirmAction {
     StopBackend,
     Reconcile,
     Rerender,
+    /// Point one stage folder elsewhere: Enter keeps the files where they
+    /// are, `m` takes them along first.
+    StageDir {
+        change: bm_core::stage_dir::StageDirChange,
+    },
     /// Fold characters by hand: the first name survives, the rest are
     Merge {
         survivor: String,
@@ -302,6 +311,34 @@ pub(crate) struct Confirm {
 }
 
 impl Confirm {
+    /// `:output` / `:segments` after a path was typed: point here only, or
+    /// take the files along. Enter is the half that touches nothing.
+    pub(crate) fn stage_dir(change: bm_core::stage_dir::StageDirChange) -> Self {
+        let entries = std::fs::read_dir(&change.from)
+            .map(|d| d.filter_map(|e| e.ok()).count())
+            .unwrap_or(0);
+        let mut body = vec![
+            format!("from  {}", change.from.display()),
+            format!("to    {}", change.to.display()),
+            String::new(),
+        ];
+        if entries == 0 {
+            body.push("The old folder holds nothing: both answers only decide where".into());
+            body.push("the next stage writes.".into());
+        } else {
+            body.push(format!(
+                "Enter keeps the {entries} item(s) where they are; `m` takes them along."
+            ));
+            body.push("Moving holds the cluster until every file has landed.".into());
+        }
+        Confirm {
+            title: format!("Point the {} folder here?", change.kind.label()),
+            danger: false,
+            body,
+            action: ConfirmAction::StageDir { change },
+        }
+    }
+
     /// Full re-speak behind one Enter: every render back to pending with
     pub(crate) fn rerender() -> Self {
         Confirm {

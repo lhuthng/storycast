@@ -45,6 +45,124 @@ pub fn copy_tree(from: &Path, to: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Move one file or directory to `to`, which must not exist. A rename when
+/// both sit on one device; across devices the entry is copied under an
+/// `.incoming` name and renamed only once whole, so a synced folder never
+/// sees a partial tree.
+pub fn move_entry(from: &Path, to: &Path) -> Result<()> {
+    match std::fs::rename(from, to) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::CrossesDevices => copy_across(from, to),
+        Err(e) => Err(e).with_context(|| format!("moving {} to {}", from.display(), to.display())),
+    }
+}
+
+fn copy_across(from: &Path, to: &Path) -> Result<()> {
+    let mut name = to
+        .file_name()
+        .map(std::ffi::OsString::from)
+        .unwrap_or_default();
+    name.push(".incoming");
+    let tmp = to.with_file_name(name);
+    discard(&tmp);
+    let copied = copy_entry(from, &tmp).and_then(|_| {
+        std::fs::rename(&tmp, to).with_context(|| format!("renaming into {}", to.display()))
+    });
+    if let Err(e) = copied {
+        discard(&tmp);
+        return Err(e).with_context(|| format!("copying {} to {}", from.display(), to.display()));
+    }
+    if from.is_dir() {
+        std::fs::remove_dir_all(from)
+    } else {
+        std::fs::remove_file(from)
+    }
+    .with_context(|| format!("removing {}", from.display()))
+}
+
+/// Copy one entry whole, syncing every file, so the caller may rename it into
+/// place: unlike [`copy_tree`], a source that will not read is an error, not
+/// an empty tree, because the source is about to be deleted.
+fn copy_entry(from: &Path, to: &Path) -> Result<()> {
+    if std::fs::metadata(from)?.is_dir() {
+        std::fs::create_dir_all(to).with_context(|| format!("creating {}", to.display()))?;
+        for entry in std::fs::read_dir(from)? {
+            let entry = entry.with_context(|| format!("reading {}", from.display()))?;
+            copy_entry(&entry.path(), &to.join(entry.file_name()))?;
+        }
+    } else {
+        std::fs::copy(from, to)
+            .with_context(|| format!("copying {} -> {}", from.display(), to.display()))?;
+        std::fs::File::open(to)?.sync_all()?;
+    }
+    Ok(())
+}
+
+fn discard(path: &Path) {
+    if path.is_dir() {
+        let _ = std::fs::remove_dir_all(path);
+    } else {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
+/// Run `f` over `items` on a few threads, preserving order. Capped so a merge
+/// runs a handful of ffmpeg/sox processes at once instead of one per core.
+pub(crate) fn parallel_map<T, R, F>(items: &[T], f: F) -> Result<Vec<R>>
+where
+    T: Sync,
+    R: Send,
+    F: Fn(usize, &T) -> Result<R> + Sync,
+{
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::Mutex;
+
+    if items.is_empty() {
+        return Ok(Vec::new());
+    }
+    let workers = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1)
+        .min(8)
+        .min(items.len());
+    let next = AtomicUsize::new(0);
+    let stop = AtomicBool::new(false);
+    let out: Mutex<Vec<Option<Result<R>>>> = Mutex::new((0..items.len()).map(|_| None).collect());
+    std::thread::scope(|scope| {
+        for _ in 0..workers {
+            scope.spawn(|| loop {
+                if stop.load(Ordering::Relaxed) {
+                    break;
+                }
+                let i = next.fetch_add(1, Ordering::Relaxed);
+                if i >= items.len() {
+                    break;
+                }
+                let r = f(i, &items[i]);
+                if r.is_err() {
+                    stop.store(true, Ordering::Relaxed);
+                }
+                out.lock().unwrap()[i] = Some(r);
+            });
+        }
+    });
+    let slots = out.into_inner().unwrap();
+    let mut values = Vec::with_capacity(slots.len());
+    let mut failed: Option<anyhow::Error> = None;
+    for slot in slots {
+        match slot {
+            Some(Ok(v)) => values.push(v),
+            Some(Err(e)) => failed = failed.or(Some(e)),
+            None => {}
+        }
+    }
+    match failed {
+        Some(e) => Err(e),
+        None if values.len() == items.len() => Ok(values),
+        None => Err(anyhow::anyhow!("parallel map stopped without an error")),
+    }
+}
+
 /// Whether a `segments` item is a sound rather than a line of speech.
 pub fn restrict(path: &Path) -> Result<()> {
     #[cfg(unix)]
@@ -205,6 +323,23 @@ mod tests {
         assert_eq!(fold("Đức Trí"), "duc tri");
         assert_eq!(fold("Adam"), "adam");
         assert_eq!(fold("neutral"), "neutral");
+    }
+
+    #[test]
+    fn parallel_map_preserves_order_and_surfaces_the_first_error() {
+        let items: Vec<usize> = (0..64).collect();
+        let got = parallel_map(&items, |_, v| Ok(*v * 2)).unwrap();
+        assert_eq!(got, (0..64).map(|v| v * 2).collect::<Vec<_>>());
+
+        let err = parallel_map(&items, |_, v| {
+            if *v == 7 {
+                anyhow::bail!("boom {v}")
+            } else {
+                Ok(*v)
+            }
+        })
+        .unwrap_err();
+        assert!(err.to_string().contains("boom 7"), "{err}");
     }
 
     #[test]

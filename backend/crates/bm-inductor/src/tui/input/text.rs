@@ -11,7 +11,7 @@ use crate::tui::{
         submit::submit_text,
     },
     jobs::{op_job, Job},
-    screen::{Screen, TextKind, TextPrompt},
+    screen::{Confirm, Screen, TextKind, TextPrompt},
     style::Level,
 };
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -85,6 +85,26 @@ pub(crate) async fn key_text(
                         app.set_status(Level::Ok, msg);
                     }
                     Err(msg) => app.set_status(Level::Error, msg),
+                }
+            } else if matches!(p.kind, TextKind::OutputDir | TextKind::SegmentsDir) {
+                let kind = if p.kind == TextKind::OutputDir {
+                    bm_core::stage_dir::StageDir::Output
+                } else {
+                    bm_core::stage_dir::StageDir::Segments
+                };
+                // A path is kept, but a folder change is two things: where the
+                // next stage writes, and what happens to what is already
+                // there. The answer is one keypress away, not an implicit one.
+                match app.layout.plan_stage_dir(kind, &p.buf) {
+                    Ok(change) if bm_core::Layout::same_dir(&change.from, &change.to) => {
+                        app.screen = Screen::Normal;
+                        app.set_status(
+                            Level::Info,
+                            format!("{} folder is already {}", kind.label(), change.to.display()),
+                        );
+                    }
+                    Ok(change) => app.screen = Screen::Confirm(Confirm::stage_dir(change)),
+                    Err(e) => app.set_status(Level::Error, format!("{e:#}")),
                 }
             } else if matches!(
                 p.kind,

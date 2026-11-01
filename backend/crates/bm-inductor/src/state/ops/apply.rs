@@ -135,7 +135,9 @@ impl Inner {
                 continue;
             }
             if stage == Stage::Merge {
-                let _ = std::fs::remove_file(self.layout.final_mp3(t.chapter));
+                // The cues sidecar and any older-titled pair go with the mp3:
+                // the merge rebuilds the deliverables under the current title.
+                self.layout.drop_chapter_outputs(t.chapter, &[]);
             }
             t.state = TaskState::Pending;
             t.attempts = 0;
@@ -171,7 +173,7 @@ impl Inner {
         for n in &chapters {
             let _ =
                 std::fs::remove_dir_all(bm_core::segments::SegmentStore::dir(&store, &engine, *n));
-            let _ = std::fs::remove_file(self.layout.final_mp3(*n));
+            self.layout.drop_chapter_outputs(*n, &[]);
             for stage in [Stage::Render, Stage::Merge] {
                 let key = format!("{stage}:{n}");
                 match self.tasks.get_mut(&key) {

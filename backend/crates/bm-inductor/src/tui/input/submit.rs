@@ -20,9 +20,9 @@ pub(crate) fn submit_text(app: &mut App, prompt: &TextPrompt) -> Result<Job, Str
         | TextKind::SshPort
         | TextKind::Advertise
         | TextKind::ModelsRelease
-        | TextKind::PacksRelease => {
-            Err("app-wide settings save from the prompt, not submit".into())
-        }
+        | TextKind::PacksRelease
+        | TextKind::OutputDir
+        | TextKind::SegmentsDir => Err("app-wide settings save from the prompt, not submit".into()),
         TextKind::Mix => Err("mix saves from the prompt, not submit".into()),
         // Same for the render batch: `:batch` writes this workspace's settings
         TextKind::RenderBatch => Err("render batch saves from the prompt, not submit".into()),

@@ -121,6 +121,30 @@ pub(crate) fn parse_state(raw: &[u8]) -> Result<StateSnap, String> {
     }
 }
 
+impl StateSnap {
+    /// Whether distribution is held. A payload without the field predates it,
+    /// and a process boots held, so an absent answer reads as held: never
+    /// start what was not running.
+    pub(crate) fn held(&self) -> bool {
+        self.dispatch.as_ref().map(|d| d.held).unwrap_or(true)
+    }
+
+    /// Tasks that may still be writing into a stage folder: a render owns its
+    /// takes, a merge reads them and writes the finished pair.
+    pub(crate) fn writing(&self) -> usize {
+        self.tasks
+            .iter()
+            .filter(|t| {
+                matches!(t.stage, bm_proto::Stage::Render | bm_proto::Stage::Merge)
+                    && matches!(
+                        t.state,
+                        bm_proto::TaskState::Assigned | bm_proto::TaskState::Running
+                    )
+            })
+            .count()
+    }
+}
+
 impl App {
     /// The settings actually in force: the live ones while the inductor
     pub(crate) fn effective_settings(&self) -> serde_json::Value {

@@ -247,6 +247,13 @@ impl Inner {
                             }
                         }
                     }
+                    // The deliverables carry the title they were merged under:
+                    // a re-merge under a new title orphans the old pair, and
+                    // the orphans go now that the current pair is on disk.
+                    let final_mp3 = self.layout.final_mp3(chapter);
+                    let side = bm_core::assemble::cues_path(&final_mp3);
+                    self.layout
+                        .drop_chapter_outputs(chapter, &[final_mp3, side]);
                 }
                 // The design this mp3 was mixed under, read *before* the borrow
                 let design = if stage == Stage::Merge {

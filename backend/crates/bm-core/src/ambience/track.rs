@@ -81,11 +81,10 @@ pub(crate) fn build_voice_track(
     total: f64,
     work: &Path,
 ) -> Result<PathBuf> {
-    let mut pieces: Vec<(PathBuf, f64)> = Vec::new();
-    for (n, slot) in slots.iter().enumerate() {
+    let pieces: Vec<(PathBuf, f64)> = crate::util::parallel_map(slots, |n, slot| {
         let len = (slot.end - slot.start).max(0.0);
         if len <= 0.0 {
-            continue;
+            return Ok(None);
         }
         // Seek BEFORE the input: `-ss` as an input option seeks (PCM is
         let raw = work.join(format!("v{n}.raw.wav"));
@@ -118,8 +117,11 @@ pub(crate) fn build_voice_track(
             }
             None => fade_edges(&raw, &p, span_len)?,
         }
-        pieces.push((p, slot.start));
-    }
+        Ok(Some((p, slot.start)))
+    })?
+    .into_iter()
+    .flatten()
+    .collect();
     let voice_fx = work.join("voice_fx.wav");
     place_voice(&pieces, &voice_fx, total)?;
     Ok(voice_fx)

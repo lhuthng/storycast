@@ -284,6 +284,21 @@ pub(crate) fn mix_prefill(app: &App) -> String {
     )
 }
 
+/// The stage folder setting as the file keeps it, for prefilling the prompt:
+/// the live inductor holds its boot snapshot and will not see a save until it
+/// restarts, while the path itself is read from disk on every write.
+pub(crate) fn stage_dir_raw(app: &App, kind: bm_core::stage_dir::StageDir) -> String {
+    use bm_core::stage_dir::StageDir;
+    if app.layout.root.as_os_str().is_empty() {
+        return String::new();
+    }
+    let s = bm_core::config::Settings::load(&app.layout.settings());
+    match kind {
+        StageDir::Output => s.output_dir,
+        StageDir::Segments => s.segments_dir,
+    }
+}
+
 /// Persist one app-wide ssh default to the settings file. Returns a status
 pub(crate) fn save_app_setting(
     app: &App,

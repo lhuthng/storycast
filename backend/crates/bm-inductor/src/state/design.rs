@@ -73,7 +73,7 @@ impl Inner {
         let mut chapters: Vec<u32> = Vec::new();
         for (id, chapter, current) in requeue {
             // Before the state change: a `Pending` merge whose mp3 survives is
-            let _ = std::fs::remove_file(self.layout.final_mp3(chapter));
+            self.layout.drop_chapter_outputs(chapter, &[]);
             if let Some(t) = self.tasks.get_mut(&id) {
                 t.state = TaskState::Pending;
                 t.attempts = 0;

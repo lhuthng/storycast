@@ -41,6 +41,7 @@ pub mod preset;
 pub mod profile;
 pub mod provision;
 pub mod segments;
+pub mod stage_dir;
 pub mod token;
 pub mod util;
 pub mod voices;

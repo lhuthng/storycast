@@ -19,6 +19,34 @@ pub(crate) async fn key_confirm(
     job_tx: &tokio::sync::mpsc::UnboundedSender<Job>,
 ) -> Flow {
     match key.code {
+        // One stage folder, two answers: Enter points here, `m` also takes
+        // the files along. The move needs the cluster quiet, so it is a job.
+        KeyCode::Char('m') | KeyCode::Char('M')
+            if matches!(c.action, ConfirmAction::StageDir { .. }) =>
+        {
+            app.screen = Screen::Normal;
+            if let ConfirmAction::StageDir { change } = c.action {
+                app.set_status(
+                    Level::Info,
+                    format!(
+                        "{} folder: holding the cluster, then moving into {}…",
+                        change.kind.label(),
+                        change.to.display()
+                    ),
+                );
+                dispatch(
+                    app,
+                    job_tx,
+                    Job::MoveStageDir {
+                        layout: app.layout.clone(),
+                        api: app.api.clone(),
+                        http: http.clone(),
+                        kind: change.kind,
+                        raw: change.raw,
+                    },
+                );
+            }
+        }
         KeyCode::Enter | KeyCode::Char('y') | KeyCode::Char('Y') => {
             app.screen = Screen::Normal;
             match c.action {
@@ -180,6 +208,19 @@ pub(crate) async fn key_confirm(
                         ),
                     );
                 }
+                ConfirmAction::StageDir { change } => match app.layout.apply_stage_dir(&change) {
+                    Ok(()) => app.set_status(
+                        Level::Ok,
+                        format!(
+                            "{} folder saved: {} - the next {} lands here; \
+                                 existing files stay where they were",
+                            change.kind.label(),
+                            change.to.display(),
+                            change.kind.lands(),
+                        ),
+                    ),
+                    Err(e) => app.set_status(Level::Error, format!("{e:#}")),
+                },
                 ConfirmAction::Rerender => {
                     dispatch_op(
                         app,

@@ -404,10 +404,8 @@ pub fn assemble(
 
     // The storage tier may hold takes encoded (see [`TakeQuality`]); everything
     let take_scratch = scratch.join("takes");
-    let wavs: Vec<PathBuf> = wavs
-        .iter()
-        .map(|p| decode_take(p, &take_scratch))
-        .collect::<Result<_>>()?;
+    let wavs: Vec<PathBuf> =
+        crate::util::parallel_map(&wavs, |_, p| decode_take(p, &take_scratch))?;
 
     // The scene map is read here, not inside the layer pass, because it decides
     let map = crate::ambience::load_map(&assets.join("scene-map.json")).unwrap_or_default();
@@ -475,6 +473,12 @@ pub fn assemble(
             "error",
             "-i",
             &out_path.to_string_lossy(),
+            "-ac",
+            "1",
+            "-c:a",
+            "libmp3lame",
+            "-b:a",
+            "48k",
             &mp3.to_string_lossy(),
         ])?;
         mp3
@@ -491,16 +495,50 @@ pub fn publish(assembled: &Path, layout: &crate::Layout, n: u32) -> Result<PathB
     if let Some(parent) = final_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    std::fs::rename(assembled, &final_path)
+    place(assembled, &final_path)
         .with_context(|| format!("publishing to {}", final_path.display()))?;
     // The cue sheet was written beside the mix; it follows the mp3 into output,
     // where the video tool expects `Ch.N - Title.cues.json` next to the audio.
     let sidecar = cues::cues_path(assembled);
     if sidecar.exists() {
-        std::fs::rename(&sidecar, cues::cues_path(&final_path))
+        place(&sidecar, &cues::cues_path(&final_path))
             .with_context(|| format!("publishing {}", sidecar.display()))?;
     }
     Ok(final_path)
+}
+
+/// Move a file into place. A scratch -> output rename crosses devices when
+/// the workspace points output at another volume or a synced folder; the
+/// fallback copies through an `.incoming` name and syncs it, so the
+/// destination only ever exposes a complete file.
+fn place(from: &Path, to: &Path) -> Result<()> {
+    match std::fs::rename(from, to) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::CrossesDevices => copy_into(from, to),
+        Err(e) => Err(e).with_context(|| format!("placing {}", to.display())),
+    }
+}
+
+/// The cross-device half of [`place`]: copy through an `.incoming` name,
+/// sync it, then rename over the destination. The destination only ever
+/// exposes a complete file, however slowly the sync runs behind it.
+fn copy_into(from: &Path, to: &Path) -> Result<()> {
+    let mut name = to
+        .file_name()
+        .map(std::ffi::OsString::from)
+        .unwrap_or_default();
+    name.push(".incoming");
+    let tmp = to.with_file_name(name);
+    let copied = std::fs::copy(from, &tmp).and_then(|_| std::fs::File::open(&tmp)?.sync_all());
+    if let Err(e) = copied {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e).with_context(|| format!("copying {} to {}", from.display(), to.display()));
+    }
+    if let Err(e) = std::fs::rename(&tmp, to) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e).with_context(|| format!("placing {}", to.display()));
+    }
+    std::fs::remove_file(from).with_context(|| format!("removing {}", from.display()))
 }
 
 /// Record a manifest line (JSONL) so every render is auditable, as before.
@@ -728,6 +766,23 @@ mod tests {
             err.to_string()
                 .contains("timeline has 2 turns for 1 rendered segments"),
             "{err:#}"
+        );
+    }
+
+    #[test]
+    fn a_cross_device_publish_copies_through_an_incoming_name() {
+        let d = tmpdir("place-copy");
+        let from = d.join("ch01.mp3");
+        std::fs::write(&from, "new audio").unwrap();
+        let to = d.join("Ch.1 - Một.mp3");
+        std::fs::write(&to, "old audio").unwrap();
+
+        copy_into(&from, &to).unwrap();
+        assert_eq!(std::fs::read_to_string(&to).unwrap(), "new audio");
+        assert!(!from.exists(), "the source goes once the copy lands");
+        assert!(
+            !d.join("Ch.1 - Một.mp3.incoming").exists(),
+            "no partial is left behind"
         );
     }
 }

@@ -569,7 +569,8 @@ fn scratch_shares_the_output_root_so_publish_can_rename() {
     assert!(l.scratch().ends_with("tmp"));
     assert!(l.scratch_ch(7).ends_with("tmp/ch07"));
     assert_eq!(l.scratch_ch(7).parent().unwrap(), l.scratch());
-    // `publish` renames scratch -> output. Both must hang off the same
+    // By default both hang off the workspace, so publish renames; a
+    // configured output on another volume makes it copy instead.
     assert!(l.scratch().starts_with(&l.work));
     assert!(l.output().starts_with(&l.work));
 }
@@ -909,4 +910,119 @@ fn a_script_path_keeps_the_adapter_that_declares_the_language() {
         from_box.adapter, "en-US",
         "a box's pushed binding names its adapter, not `default`"
     );
+}
+
+#[test]
+fn dropping_chapter_outputs_spares_the_current_pair_and_other_chapters() {
+    let root = std::env::temp_dir().join(format!("bm-outputs{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let l = Layout::new(&root);
+    std::fs::create_dir_all(l.output()).unwrap();
+    let mp3 = l.final_mp3(1);
+    std::fs::write(&mp3, "x").unwrap();
+    std::fs::write(crate::assemble::cues_path(&mp3), "{}").unwrap();
+    let orphan = l.output().join("Ch.1 - Đơn Xưa.cues.json");
+    std::fs::write(&orphan, "{}").unwrap();
+    let other = l.final_mp3(10);
+    std::fs::write(&other, "x").unwrap();
+    std::fs::write(l.output().join("notes.txt"), "x").unwrap();
+
+    let keep = vec![mp3.clone(), crate::assemble::cues_path(&mp3)];
+    assert_eq!(l.drop_chapter_outputs(1, &keep), 1, "the orphan goes");
+    assert!(mp3.is_file() && crate::assemble::cues_path(&mp3).is_file());
+    assert!(other.is_file(), "another chapter's pair stays");
+    assert!(l.output().join("notes.txt").is_file());
+
+    assert_eq!(l.drop_chapter_outputs(1, &[]), 2, "the whole pair goes");
+    assert!(l.chapter_outputs(1).is_empty());
+    assert!(other.is_file(), "chapter 10 is untouched");
+    std::fs::remove_dir_all(&root).ok();
+}
+
+#[test]
+fn the_stage_folders_can_point_out_of_the_workspace_but_not_at_each_other() {
+    let root = fixture_root("stage-folders");
+    let l = Layout::new(&root);
+    assert_eq!(l.output(), root.join("output"), "output/ by default");
+    assert_eq!(l.audio(), root.join("data/audio"), "data/audio by default");
+    assert_eq!(
+        l.seg_dir("vieneu", 7),
+        root.join("data/audio/segments-default-vieneu-07")
+    );
+
+    // A relative path hangs off this workspace; `~` expands.
+    std::fs::create_dir_all(l.settings().parent().unwrap()).unwrap();
+    let mut s = crate::config::Settings::load(&l.settings());
+    s.output_dir = "drive/out".into();
+    s.segments_dir = "~/bm-segments".into();
+    s.save(&l.settings()).unwrap();
+    assert_eq!(l.output(), root.join("drive/out"));
+    assert_eq!(
+        l.audio(),
+        PathBuf::from(std::env::var("HOME").unwrap()).join("bm-segments")
+    );
+    assert_eq!(
+        l.seg_dir("vieneu", 7),
+        l.audio().join("segments-default-vieneu-07"),
+        "takes follow the configured folder"
+    );
+
+    // An absolute path is used as written.
+    let elsewhere = root.join("on-another-volume");
+    let mut s = crate::config::Settings::load(&l.settings());
+    s.output_dir = elsewhere.display().to_string();
+    s.save(&l.settings()).unwrap();
+    assert_eq!(l.output(), elsewhere);
+
+    // One folder for both stages is refused, and the refusal names it.
+    let mut s = crate::config::Settings::load(&l.settings());
+    s.output_dir = "shared".into();
+    s.segments_dir = "shared".into();
+    s.save(&l.settings()).unwrap();
+    let err = l.ensure().unwrap_err().to_string();
+    assert!(err.contains("same directory"), "{err}");
+    assert!(err.contains("shared"), "{err}");
+    std::fs::remove_dir_all(&root).ok();
+}
+
+#[test]
+fn publish_lands_in_the_configured_output_folder() {
+    let root = fixture_root("publish-elsewhere");
+    let l = Layout::new(&root);
+    std::fs::create_dir_all(l.settings().parent().unwrap()).unwrap();
+    let mut s = crate::config::Settings::load(&l.settings());
+    s.output_dir = "finished".into();
+    s.title_mode = "default".into();
+    s.save(&l.settings()).unwrap();
+    std::fs::create_dir_all(l.chapters()).unwrap();
+    std::fs::write(l.chapter_txt(4), "Chapter 4: Bốn\n\nbody\n").unwrap();
+
+    let scratch = root.join("scratch");
+    std::fs::create_dir_all(&scratch).unwrap();
+    let assembled = scratch.join("ch04.mp3");
+    std::fs::write(&assembled, "audio").unwrap();
+    crate::assemble::write_cues(
+        &crate::assemble::cues_path(&assembled),
+        &crate::assemble::Cues {
+            version: crate::assemble::CUES_VERSION,
+            chapter: 4,
+            duration_s: 1.0,
+            cues: Vec::new(),
+        },
+    )
+    .unwrap();
+
+    let out = crate::assemble::publish(&assembled, &l, 4).unwrap();
+    assert_eq!(out, root.join("finished/Ch.4 - Bốn.mp3"));
+    assert!(out.is_file(), "the mp3 landed in the configured folder");
+    assert!(
+        crate::assemble::cues_path(&out).is_file(),
+        "the sidecar followed it"
+    );
+    assert!(!assembled.exists(), "and scratch is empty of it");
+    assert!(
+        !root.join("output").exists(),
+        "the default folder is untouched"
+    );
+    std::fs::remove_dir_all(&root).ok();
 }

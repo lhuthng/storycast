@@ -75,6 +75,14 @@ pub struct Settings {
     /// Where a chapter's title comes from: `auto` or `default`.
     #[serde(default = "default_title_mode")]
     pub title_mode: String,
+    /// Where finished pairs land: `output/` under the workspace when empty.
+    /// `~` expands; a relative path is workspace-relative.
+    #[serde(default)]
+    pub output_dir: String,
+    /// Where rendered takes live: `data/audio/` under the workspace when
+    /// empty. `~` expands; a relative path is workspace-relative.
+    #[serde(default)]
+    pub segments_dir: String,
 }
 
 fn default_excerpt_window() -> u32 {
@@ -249,6 +257,8 @@ impl Default for Settings {
             excerpt_window: default_excerpt_window(),
             take_quality: default_take_quality(),
             title_mode: default_title_mode(),
+            output_dir: String::new(),
+            segments_dir: String::new(),
         }
     }
 }

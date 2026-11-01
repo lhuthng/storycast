@@ -1,7 +1,7 @@
 //! Confirm overlay.
 use crate::tui::{
     app::{App, HitTarget},
-    screen::Confirm,
+    screen::{Confirm, ConfirmAction},
     style::centered,
 };
 use ratatui::{
@@ -24,12 +24,24 @@ pub(crate) fn draw_confirm(f: &mut ratatui::Frame, app: &mut App, c: &Confirm) {
         .map(|l| Line::from(Span::styled(l.clone(), Style::default())))
         .collect();
     lines.push(Line::from(""));
-    lines.push(Line::from(vec![
-        Span::styled("Enter / y ", app.style(Color::Green)),
-        Span::raw("confirm    "),
-        Span::styled("Esc / n ", app.style(Color::Red)),
-        Span::raw("cancel"),
-    ]));
+    lines.push(match &c.action {
+        // The second answer is a keypress, not a button: a stage move is worth
+        // one deliberate key, never a second Enter.
+        ConfirmAction::StageDir { .. } => Line::from(vec![
+            Span::styled("Enter / y ", app.style(Color::Green)),
+            Span::raw("point here    "),
+            Span::styled("m ", app.style(Color::Yellow)),
+            Span::raw("move files    "),
+            Span::styled("Esc / n ", app.style(Color::Red)),
+            Span::raw("cancel"),
+        ]),
+        _ => Line::from(vec![
+            Span::styled("Enter / y ", app.style(Color::Green)),
+            Span::raw("confirm    "),
+            Span::styled("Esc / n ", app.style(Color::Red)),
+            Span::raw("cancel"),
+        ]),
+    });
 
     let button_y = area.y + c.body.len() as u16 + 2;
     let inner_x = area.x + 1;

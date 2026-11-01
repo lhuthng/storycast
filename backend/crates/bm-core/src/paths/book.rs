@@ -100,25 +100,33 @@ impl Layout {
 
     /// Per-chapter segment cache, keyed the same way.
     pub fn seg_dir(&self, engine: &str, n: u32) -> PathBuf {
-        self.data().join(format!(
-            "audio/segments-{}-{}-{n:02}",
+        self.audio().join(format!(
+            "segments-{}-{}-{n:02}",
             self.adapter,
             engine_key(engine)
         ))
     }
 
     pub fn ensure(&self) -> Result<()> {
+        let segments = self.audio();
+        let output = self.output();
         for d in [
             self.data(),
             self.chapters(),
             self.script_dir(),
             self.render_dir(),
-            self.audio(),
-            self.output(),
+            segments.clone(),
+            output.clone(),
             self.bm_state(),
             self.scratch(),
         ] {
             std::fs::create_dir_all(&d).with_context(|| format!("creating {}", d.display()))?;
+        }
+        if Self::same_dir(&segments, &output) {
+            anyhow::bail!(
+                "the segment and output folders are the same directory ({}) — point one of them elsewhere",
+                segments.display()
+            );
         }
         Ok(())
     }
@@ -167,5 +175,42 @@ impl Layout {
     pub fn final_mp3(&self, n: u32) -> PathBuf {
         self.output()
             .join(format!("Ch.{n} - {}.mp3", self.chapter_title(n)))
+    }
+
+    /// Every deliverable the chapter may have left in `output/`: the mp3s and
+    /// their cue sidecars under any title it has carried, `Ch.{n} - *` with an
+    /// mp3 or a `.cues.json` extension. A re-merge writes a new pair under the
+    /// current title; the older ones are orphans the merge should take with it.
+    pub fn chapter_outputs(&self, n: u32) -> Vec<PathBuf> {
+        let prefix = format!("Ch.{n} - ");
+        let Ok(entries) = std::fs::read_dir(self.output()) else {
+            return Vec::new();
+        };
+        entries
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| {
+                p.is_file()
+                    && p.file_name().and_then(|s| s.to_str()).is_some_and(|name| {
+                        name.starts_with(&prefix)
+                            && (name.ends_with(".mp3") || name.ends_with(".cues.json"))
+                    })
+            })
+            .collect()
+    }
+
+    /// Remove the chapter's output artifacts, sparing the `keep` pair. Returns
+    /// how many files went.
+    pub fn drop_chapter_outputs(&self, n: u32, keep: &[PathBuf]) -> usize {
+        let mut dropped = 0;
+        for p in self.chapter_outputs(n) {
+            if keep.contains(&p) {
+                continue;
+            }
+            if std::fs::remove_file(&p).is_ok() {
+                dropped += 1;
+            }
+        }
+        dropped
     }
 }

@@ -6,6 +6,7 @@ use super::quotes::needs_proofread;
 use super::quotes::parse_proofread_verdict;
 use super::quotes::repair_complaint;
 use super::quotes::repaired_txt;
+use super::quotes::split_paragraph_speeches;
 use super::quotes::ProofreadVerdict;
 use super::quotes::RepairVerdict;
 use super::run::proofread_text;
@@ -101,8 +102,12 @@ fn the_complaint_says_what_the_rule_is_not_just_the_scans_word_for_it() {
     );
     let complaint = repair_complaint(&findings);
     assert!(
-        complaint.contains("every paragraph of a speech needs its own pair"),
+        complaint.contains("close the speech at its last spoken paragraph"),
         "the rule, not only the symptom: {complaint}"
+    );
+    assert!(
+        complaint.contains("outside the marks"),
+        "what stays out of the pair: {complaint}"
     );
     assert!(
         complaint.contains("paragraph 2"),
@@ -188,6 +193,51 @@ fn the_repair_takes_a_clean_chapter_and_refuses_a_mispaired_one() {
             "not a chapter: {non_answer}"
         );
     }
+}
+
+#[test]
+fn a_speech_over_a_paragraph_break_gets_one_pair_per_paragraph() {
+    let text = "Hắn gật đầu.\n\n\"Không thể nào!\n\nTuyệt đối không thể nào!\"\n\nHắn quay lưng.";
+    let fixed = split_paragraph_speeches(text);
+    assert_eq!(
+        fixed,
+        "Hắn gật đầu.\n\n\"Không thể nào!\"\n\n\"Tuyệt đối không thể nào!\"\n\nHắn quay lưng.\n"
+    );
+    assert!(
+        quote_findings(&fixed).is_empty(),
+        "{:?}",
+        quote_findings(&fixed)
+    );
+    assert_eq!(split_paragraph_speeches(&fixed), fixed, "idempotent");
+}
+
+#[test]
+fn the_splitter_keeps_curly_pairs_terms_and_unclosed_quotes_as_they_are() {
+    assert_eq!(
+        split_paragraph_speeches("“Không thể nào!\n\nTuyệt đối không thể nào!”"),
+        "“Không thể nào!”\n\n“Tuyệt đối không thể nào!”\n"
+    );
+    let term = "Hắn nhắc đến \"cuồng phong bạo vũ\" trong lúc ấy.\n";
+    assert_eq!(split_paragraph_speeches(term), term);
+    let open = "\"Ta sẽ đi.\n\nHắn quay lưng.\n";
+    assert_eq!(split_paragraph_speeches(open), open);
+}
+
+#[test]
+fn the_repair_accepts_a_multi_paragraph_speech_by_splitting_it() {
+    let answer = repair_answer("Hắn gật đầu.\n\n\"Canh!\n\nMón canh này có vấn đề.\"\n\nHắn cười.");
+    let RepairVerdict::Fixed(fixed, _) = judge_repair(&answer) else {
+        panic!("a speech over a paragraph break is structural damage the pass can fix");
+    };
+    assert!(
+        fixed.contains("\"Canh!\"\n\n\"Món canh này có vấn đề.\""),
+        "{fixed}"
+    );
+    assert!(
+        quote_findings(&fixed).is_empty(),
+        "{:?}",
+        quote_findings(&fixed)
+    );
 }
 
 #[test]

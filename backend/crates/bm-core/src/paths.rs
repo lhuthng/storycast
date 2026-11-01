@@ -149,6 +149,35 @@ impl Layout {
         bound
     }
 
+    /// A configured folder: empty is `None` (the caller's default), `~`
+    /// expands, and a relative path hangs off the workspace.
+    pub fn resolve_dir(work: &Path, raw: &str) -> Option<PathBuf> {
+        let raw = raw.trim();
+        if raw.is_empty() {
+            return None;
+        }
+        let p = crate::util::expand_tilde(raw);
+        Some(if p.is_absolute() { p } else { work.join(p) })
+    }
+
+    /// Two paths naming one directory. Symlinks resolved, so a link to the
+    /// other folder is still the same folder, and a folder not created yet
+    /// still compares against one that is.
+    pub fn same_dir(a: &Path, b: &Path) -> bool {
+        canonical(a) == canonical(b)
+    }
+
+    /// `a` sits inside `b`, or is `b` itself.
+    pub fn inside(a: &Path, b: &Path) -> bool {
+        canonical(a).starts_with(canonical(b))
+    }
+
+    /// One folder is the other, or sits inside it. Moving the outer one
+    /// carries the inner one along, so a stage move refuses this.
+    pub fn overlaps(a: &Path, b: &Path) -> bool {
+        Self::inside(a, b) || Self::inside(b, a)
+    }
+
     /// Every adapter home this checkout carries: `(name, scope)`, the tree
     pub fn adapter_homes(&self) -> Vec<(String, PathBuf)> {
         let mut out: Vec<(String, PathBuf)> = Vec::new();
@@ -215,6 +244,31 @@ mod migrate;
 mod state;
 mod workspaces;
 pub use workspaces::{chapter_of, workspaces, WorkspaceConfig, WorkspaceEntry};
+
+/// The path with symlinks resolved as far as it exists: a missing tail hangs
+/// off its nearest existing ancestor, so a folder that is not created yet
+/// still compares against one that is.
+fn canonical(p: &Path) -> PathBuf {
+    let mut tail: Vec<std::ffi::OsString> = Vec::new();
+    let mut cur = p;
+    loop {
+        match std::fs::canonicalize(cur) {
+            Ok(mut done) => {
+                for part in tail.iter().rev() {
+                    done.push(part);
+                }
+                return done;
+            }
+            Err(_) => match (cur.parent(), cur.file_name()) {
+                (Some(parent), Some(name)) => {
+                    tail.push(name.to_os_string());
+                    cur = parent;
+                }
+                _ => return p.to_path_buf(),
+            },
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests;

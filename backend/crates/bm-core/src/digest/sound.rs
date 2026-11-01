@@ -10,12 +10,12 @@ use super::json::strip_fences;
 use super::manual::Vocabulary;
 use super::prompts::load_map;
 use super::prompts::PreparedChapter;
+use super::sound_fields::cap_overlong_beds;
 use super::sound_fields::carry_forward_fields;
 use super::sound_fields::drop_open_bed_openings;
-use super::sound_fields::cap_overlong_beds;
 use super::sound_fields::expand_sound_fields;
-use super::sound_fields::sound_design_gap;
 use super::sound_fields::seam_value;
+use super::sound_fields::sound_design_gap;
 use super::*;
 
 /// The staged lines as the sound answer's world: one entry per speakable
@@ -185,9 +185,11 @@ pub(crate) fn trim_open_beds(
     refusal: &str,
 ) -> Result<Vec<Value>, String> {
     let mut data = parse_sound_raw(raw, staged, vocab)?;
-    if drop_open_bed_openings(&mut data, &vocab.injects) || cap_overlong_beds(&mut data, &vocab.injects) > 0
+    if drop_open_bed_openings(&mut data, &vocab.injects)
+        || cap_overlong_beds(&mut data, &vocab.injects) > 0
     {
-        if let Some(gap) = sound_design_gap(&data, chapter_text, &vocab.injects, &vocab.sound_cues) {
+        if let Some(gap) = sound_design_gap(&data, chapter_text, &vocab.injects, &vocab.sound_cues)
+        {
             return Err(gap);
         }
         return Ok(data["segments"].as_array().cloned().unwrap_or_default());

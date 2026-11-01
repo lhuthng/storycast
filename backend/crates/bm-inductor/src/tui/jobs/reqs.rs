@@ -221,6 +221,16 @@ pub(crate) enum Job {
         base_url: String,
         key: String,
     },
+    /// Point one stage folder somewhere else and take the files along: holds
+    /// distribution, waits for the work in flight, moves, saves, resumes.
+    MoveStageDir {
+        layout: bm_core::Layout,
+        api: String,
+        http: reqwest::Client,
+        kind: bm_core::stage_dir::StageDir,
+        /// As typed, for re-planning when the job actually starts.
+        raw: String,
+    },
 }
 
 impl Job {
@@ -286,6 +296,7 @@ impl Job {
             Job::AwsLogin { .. } => "aws login",
             Job::AwsDiscover { .. } => "aws discover",
             Job::LlmModels { provider, .. } => return format!("fetch {provider} models"),
+            Job::MoveStageDir { kind, .. } => return format!("move {} folder", kind.label()),
             Job::Tracked { .. } => unreachable!(),
         }
         .to_string()
@@ -314,6 +325,9 @@ impl Job {
             | Job::AwsDown { .. }
             | Job::AwsLogin { .. }
             | Job::AwsDiscover { .. } => vec![Res::Aws],
+            // It holds distribution and rewrites where the stages look, so
+            // nothing else may be in flight while the folders move.
+            Job::MoveStageDir { .. } => vec![Res::Command, Res::Cluster],
             // Read-only indexes: a roster GET, a hundred file opens, one state
             // fetch. They never queue behind anything.
             Job::LoadRoster { .. }

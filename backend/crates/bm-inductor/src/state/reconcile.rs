@@ -59,6 +59,10 @@ impl Inner {
                     t.lease_until = None;
                     t.detail = "requeued: cue sidecar missing or stale".into();
                     t.updated = now_secs();
+                    // A stale sidecar means the deliverables are not the ones
+                    // the current script names: take the mp3 and any
+                    // older-titled pair with it, the merge rebuilds all.
+                    self.layout.drop_chapter_outputs(n, &[]);
                 }
             }
             // The render ledger: one row per take, `Done` exactly where the
@@ -153,7 +157,7 @@ impl Inner {
 
     /// The script changed underneath the chapter, so every unit's inputs are
     pub(crate) fn invalidate_render(&mut self, chapter: u32) {
-        let _ = std::fs::remove_file(self.layout.final_mp3(chapter));
+        self.layout.drop_chapter_outputs(chapter, &[]);
         self.replan_render_takes(chapter);
         let key = format!("{}:{chapter}", Stage::Merge);
         match self.tasks.get_mut(&key) {

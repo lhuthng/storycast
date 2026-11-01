@@ -578,3 +578,200 @@ async fn enter_on_a_voice_locks_its_sentence_for_later() {
         other => panic!("{other:?}"),
     }
 }
+
+#[tokio::test]
+async fn the_stage_folder_words_open_prefilled_prompts_that_ask_use_or_move() {
+    let http = reqwest::Client::new();
+    let (job_tx, mut job_rx) = tokio::sync::mpsc::unbounded_channel::<Job>();
+    let dir = std::env::temp_dir().join("bm-stage-folders-prompt");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut app = App::new("http://x");
+    app.layout = bm_core::Layout::new(&dir);
+    fn load(app: &App) -> bm_core::config::Settings {
+        bm_core::config::Settings::load(&app.layout.settings())
+    }
+
+    assert_eq!(command_key("output"), Some(Command::OutputDir));
+    assert_eq!(command_key("outdir"), Some(Command::OutputDir));
+    assert_eq!(command_key("segments"), Some(Command::SegmentsDir));
+    assert_eq!(command_key("segdir"), Some(Command::SegmentsDir));
+    assert_eq!(
+        command_key("o"),
+        Some(Command::AwsDown { force: false }),
+        "no single-key form: `o` still terminates the pool"
+    );
+
+    // Empty on the default folder is a no-op, not a rewrite.
+    do_command(&mut app, Command::OutputDir, &http, &job_tx);
+    handle_key(&mut app, key(KeyCode::Enter), &http, &job_tx).await;
+    assert!(matches!(app.screen, Screen::Normal), "{:?}", app.screen);
+    assert_eq!(load(&app).output_dir, "");
+
+    // A chapter is already finished in the default folder.
+    std::fs::create_dir_all(app.layout.output()).unwrap();
+    std::fs::write(app.layout.final_mp3(1), "audio").unwrap();
+    let old_mp3 = app.layout.final_mp3(1);
+
+    do_command(&mut app, Command::OutputDir, &http, &job_tx);
+    match &app.screen {
+        Screen::Text(p) => {
+            assert_eq!(p.kind, TextKind::OutputDir);
+            assert_eq!(p.buf, "", "nothing saved yet, so the default is implied");
+        }
+        other => panic!("expected the output prompt, got {other:?}"),
+    }
+    assert!(
+        job_rx.try_recv().is_err(),
+        "the prompt itself dispatches nothing"
+    );
+
+    // Enter on a path only asks: nothing is saved, created or moved.
+    let picked = dir.join("Drive Output");
+    if let Screen::Text(p) = &mut app.screen {
+        p.buf = picked.to_str().unwrap().into();
+    }
+    handle_key(&mut app, key(KeyCode::Enter), &http, &job_tx).await;
+    match &app.screen {
+        Screen::Confirm(c) => {
+            assert_eq!(c.title, "Point the output folder here?");
+            assert!(
+                c.body.iter().any(|l| l.contains("Drive Output")),
+                "{:?}",
+                c.body
+            );
+            assert!(
+                c.body
+                    .iter()
+                    .any(|l| l.contains("Enter keeps the 1 item(s)")),
+                "{:?}",
+                c.body
+            );
+            match &c.action {
+                ConfirmAction::StageDir { change } => {
+                    assert_eq!(change.kind, bm_core::stage_dir::StageDir::Output);
+                    assert_eq!(change.to, picked);
+                    assert_eq!(change.from, old_mp3.parent().unwrap());
+                }
+                other => panic!("expected the folder choice, got {other:?}"),
+            }
+        }
+        other => panic!("expected the folder choice, got {other:?}"),
+    }
+    assert_eq!(
+        load(&app).output_dir,
+        "",
+        "nothing is saved before the answer"
+    );
+    assert!(!picked.exists(), "and nothing is created");
+    assert!(old_mp3.is_file(), "the pair stays where it is");
+
+    // Esc cancels the choice and steps back to the path, which is still
+    // editable: the setting stands and nothing runs.
+    handle_key(&mut app, key(KeyCode::Esc), &http, &job_tx).await;
+    match &app.screen {
+        Screen::Text(p) => assert_eq!(p.buf, picked.to_str().unwrap()),
+        other => panic!("Esc returns to the path prompt, got {other:?}"),
+    }
+    assert_eq!(load(&app).output_dir, "");
+    assert!(job_rx.try_recv().is_err());
+    handle_key(&mut app, key(KeyCode::Esc), &http, &job_tx).await;
+    assert!(matches!(app.screen, Screen::Normal), "{:?}", app.screen);
+
+    // Enter answers "point here only": saved, created, files untouched.
+    do_command(&mut app, Command::OutputDir, &http, &job_tx);
+    if let Screen::Text(p) = &mut app.screen {
+        p.buf = picked.to_str().unwrap().into();
+    }
+    handle_key(&mut app, key(KeyCode::Enter), &http, &job_tx).await;
+    handle_key(&mut app, key(KeyCode::Enter), &http, &job_tx).await;
+    assert!(matches!(app.screen, Screen::Normal), "{:?}", app.screen);
+    assert!(picked.is_dir(), "the folder is created");
+    assert_eq!(load(&app).output_dir, picked.to_str().unwrap());
+    assert_eq!(app.layout.output(), picked);
+    assert!(old_mp3.is_file(), "pointing here moves nothing");
+    assert!(
+        job_rx.try_recv().is_err(),
+        "pointing here runs nothing in the background"
+    );
+
+    // The prompt comes back prefilled from the file: the inductor's snapshot
+    // is its boot one and would still say empty.
+    do_command(&mut app, Command::OutputDir, &http, &job_tx);
+    match &app.screen {
+        Screen::Text(p) => assert_eq!(p.buf, picked.to_str().unwrap()),
+        other => panic!("expected the output prompt, got {other:?}"),
+    }
+
+    // One folder for both stages is refused, and the prompt stays for an edit.
+    if let Screen::Text(p) = &mut app.screen {
+        p.buf = app.layout.audio().display().to_string();
+    }
+    handle_key(&mut app, key(KeyCode::Enter), &http, &job_tx).await;
+    match &app.screen {
+        Screen::Text(_) => assert!(
+            app.status.text.contains("other stage's folder"),
+            "{}",
+            app.status.text
+        ),
+        other => panic!("a refusal keeps the prompt, got {other:?}"),
+    }
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[tokio::test]
+async fn the_stage_folder_choice_can_take_the_files_along() {
+    let http = reqwest::Client::new();
+    let (job_tx, mut job_rx) = tokio::sync::mpsc::unbounded_channel::<Job>();
+    let dir = std::env::temp_dir().join("bm-stage-folders-move");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut app = App::new("http://x");
+    app.layout = bm_core::Layout::new(&dir);
+    std::fs::create_dir_all(app.layout.output()).unwrap();
+    std::fs::write(app.layout.final_mp3(1), "audio").unwrap();
+
+    // `m` on the choice dispatches the move; the keypress itself saves nothing.
+    let picked = dir.join("drive/out");
+    do_command(&mut app, Command::OutputDir, &http, &job_tx);
+    if let Screen::Text(p) = &mut app.screen {
+        p.buf = picked.to_str().unwrap().into();
+    }
+    handle_key(&mut app, key(KeyCode::Enter), &http, &job_tx).await;
+    handle_key(&mut app, key(KeyCode::Char('m')), &http, &job_tx).await;
+    assert!(matches!(app.screen, Screen::Normal), "{:?}", app.screen);
+    let moved = match job_rx.try_recv().expect("`m` dispatches the move") {
+        Job::Tracked { job, .. } => *job,
+        other => panic!("expected a tracked job, got {other:?}"),
+    };
+    assert!(
+        matches!(
+            &moved,
+            Job::MoveStageDir { kind: bm_core::stage_dir::StageDir::Output, raw, .. }
+                if raw.as_str() == picked.to_str().unwrap()
+        ),
+        "{moved:?}"
+    );
+    assert_eq!(
+        bm_core::config::Settings::load(&app.layout.settings()).output_dir,
+        "",
+        "the job saves the setting, not the keypress"
+    );
+
+    // Against a dead inductor nothing can be writing: the job moves without a
+    // hold, saves, and the layout follows.
+    let (tx, _ev_rx) = tokio::sync::mpsc::unbounded_channel::<Ev>();
+    run_job(moved, tx).await;
+    assert!(!dir.join("output").exists(), "the whole folder went");
+    assert!(
+        app.layout.final_mp3(1).is_file(),
+        "{}",
+        app.layout.final_mp3(1).display()
+    );
+    assert_eq!(app.layout.output(), picked);
+    assert_eq!(
+        bm_core::config::Settings::load(&app.layout.settings()).output_dir,
+        picked.to_str().unwrap()
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}

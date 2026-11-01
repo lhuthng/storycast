@@ -1559,7 +1559,8 @@ fn reconcile_adopts_the_stamp_without_undoing_a_promotion() {
 
 #[test]
 fn a_done_merge_without_its_sidecar_is_requeued_by_reconcile() {
-    // The remote-merge era marked merges Done from the mp3 alone, so the
+    // The remote-merge era marked merges Done from the mp3 alone, so a stray
+    // mp3 is not a done merge.
     let (_d, mut inner) = design_fixture();
     let layout = inner.layout.clone();
     let mut t = Task::new(1, Stage::Merge);
@@ -1573,8 +1574,8 @@ fn a_done_merge_without_its_sidecar_is_requeued_by_reconcile() {
     assert_eq!(m.state, TaskState::Pending, "no sidecar, not done");
     assert!(m.detail.contains("sidecar"), "{}", m.detail);
     assert!(
-        layout.final_mp3(1).is_file(),
-        "the mp3 stays for the re-merge to overwrite"
+        !layout.final_mp3(1).is_file(),
+        "a stale pair goes with the requeue"
     );
 }
 
@@ -7334,4 +7335,28 @@ fn reauthoring_the_range_trims_the_pending_work_outside_it() {
     assert_eq!(inner.tasks["digest:5000"].state, TaskState::Failed);
     // A second pass with the same range has nothing left to trim.
     assert_eq!(inner.trim_outside_range(10, 5), 0);
+}
+
+#[test]
+fn remerge_takes_the_old_titled_outputs_and_the_cues_with_it() {
+    let (_d, mut inner) = fixture();
+    std::fs::create_dir_all(inner.layout.output()).unwrap();
+    let mp3 = inner.layout.final_mp3(5);
+    std::fs::write(&mp3, "x").unwrap();
+    std::fs::write(bm_core::assemble::cues_path(&mp3), "{}").unwrap();
+    let old = inner.layout.output().join("Ch.5 - Đơn Xưa.mp3");
+    std::fs::write(&old, "x").unwrap();
+    std::fs::write(bm_core::assemble::cues_path(&old), "{}").unwrap();
+    inner.ensure_task(5, Stage::Merge);
+
+    inner.remerge_apply().expect("remerge runs");
+
+    assert!(!mp3.exists(), "the mp3 goes");
+    assert!(!bm_core::assemble::cues_path(&mp3).exists(), "the cues go");
+    assert!(!old.exists(), "the old-titled mp3 goes");
+    assert!(
+        !bm_core::assemble::cues_path(&old).exists(),
+        "the old-titled cues go"
+    );
+    assert_eq!(inner.tasks["merge:5"].state, TaskState::Pending);
 }

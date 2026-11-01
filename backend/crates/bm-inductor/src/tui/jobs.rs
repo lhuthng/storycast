@@ -38,6 +38,7 @@ pub(crate) use reqs::{
     fetch_state, op_job, send, set_machine_state, unreachable_verdict,
     verdict_after_failed_provision, DoneKind, Ev, Job, ProfileReq, WorkspaceReq,
 };
+use stage_dir::job_move_stage_dir;
 use std::collections::{BTreeSet, VecDeque};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -360,6 +361,13 @@ pub(crate) async fn run_job(job: Job, tx: tokio::sync::mpsc::UnboundedSender<Ev>
             base_url,
             key,
         } => job_llm_models(tx, provider, kind, base_url, key).await,
+        Job::MoveStageDir {
+            layout,
+            api,
+            http,
+            kind,
+            raw,
+        } => job_move_stage_dir(tx, layout, api, http, kind, raw).await,
     }
 }
 
@@ -373,4 +381,5 @@ mod data;
 mod digest;
 mod provision;
 mod reqs;
+mod stage_dir;
 mod workspace;

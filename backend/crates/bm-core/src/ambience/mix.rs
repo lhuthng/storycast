@@ -186,280 +186,46 @@ pub fn apply_layers(
         0.0
     };
     let total = voice_total + reserve;
-    let voice_fx = if on.effects {
-        build_voice_track(voice_wav, slots, &spans, &cfg.reverb_presets, total, &work)?
-    } else {
-        voice_wav.to_path_buf()
-    };
-
-    // 2. the effect layer: gated windows, sparse on purpose.
     let windows = if on.effects {
         plan_windows(&spans, &cfg.layers.effect, total)
     } else {
         Vec::new()
     };
-    let mut missing: Vec<String> = Vec::new();
-    let mut fx_slices: Vec<Slice> = Vec::new();
-    let mut fx_log: Vec<FxReport> = Vec::new();
-    // Every take in the pool, so a looped bed knows how long its clip is. The
-    let fx_durs = probe_durs(
-        &effect_pool
-            .values()
-            .flat_map(|s| s.files.clone())
-            .collect::<Vec<String>>(),
-        assets,
-        "effect",
-    );
-    for (n, w) in windows.iter().enumerate() {
-        let seed = audio_pool::seed(chapter, n, &w.tags);
-        let Some(clip) = audio_pool::pick(&effect_pool, &w.tags, seed) else {
-            continue;
-        };
-        let src = clip_path(assets, &clip.file);
-        if !src.is_file() {
-            if !missing.contains(&clip.file) {
-                missing.push(clip.file.clone());
-            }
-            continue;
-        }
-        let dur = w.end - w.start;
-        // Three rungs, multiplied: the rule's balance against other scenes, the
-        let vol = w.level * clip.level;
-        let p = work.join(format!("fx{n}.wav"));
-        if clip.looped {
-            // A bed that outruns its clip repeats with a crossfade at each seam,
-            let clip_s = fx_durs.get(&clip.file).copied().unwrap_or(0.0);
-            let graph = effect_bed_graph(dur, clip_s, cfg.layers.effect.loop_xfade_s, vol);
-            ffmpeg(&[
-                "-y".into(),
-                "-loglevel".into(),
-                "error".into(),
-                "-i".into(),
-                s(src.display()),
-                "-filter_complex".into(),
-                graph,
-                "-map".into(),
-                "[out]".into(),
-                "-t".into(),
-                format!("{dur:.3}"),
-                s(p.display()),
-            ])?;
-        } else {
-            // A one-shot is faded at *its own* end, whatever that is: `areverse`
-            ffmpeg(&[
-                "-y".into(),
-                "-loglevel".into(),
-                "error".into(),
-                "-i".into(),
-                s(src.display()),
-                "-t".into(),
-                format!("{dur:.3}"),
-                "-af".into(),
-                format!(
-                    "volume={vol:.4},areverse,afade=t=in:st=0:d=0.4,areverse,\
-                     aformat=sample_rates=48000:channel_layouts=mono"
-                ),
-                s(p.display()),
-            ])?;
-        }
-        // A window that reaches the end of the chapter is the last thing this
-        let closing = w.end >= total - 0.05;
-        fx_slices.push(Slice {
-            path: p,
-            start: w.start,
-            dur,
-            fade_in: cfg.layers.effect.fade_s,
-            fade_out: match (clip.looped, closing) {
-                (true, true) => cfg.layers.effect.end_fade_s,
-                (true, false) => cfg.layers.effect.fade_s,
-                (false, _) => 0.0,
-            },
-        });
-        fx_log.push(FxReport {
-            span: w.span,
-            start: w.start,
-            end: w.end,
-            // The sound's name, not the take's: `day`, never `day-2`. The log
-            name: clip.sound.clone(),
-            // What was actually applied, not the rule's share of it: the report
-            level: vol,
-            one_shot: !clip.looped,
-        });
-    }
-    for f in &missing {
-        eprintln!("effect: pooled clip missing ({f}) -> no effect for its windows");
-    }
-    let effect_mix = if fx_slices.is_empty() {
-        None
-    } else {
-        let p = work.join("effect.wav");
-        place(&fx_slices, &p, total)?;
-        Some(p)
-    };
-
-    // 3. the music layer: continuous, quiet, lifting inside a pause.
     let runs = if on.music {
         plan_music(slots, &pauses, chapter, &music_pool, &cfg.music_palette)
     } else {
         Vec::new()
     };
-    let mut mu_slices: Vec<Slice> = Vec::new();
-    let starts = music_starts(&runs, cfg.layers.music.xfade_s);
-    // How long each take is, so a run longer than its track can be rendered as
-    let mu_durs = probe_durs(
-        &runs.iter().map(|r| r.file.clone()).collect::<Vec<String>>(),
-        assets,
-        "music",
-    );
-    for (n, run) in runs.iter().enumerate() {
-        // The take was chosen once, in `plan_music`, and travels on the run:
-        let src = clip_path(assets, &run.file);
-        if !src.is_file() {
-            eprintln!(
-                "music: pooled clip missing ({}) -> that run is silent",
-                run.file
-            );
-            continue;
-        }
-        let last = n + 1 == runs.len();
-        // Every run but the last carries a tail long enough to overlap the next
-        let start = starts[n];
-        let tail = if last { 0.0 } else { cfg.layers.music.xfade_s };
-        let dur = (run.end - run.start) + tail + (run.start - start);
-        let p = work.join(format!("mu{n}.wav"));
-        let expr = level_expr(
-            // Both levels carry the run's own trim, so a track that sits quiet
-            cfg.layers.music.level * run.level,
-            cfg.layers.music.pause_level * run.level,
-            cfg.layers.music.ramp_s,
-            start,
-            &run.pauses,
-        );
-        let graph = music_run_graph(
-            dur,
-            mu_durs.get(&run.file).copied().unwrap_or(0.0),
-            cfg.layers.music.xfade_s,
-            &expr,
-        );
-        ffmpeg(&[
-            "-y".into(),
-            "-loglevel".into(),
-            "error".into(),
-            "-i".into(),
-            s(src.display()),
-            "-filter_complex".into(),
-            graph,
-            "-map".into(),
-            "[out]".into(),
-            "-t".into(),
-            format!("{dur:.3}"),
-            s(p.display()),
-        ])?;
-        let (fade_in, fade_out) = music_fades(n, last, &cfg.layers.music);
-        mu_slices.push(Slice {
-            path: p,
-            start,
-            dur,
-            fade_in,
-            fade_out,
-        });
-    }
-    let music_mix = if mu_slices.is_empty() {
-        None
-    } else {
-        let p = work.join("music.wav");
-        place(&mu_slices, &p, total)?;
-        Some(p)
-    };
 
-    // 4. the inject layer: script-placed spot effects on their own track.
-    let events: Vec<InjectEvent> = if on.effects {
-        let pool = audio_pool::load_pool(&assets.join("inject-pool.json"));
-        let takes = plan_inject_takes(slots, &pool, chapter);
-        plan_injects(slots, &takes, inj_durs, &cfg.layers.inject)
-    } else {
-        Vec::new()
-    };
-    let inject_mix: Option<PathBuf> = match events.is_empty() {
-        true => None,
-        false => {
-            let mut ij_slices: Vec<Slice> = Vec::new();
-            for (n, e) in events.iter().enumerate() {
-                let dur = e.end - e.start;
-                if dur <= 0.01 {
-                    continue;
-                }
-                let src = clip_path(assets, &e.file);
-                if !src.is_file() {
-                    eprintln!("inject: pooled clip missing ({}) -> skipped", e.file);
-                    continue;
-                }
-                let p = work.join(format!("ij{n}.wav"));
-                let vol = e.level * cfg.layers.inject.level;
-                let clip_s = inj_durs.get(&e.file).copied().unwrap_or(0.0);
-                // A bed the pool marks `looped` fills its window by repeating,
-                let copies = if e.looped {
-                    loop_copies(dur, clip_s, cfg.layers.inject.loop_xfade_s)
+    // The beds are laid on their own tracks and never read each other, so they
+    // run beside the voice pass; only the duck at the end joins them.
+    let (voice_fx, (effect_mix, fx_log), music_mix, (inject_mix, events)) =
+        std::thread::scope(|scope| {
+            let voice = scope.spawn(|| {
+                if on.effects {
+                    build_voice_track(voice_wav, slots, &spans, &cfg.reverb_presets, total, &work)
                 } else {
-                    None
-                };
-                match copies {
-                    Some(k) => {
-                        let graph = loop_filter(k, cfg.layers.inject.loop_xfade_s, vol);
-                        ffmpeg(&[
-                            "-y".into(),
-                            "-loglevel".into(),
-                            "error".into(),
-                            "-i".into(),
-                            s(src.display()),
-                            "-filter_complex".into(),
-                            graph,
-                            "-map".into(),
-                            "[out]".into(),
-                            "-t".into(),
-                            format!("{dur:.3}"),
-                            s(p.display()),
-                        ])?;
-                    }
-                    None => {
-                        ffmpeg(&[
-                            "-y".into(),
-                            "-loglevel".into(),
-                            "error".into(),
-                            "-i".into(),
-                            s(src.display()),
-                            "-t".into(),
-                            format!("{dur:.3}"),
-                            "-af".into(),
-                            format!(
-                                "volume={vol:.4},aformat=sample_rates=48000:channel_layouts=mono"
-                            ),
-                            s(p.display()),
-                        ])?;
-                    }
+                    Ok(voice_wav.to_path_buf())
                 }
-                ij_slices.push(Slice {
-                    path: p,
-                    start: e.start,
-                    dur,
-                    fade_in: e.fade_in,
-                    fade_out: e.fade_out,
-                });
-            }
-            if ij_slices.is_empty() {
-                None
-            } else {
-                let p = work.join("inject.wav");
-                // The track is at least as long as what it carries, never
-                let end = ij_slices
-                    .iter()
-                    .map(|s| s.start + s.dur)
-                    .fold(total, f64::max);
-                place(&ij_slices, &p, end)?;
-                Some(p)
-            }
-        }
-    };
+            });
+            let effect = scope.spawn(|| {
+                effect_layer(&windows, &effect_pool, &cfg, chapter, total, &work, assets)
+            });
+            let music = scope.spawn(|| music_layer(&runs, &cfg, total, &work, assets));
+            let inject = scope.spawn(|| {
+                if on.effects {
+                    inject_layer(slots, inj_durs, &cfg, chapter, total, &work, assets)
+                } else {
+                    Ok((None, Vec::new()))
+                }
+            });
+            Ok::<_, anyhow::Error>((
+                joined(voice)?,
+                joined(effect)?,
+                joined(music)?,
+                joined(inject)?,
+            ))
+        })?;
 
     // 5. one duck for the beds, keyed on the voice, and the inject layer
     let beds: Vec<&PathBuf> = [effect_mix.as_ref(), music_mix.as_ref()]
@@ -501,6 +267,287 @@ pub fn apply_layers(
     log_plan(&spans, &pauses, &fx_log, &runs, &events, &cfg);
     cleanup(&work);
     Ok(out.to_path_buf())
+}
+
+fn joined<T>(h: std::thread::ScopedJoinHandle<'_, Result<T>>) -> Result<T> {
+    match h.join() {
+        Ok(r) => r,
+        Err(e) => std::panic::resume_unwind(e),
+    }
+}
+
+/// The effect layer: gated windows, sparse on purpose. Only a looped bed needs
+/// its clip's length, so only the takes it picks are probed.
+#[allow(clippy::too_many_arguments)]
+fn effect_layer(
+    windows: &[Window],
+    pool: &crate::audio_pool::ClipPool,
+    cfg: &SceneMap,
+    chapter: u32,
+    total: f64,
+    work: &Path,
+    assets: &Path,
+) -> Result<(Option<PathBuf>, Vec<FxReport>)> {
+    let mut missing: Vec<String> = Vec::new();
+    let mut picked: Vec<(usize, Window, audio_pool::Picked)> = Vec::new();
+    for (n, w) in windows.iter().enumerate() {
+        let seed = audio_pool::seed(chapter, n, &w.tags);
+        let Some(clip) = audio_pool::pick(pool, &w.tags, seed) else {
+            continue;
+        };
+        if !clip_path(assets, &clip.file).is_file() {
+            if !missing.contains(&clip.file) {
+                missing.push(clip.file.clone());
+            }
+            continue;
+        }
+        picked.push((n, w.clone(), clip));
+    }
+    let mut looped: Vec<String> = Vec::new();
+    for (_, _, clip) in &picked {
+        if clip.looped && !looped.contains(&clip.file) {
+            looped.push(clip.file.clone());
+        }
+    }
+    let durs = probe_durs(&looped, assets, "effect");
+    let mut slices: Vec<Slice> = Vec::new();
+    let mut log: Vec<FxReport> = Vec::new();
+    for (n, w, clip) in picked {
+        let src = clip_path(assets, &clip.file);
+        let dur = w.end - w.start;
+        // Three rungs, multiplied: the rule's balance against other scenes, the
+        let vol = w.level * clip.level;
+        let p = work.join(format!("fx{n}.wav"));
+        if clip.looped {
+            // A bed that outruns its clip repeats with a crossfade at each seam,
+            let clip_s = durs.get(&clip.file).copied().unwrap_or(0.0);
+            let graph = effect_bed_graph(dur, clip_s, cfg.layers.effect.loop_xfade_s, vol);
+            ffmpeg(&[
+                "-y".into(),
+                "-loglevel".into(),
+                "error".into(),
+                "-i".into(),
+                s(src.display()),
+                "-filter_complex".into(),
+                graph,
+                "-map".into(),
+                "[out]".into(),
+                "-t".into(),
+                format!("{dur:.3}"),
+                s(p.display()),
+            ])?;
+        } else {
+            // A one-shot is faded at *its own* end, whatever that is: `areverse`
+            ffmpeg(&[
+                "-y".into(),
+                "-loglevel".into(),
+                "error".into(),
+                "-i".into(),
+                s(src.display()),
+                "-t".into(),
+                format!("{dur:.3}"),
+                "-af".into(),
+                format!(
+                    "volume={vol:.4},areverse,afade=t=in:st=0:d=0.4,areverse,\
+                     aformat=sample_rates=48000:channel_layouts=mono"
+                ),
+                s(p.display()),
+            ])?;
+        }
+        // A window that reaches the end of the chapter is the last thing this
+        let closing = w.end >= total - 0.05;
+        slices.push(Slice {
+            path: p,
+            start: w.start,
+            dur,
+            fade_in: cfg.layers.effect.fade_s,
+            fade_out: match (clip.looped, closing) {
+                (true, true) => cfg.layers.effect.end_fade_s,
+                (true, false) => cfg.layers.effect.fade_s,
+                (false, _) => 0.0,
+            },
+        });
+        log.push(FxReport {
+            span: w.span,
+            start: w.start,
+            end: w.end,
+            // The sound's name, not the take's: `day`, never `day-2`. The log
+            name: clip.sound.clone(),
+            // What was actually applied, not the rule's share of it: the report
+            level: vol,
+            one_shot: !clip.looped,
+        });
+    }
+    for f in &missing {
+        eprintln!("effect: pooled clip missing ({f}) -> no effect for its windows");
+    }
+    if slices.is_empty() {
+        return Ok((None, log));
+    }
+    let p = work.join("effect.wav");
+    place(&slices, &p, total)?;
+    Ok((Some(p), log))
+}
+
+/// The music layer: continuous, quiet, lifting inside a pause.
+fn music_layer(
+    runs: &[MusicRun],
+    cfg: &SceneMap,
+    total: f64,
+    work: &Path,
+    assets: &Path,
+) -> Result<Option<PathBuf>> {
+    let mut slices: Vec<Slice> = Vec::new();
+    let starts = music_starts(runs, cfg.layers.music.xfade_s);
+    // How long each take is, so a run longer than its track can be rendered as
+    let durs = probe_durs(
+        &runs.iter().map(|r| r.file.clone()).collect::<Vec<String>>(),
+        assets,
+        "music",
+    );
+    for (n, run) in runs.iter().enumerate() {
+        // The take was chosen once, in `plan_music`, and travels on the run:
+        let src = clip_path(assets, &run.file);
+        if !src.is_file() {
+            eprintln!(
+                "music: pooled clip missing ({}) -> that run is silent",
+                run.file
+            );
+            continue;
+        }
+        let last = n + 1 == runs.len();
+        // Every run but the last carries a tail long enough to overlap the next
+        let start = starts[n];
+        let tail = if last { 0.0 } else { cfg.layers.music.xfade_s };
+        let dur = (run.end - run.start) + tail + (run.start - start);
+        let p = work.join(format!("mu{n}.wav"));
+        let expr = level_expr(
+            // Both levels carry the run's own trim, so a track that sits quiet
+            cfg.layers.music.level * run.level,
+            cfg.layers.music.pause_level * run.level,
+            cfg.layers.music.ramp_s,
+            start,
+            &run.pauses,
+        );
+        let graph = music_run_graph(
+            dur,
+            durs.get(&run.file).copied().unwrap_or(0.0),
+            cfg.layers.music.xfade_s,
+            &expr,
+        );
+        ffmpeg(&[
+            "-y".into(),
+            "-loglevel".into(),
+            "error".into(),
+            "-i".into(),
+            s(src.display()),
+            "-filter_complex".into(),
+            graph,
+            "-map".into(),
+            "[out]".into(),
+            "-t".into(),
+            format!("{dur:.3}"),
+            s(p.display()),
+        ])?;
+        let (fade_in, fade_out) = music_fades(n, last, &cfg.layers.music);
+        slices.push(Slice {
+            path: p,
+            start,
+            dur,
+            fade_in,
+            fade_out,
+        });
+    }
+    if slices.is_empty() {
+        return Ok(None);
+    }
+    let p = work.join("music.wav");
+    place(&slices, &p, total)?;
+    Ok(Some(p))
+}
+
+/// The inject layer: script-placed spot effects on their own track.
+fn inject_layer(
+    slots: &[Slot],
+    inj_durs: &BTreeMap<String, f64>,
+    cfg: &SceneMap,
+    chapter: u32,
+    total: f64,
+    work: &Path,
+    assets: &Path,
+) -> Result<(Option<PathBuf>, Vec<InjectEvent>)> {
+    let pool = audio_pool::load_pool(&assets.join("inject-pool.json"));
+    let takes = plan_inject_takes(slots, &pool, chapter);
+    let events = plan_injects(slots, &takes, inj_durs, &cfg.layers.inject);
+    let mut slices: Vec<Slice> = Vec::new();
+    for (n, e) in events.iter().enumerate() {
+        let dur = e.end - e.start;
+        if dur <= 0.01 {
+            continue;
+        }
+        let src = clip_path(assets, &e.file);
+        if !src.is_file() {
+            eprintln!("inject: pooled clip missing ({}) -> skipped", e.file);
+            continue;
+        }
+        let p = work.join(format!("ij{n}.wav"));
+        let vol = e.level * cfg.layers.inject.level;
+        let clip_s = inj_durs.get(&e.file).copied().unwrap_or(0.0);
+        // A bed the pool marks `looped` fills its window by repeating,
+        let copies = if e.looped {
+            loop_copies(dur, clip_s, cfg.layers.inject.loop_xfade_s)
+        } else {
+            None
+        };
+        match copies {
+            Some(k) => {
+                let graph = loop_filter(k, cfg.layers.inject.loop_xfade_s, vol);
+                ffmpeg(&[
+                    "-y".into(),
+                    "-loglevel".into(),
+                    "error".into(),
+                    "-i".into(),
+                    s(src.display()),
+                    "-filter_complex".into(),
+                    graph,
+                    "-map".into(),
+                    "[out]".into(),
+                    "-t".into(),
+                    format!("{dur:.3}"),
+                    s(p.display()),
+                ])?;
+            }
+            None => {
+                ffmpeg(&[
+                    "-y".into(),
+                    "-loglevel".into(),
+                    "error".into(),
+                    "-i".into(),
+                    s(src.display()),
+                    "-t".into(),
+                    format!("{dur:.3}"),
+                    "-af".into(),
+                    format!("volume={vol:.4},aformat=sample_rates=48000:channel_layouts=mono"),
+                    s(p.display()),
+                ])?;
+            }
+        }
+        slices.push(Slice {
+            path: p,
+            start: e.start,
+            dur,
+            fade_in: e.fade_in,
+            fade_out: e.fade_out,
+        });
+    }
+    if slices.is_empty() {
+        return Ok((None, events));
+    }
+    let p = work.join("inject.wav");
+    // The track is at least as long as what it carries, never
+    let end = slices.iter().map(|s| s.start + s.dur).fold(total, f64::max);
+    place(&slices, &p, end)?;
+    Ok((Some(p), events))
 }
 
 /// The mix graph: the beds ducked under the voice, the inject layer on top, and

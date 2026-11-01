@@ -252,45 +252,54 @@ pub fn probe_inject_durs(
 
 /// Duration in seconds of each named pool file, keyed by the same `assets/`-
 pub fn probe_durs(files: &[String], assets: &Path, what: &str) -> BTreeMap<String, f64> {
+    let mut unique: Vec<&String> = Vec::new();
+    for file in files {
+        if !unique.contains(&file) {
+            unique.push(file);
+        }
+    }
+    let Ok(probed) = crate::util::parallel_map(&unique, |_, file| {
+        Ok(probe_seconds(&clip_path(assets, file)))
+    }) else {
+        return BTreeMap::new();
+    };
     let mut out = BTreeMap::new();
     let mut missing: Vec<String> = Vec::new();
-    for file in files {
-        if out.contains_key(file) {
-            continue;
-        }
-        let p = clip_path(assets, file);
-        let dur = Command::new("ffprobe")
-            .args([
-                "-v",
-                "error",
-                "-show_entries",
-                "format=duration",
-                "-of",
-                "csv=p=0",
-                &p.to_string_lossy(),
-            ])
-            .output()
-            .ok()
-            .and_then(|o| {
-                String::from_utf8_lossy(&o.stdout)
-                    .trim()
-                    .parse::<f64>()
-                    .ok()
-            })
-            .filter(|d| *d > 0.0);
+    for (file, dur) in unique.into_iter().zip(probed) {
         match dur {
             Some(d) => {
                 out.insert(file.clone(), d);
             }
             None => {
-                if !missing.contains(file) {
-                    missing.push(file.clone());
-                    eprintln!("{what}: cannot probe {file} -> treated as a single pass");
-                }
+                missing.push(file.clone());
+                eprintln!("{what}: cannot probe {file} -> treated as a single pass");
             }
         }
     }
     out
+}
+
+/// One clip's duration, or `None` when it will not read.
+fn probe_seconds(p: &Path) -> Option<f64> {
+    Command::new("ffprobe")
+        .args([
+            "-v",
+            "error",
+            "-show_entries",
+            "format=duration",
+            "-of",
+            "csv=p=0",
+            &p.to_string_lossy(),
+        ])
+        .output()
+        .ok()
+        .and_then(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .trim()
+                .parse::<f64>()
+                .ok()
+        })
+        .filter(|d| *d > 0.0)
 }
 
 /// Solo time each slot's injects need, written into the gap that follows the

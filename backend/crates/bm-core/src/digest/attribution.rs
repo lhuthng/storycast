@@ -366,6 +366,23 @@ no narration ids, no invented ids, no dropped line.
 - Two dialogue lines may spell out exactly the same text — a street hailing the
   same person twice on two consecutive lines. They are two events with two ids:
   answer both, and never merge, drop, or reuse one answer for the other.
+- **A run of dialogue events with no narration between them is not one speech
+  by default.** Each event gets its own speaker. Keep one speaker across the run
+  only when the lines are one continuous utterance: the sentence runs on, the
+  same first-person voice and addressee carry through, or the preparer split one
+  multi-paragraph speech. Give a line a different speaker when it answers the
+  previous line, opens with a vocative naming the other character, changes
+  stance, or contradicts the previous line. Use the nearest tagged narration
+  before and after the run as anchors. Never give a whole run one name because
+  no narrator interrupts, and never alternate mechanically. Correct attribution
+  to the person who actually says the line is the goal; a conversation that
+  merely sounds plausible is not evidence.
+- **Resolve every quote from its surrounding context.** Read the narration
+  immediately before and after it, any tag inside the run, the vocative or
+  addressee, and the nearest tagged lines. The surrounding context decides the
+  speaker. The order of the lines, a plausible-sounding exchange, and the
+  previous speaker are never evidence by themselves. A name inside the quote is
+  the listener unless the quote claims it in the first person.
 - `Anonymous` is the one speaker for a person the source never names — a street
   crowd, a shopkeeper, a voice in the dark, a figure the chapter only describes
   by garb, body or age. Every unnamed speaker is `Anonymous`; never number them,

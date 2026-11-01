@@ -275,6 +275,30 @@ pub(crate) fn do_command(
                 &cur,
             ));
         }
+        Command::OutputDir => {
+            let cur = stage_dir_raw(app, bm_core::stage_dir::StageDir::Output);
+            app.screen = Screen::Text(TextPrompt::new(
+                TextKind::OutputDir,
+                "Output folder",
+                "where finished `Ch.N - Title.mp3` and its `.cues.json` land. Empty keeps \
+                 this workspace's `output/`; `~` expands and a relative path is \
+                 workspace-relative. Enter then asks whether to leave the existing files \
+                 where they are or take them along. The folder may not be the segment one.",
+                &cur,
+            ));
+        }
+        Command::SegmentsDir => {
+            let cur = stage_dir_raw(app, bm_core::stage_dir::StageDir::Segments);
+            app.screen = Screen::Text(TextPrompt::new(
+                TextKind::SegmentsDir,
+                "Segment folder",
+                "where the per-chapter `segments-*` takes live. Empty keeps this \
+                 workspace's `data/audio/`; `~` expands and a relative path is \
+                 workspace-relative. Enter then asks whether to leave the existing takes \
+                 where they are or take them along. It may not be the output folder.",
+                &cur,
+            ));
+        }
         Command::RenderBatch => {
             // Prefilled from `run_preview` — the *same* precedence the run
             let cur = run_preview(app).render_batch;
