@@ -204,6 +204,13 @@ fn a_shipped_take_is_stored_and_a_bad_one_is_skipped() {
         !layout.seg_dir("vieneu", 1).join("evil.wav").exists(),
         "unexpected names never land"
     );
+    // A stored shipment is not \"missing\", so the pull that follows a render
+    // has nothing to fetch for it.
+    assert_eq!(
+        crate::segments::missing_wavs(&layout, "vieneu", 1),
+        Some(Vec::new()),
+        "a shipped take must not be pulled a second time"
+    );
     // task_ids that name no chapter store nothing and do not panic.
     store_shipments(
         &layout,

@@ -7,6 +7,7 @@ use bm_proto::Machine;
 #[allow(clippy::too_many_arguments)]
 pub fn provision(
     m: &Machine,
+    ssh: Ssh,
     layout: &crate::Layout,
     agent_binary: &Path,
     tts_binary: &Path,
@@ -18,24 +19,24 @@ pub fn provision(
     // `owner/name` of the releases that host the model artifact. `None` reads
     release_repo: Option<&str>,
 ) -> (Probe, Vec<String>) {
-    let ssh = Ssh::for_machine(m);
     // Cloned, not moved: the install steps below borrow the original for
+    let tag = m.handle();
     let mut log = LiveLog::new(live.clone());
 
     let mut probe = match initial_probe {
         Some(p) => {
-            log.push(format!("[{}] {}", m.id, p.summary()));
+            log.push(format!("[{}] {}", tag, p.summary()));
             p
         }
         None => {
-            log.push(format!("[{}] probing {}", m.id, ssh.target));
+            log.push(format!("[{}] probing {}", tag, ssh.target));
             let p = ssh.probe(&layout.engine);
-            log.push(format!("[{}] {}", m.id, p.summary()));
+            log.push(format!("[{}] {}", tag, p.summary()));
             p
         }
     };
     if !probe.reachable {
-        log.push(format!("[{}] unreachable, aborting provision", m.id));
+        log.push(format!("[{}] unreachable, aborting provision", tag));
         return (probe, log.lines);
     }
 
@@ -54,7 +55,7 @@ pub fn provision(
             Ok(r) => {
                 log.push(format!(
                     "[{}] the preset bucket publishes {} ({}), not this host's bake — the weights travel over the push",
-                    m.id,
+                    tag,
                     r.tag,
                     crate::artifact::tag_for(&r.hash)
                 ));
@@ -63,7 +64,7 @@ pub fn provision(
             Err(e) => {
                 log.push(format!(
                     "[{}] preset bucket unreachable ({e:#}), the weights travel over the push",
-                    m.id
+                    tag
                 ));
                 None
             }
@@ -74,7 +75,7 @@ pub fn provision(
     if repo.trim().is_empty() {
         log.push(format!(
             "[{}] no models release configured, the weights travel over the push",
-            m.id
+            tag
         ));
     }
 
@@ -95,7 +96,7 @@ pub fn provision(
             Err(e) => {
                 log.push(format!(
                     "[{}] preset bucket unreachable ({e:#}), so assets/ travels over the push",
-                    m.id
+                    tag
                 ));
                 None
             }
@@ -107,7 +108,7 @@ pub fn provision(
         if layout.owns_assets() {
             log.push(format!(
                 "[{}] packs_release is set but this workspace composes its own assets/ — the book's tree travels in the bundle, not as a pack release",
-                m.id
+                tag
             ));
         } else if pack.is_none() {
             let binding = crate::profile::in_force(layout).ok();
@@ -118,7 +119,7 @@ pub fn provision(
             log.push(format!(
                 "[{}] packs_release is set but {} names no versioned pack, so assets/ travels over the push \
                  (re-publish it: tools/profile.sh pack <name> --version <v> && gh release create {}-pack-v<v> …)",
-                m.id,
+                tag,
                 pointer,
                 binding.map(|b| b.pack.name).unwrap_or_default(),
             ));
@@ -127,8 +128,8 @@ pub fn provision(
 
     // Before anything is pushed: the sources bundle is `tar` + `zstd`, so the
     match ssh.ensure_zstd() {
-        Ok(v) => log.push(format!("[{}] {v}", m.id)),
-        Err(e) => log.push(format!("[{}] zstd check failed: {e}", m.id)),
+        Ok(v) => log.push(format!("[{}] {v}", tag)),
+        Err(e) => log.push(format!("[{}] zstd check failed: {e}", tag)),
     }
 
     // Self-healing enrollment: the manifest may name clones the pushed store
@@ -136,7 +137,7 @@ pub fn provision(
     if !baked.is_empty() {
         log.push(format!(
             "[{}] baked {} voice(s) into models/voices.json: {}",
-            m.id,
+            tag,
             baked.len(),
             baked.join(", ")
         ));
@@ -154,7 +155,7 @@ pub fn provision(
         Ok(s) => s,
         Err(e) => {
             probe.note = format!("cannot read the sources it would push: {e:#}");
-            log.push(format!("[{}] {}", m.id, probe.note));
+            log.push(format!("[{}] {}", tag, probe.note));
             return (probe, log.lines);
         }
     };
@@ -187,7 +188,7 @@ pub fn provision(
     if already {
         log.push(format!(
             "[{}] already configured (agent {} + tts sidecar)",
-            m.id, agent_version
+            tag, agent_version
         ));
         // The version string cannot see a rebuild: every dev build between
         if !remote_stamp
@@ -197,9 +198,9 @@ pub fn provision(
             match ssh.install_agent(agent_binary, live.as_ref()) {
                 Ok(v) => log.push(format!(
                     "[{}] agent binary drifted, redeployed (reports version {v})",
-                    m.id
+                    tag
                 )),
-                Err(e) => log.push(format!("[{}] agent redeploy failed: {e}", m.id)),
+                Err(e) => log.push(format!("[{}] agent redeploy failed: {e}", tag)),
             }
         }
         // The sidecar binary, on the same reasoning as the agent above.
@@ -210,100 +211,100 @@ pub fn provision(
             match ssh.install_tts_runtime(&layout.engine, tts_binary, tts_runtime, live.as_ref()) {
                 Ok(v) => {
                     tts_pushed = true;
-                    log.push(format!("[{}] sidecar drifted, redeployed, {v}", m.id));
+                    log.push(format!("[{}] sidecar drifted, redeployed, {v}", tag));
                 }
-                Err(e) => log.push(format!("[{}] sidecar redeploy failed: {e}", m.id)),
+                Err(e) => log.push(format!("[{}] sidecar redeploy failed: {e}", tag)),
             }
         }
         if sources_match {
-            log.push(format!("[{}] sources in sync (cache match)", m.id));
+            log.push(format!("[{}] sources in sync (cache match)", tag));
         } else {
             // One artifact, pushed whole. The hash in the bundle's name is the
             match ssh.install_sources(layout, &stages, pack.as_ref(), live.as_ref()) {
                 Ok(lines) => {
                     for l in lines {
-                        log.push(format!("[{}] {l}", m.id));
+                        log.push(format!("[{}] {l}", tag));
                     }
                 }
-                Err(e) => log.push(format!("[{}] sources push failed: {e}", m.id)),
+                Err(e) => log.push(format!("[{}] sources push failed: {e}", tag)),
             }
         }
 
         // The voice store lives in `models/voices.json`, not in `voices.json`.
         if models_match {
-            log.push(format!("[{}] models in sync (cache match)", m.id));
+            log.push(format!("[{}] models in sync (cache match)", tag));
         } else {
-            log.push(format!("[{}] pushing models/voice store", m.id));
+            log.push(format!("[{}] pushing models/voice store", tag));
             match ssh.install_models(layout, release.as_ref(), live.as_ref()) {
                 Ok(v) => {
                     models_pushed = true;
-                    log.push(format!("[{}] {v}", m.id));
+                    log.push(format!("[{}] {v}", tag));
                 }
                 Err(e) => {
-                    log.push(format!("[{}] model sync failed: {e}", m.id));
+                    log.push(format!("[{}] model sync failed: {e}", tag));
                     return (probe, log.lines);
                 }
             }
         }
     } else {
         if let Err(e) = ssh.ensure_root(&layout.engine) {
-            log.push(format!("[{}] ensure_root failed: {e}", m.id));
+            log.push(format!("[{}] ensure_root failed: {e}", tag));
             return (probe, log.lines);
         }
-        log.push(format!("[{}] worker root ready (~/{REMOTE_DIR})", m.id));
+        log.push(format!("[{}] worker root ready (~/{REMOTE_DIR})", tag));
 
         match ssh.install_agent(agent_binary, live.as_ref()) {
-            Ok(v) => log.push(format!("[{}] agent installed, reports version {v}", m.id)),
+            Ok(v) => log.push(format!("[{}] agent installed, reports version {v}", tag)),
             Err(e) => {
-                log.push(format!("[{}] agent install failed: {e}", m.id));
+                log.push(format!("[{}] agent install failed: {e}", tag));
                 return (probe, log.lines);
             }
         }
 
         if sources_match {
-            log.push(format!("[{}] sources in sync (cache match)", m.id));
+            log.push(format!("[{}] sources in sync (cache match)", tag));
         } else {
             match ssh.install_sources(layout, &stages, pack.as_ref(), live.as_ref()) {
                 Ok(lines) => {
                     for l in lines {
-                        log.push(format!("[{}] {l}", m.id));
+                        log.push(format!("[{}] {l}", tag));
                     }
                 }
-                Err(e) => log.push(format!("[{}] sources push failed: {e}", m.id)),
+                Err(e) => log.push(format!("[{}] sources push failed: {e}", tag)),
             }
         }
 
         if !probe.tts_bin_present || !probe.tts_runtime_ok() || force {
             log.push(format!(
                 "[{}] installing the TTS sidecar binary + runtime",
-                m.id
+                tag
             ));
             match ssh.install_tts_runtime(&layout.engine, tts_binary, tts_runtime, live.as_ref()) {
-                Ok(v) => log.push(format!("[{}] {v}", m.id)),
+                Ok(v) => log.push(format!("[{}] {v}", tag)),
                 Err(e) => {
-                    log.push(format!("[{}] {e}", m.id));
+                    log.push(format!("[{}] {e}", tag));
                     return (probe, log.lines);
                 }
             }
         } else {
             log.push(format!(
                 "[{}] TTS sidecar binary already present, skipped",
-                m.id
+                tag
             ));
         }
 
         // 668 MB, and the reason `tts_hash` exists: a re-provision with nothing
         if models_match {
-            log.push(format!("[{}] models in sync (cache match)", m.id));
+            log.push(format!("[{}] models in sync (cache match)", tag));
         } else {
-            log.push(format!("[{}] pushing models (~668 MB)", m.id));
+            log.push(format!("[{}] pushing models (~668 MB)", tag));
             match ssh.install_models(layout, release.as_ref(), live.as_ref()) {
                 Ok(v) => {
                     models_pushed = true;
-                    log.push(format!("[{}] {v}", m.id));
+                    log.push(format!("[{}] {v}", tag));
                 }
                 Err(e) => {
-                    log.push(format!("[{}] {e}", m.id));
+                    log.push(format!("[{}] {e}", tag));
                     return (probe, log.lines);
                 }
             }
@@ -315,14 +316,14 @@ pub fn provision(
         Some(token) => match ssh.write_cluster_token(&token) {
             Ok(()) => log.push(format!(
                 "[{}] cluster token {} (owner-only on the box)",
-                m.id,
+                tag,
                 &token[..8.min(token.len())]
             )),
-            Err(e) => log.push(format!("[{}] cluster token failed: {e}", m.id)),
+            Err(e) => log.push(format!("[{}] cluster token failed: {e}", tag)),
         },
         None => log.push(format!(
             "[{}] no cluster token on this inductor, `serve` generates one; a worker started with --serve-tasks will refuse to run until it does",
-            m.id
+            tag
         )),
     }
 
@@ -331,15 +332,15 @@ pub fn provision(
         Ok(binding) => match ssh.write_profile_pointer(&binding) {
             Ok(()) => log.push(format!(
                 "[{}] profile pointer: {} ({})",
-                m.id,
+                tag,
                 crate::profile::label(&binding),
                 &binding.pack.hash[..12.min(binding.pack.hash.len())]
             )),
-            Err(e) => log.push(format!("[{}] profile pointer failed: {e}", m.id)),
+            Err(e) => log.push(format!("[{}] profile pointer failed: {e}", tag)),
         },
         Err(_) => log.push(format!(
             "[{}] no local profile pointer, load one first (`:profile` in the dashboard, or `tools/profile.sh unpack <name>`), or this worker will refuse to start",
-            m.id
+            tag
         )),
     }
 
@@ -364,7 +365,7 @@ pub fn provision(
             if !missing.is_empty() {
                 log.push(format!(
                     "[{}] declared in voices.json but missing from models/voices.json: {}, enroll on this machine and re-bake, or a render naming one will fail here",
-                    m.id,
+                    tag,
                     missing.join(", ")
                 ));
             }
@@ -372,43 +373,43 @@ pub fn provision(
     }
 
     match ssh.ensure_opencode(installs) {
-        Ok(v) => log.push(format!("[{}] {v}", m.id)),
-        Err(e) => log.push(format!("[{}] opencode check failed: {e}", m.id)),
+        Ok(v) => log.push(format!("[{}] {v}", tag)),
+        Err(e) => log.push(format!("[{}] opencode check failed: {e}", tag)),
     }
 
     // The merge stage's encoder: an ensure on every provision, so a box that
     match ssh.ensure_ffmpeg() {
-        Ok(v) if v.starts_with("FFMPEG-OK") => log.push(format!("[{}] {v}", m.id)),
+        Ok(v) if v.starts_with("FFMPEG-OK") => log.push(format!("[{}] {v}", tag)),
         Ok(v) => log.push(format!(
             "[{}] {v}, merge stays disabled on this box until ffmpeg is present (apt/dnf install ffmpeg)",
-            m.id
-        )),        Err(e) => log.push(format!("[{}] ffmpeg install check failed: {e}", m.id)),
+            tag
+        )),        Err(e) => log.push(format!("[{}] ffmpeg install check failed: {e}", tag)),
     }
 
     // The merge stage's second engine. The voice treatment (room, character,
     match ssh.ensure_sox() {
-        Ok(v) if v.starts_with("SOX-OK") => log.push(format!("[{}] {v}", m.id)),
+        Ok(v) if v.starts_with("SOX-OK") => log.push(format!("[{}] {v}", tag)),
         Ok(v) => log.push(format!(
             "[{}] {v}, merge stays disabled on this box until sox is present (apt/dnf install sox)",
-            m.id
+            tag
         )),
-        Err(e) => log.push(format!("[{}] sox install check failed: {e}", m.id)),
+        Err(e) => log.push(format!("[{}] sox install check failed: {e}", tag)),
     }
     // The sidecar loads its voice roster at startup. A models push therefore
 
     if models_pushed || tts_pushed {
         match ssh.stop_tts() {
             Ok(()) if models_pushed && probe.tts_up => {
-                log.push(format!("[{}] stopped TTS to reload the voice store", m.id))
+                log.push(format!("[{}] stopped TTS to reload the voice store", tag))
             }
             Ok(()) if tts_pushed => log.push(format!(
                 "[{}] stopped TTS so the new sidecar binary is the one that runs",
-                m.id
+                tag
             )),
-            Ok(()) => log.push(format!("[{}] cleared stale TTS process", m.id)),
+            Ok(()) => log.push(format!("[{}] cleared stale TTS process", tag)),
             Err(e) => log.push(format!(
                 "[{}] could not stop TTS for voice reload: {e}",
-                m.id
+                tag
             )),
         }
     }
@@ -417,10 +418,10 @@ pub fn provision(
     match ssh.start_tts(&layout.engine) {
         Ok(v) if v.starts_with("TTS-STARTING") => log.push(format!(
             "[{}] {v}, the worker will wait for it rather than start a second one; re-run the probe if renders are slow to begin",
-            m.id
+            tag
         )),
-        Ok(v) => log.push(format!("[{}] tts: {v}", m.id)),
-        Err(e) => log.push(format!("[{}] could not start tts: {e}", m.id)),
+        Ok(v) => log.push(format!("[{}] tts: {v}", tag)),
+        Err(e) => log.push(format!("[{}] could not start tts: {e}", tag)),
     }
 
     // Write provision stamp so subsequent runs can skip
@@ -428,21 +429,21 @@ pub fn provision(
 
     // Re-probe so the caller records the post-provision truth.
     let after = ssh.probe(&layout.engine);
-    log.push(format!("[{}] after provision: {}", m.id, after.summary()));
+    log.push(format!("[{}] after provision: {}", tag, after.summary()));
     // Named on its own line, not just inside the summary: a merge offered to
     // a box that cannot mix is a task that fails after the work is done, so
     // the capability gate withholds it — this line says which tool is why.
     if !after.ffmpeg_present {
         log.push(format!(
             "[{}] ffmpeg is not on PATH, this box can crawl/digest/render but advertises no merge capability; install it (apt install ffmpeg / dnf install ffmpeg), the next probe picks it up",
-            m.id
+            tag
         ));
     }
     // Same warning for the second engine, and here the capability gate means
     if !after.sox_present {
         log.push(format!(
             "[{}] sox is not on PATH, this box can crawl/digest/render but advertises no merge capability; install it (apt install sox / dnf install sox), the next probe picks it up",
-            m.id
+            tag
         ));
     }
     // Single-source-of-truth check, against the fresh probe: a store holding
@@ -461,7 +462,7 @@ pub fn provision(
         if !strays.is_empty() {
             log.push(format!(
                 "[{}] voices in store but declared nowhere (not a preset, not in voices.json, not pooled): {}, add each with its refs/ clip to voices.json and provision again, or drop it from the store; remote renders 500 until then",
-                m.id,
+                tag,
                 strays.join(", ")
             ));
         }

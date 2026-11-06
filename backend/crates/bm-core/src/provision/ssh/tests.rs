@@ -47,6 +47,7 @@ fn ssh_run_honours_its_timeout_instead_of_blocking_forever() {
         port: 22,
         key: None,
         local: true,
+        exec: None,
     };
     let t = std::time::Instant::now();
     let err = ssh.run("exec sleep 30", 1).unwrap_err();
@@ -67,6 +68,7 @@ fn ssh_run_captures_large_stdout_and_stderr() {
         port: 22,
         key: None,
         local: true,
+        exec: None,
     };
     let (code, out, err) = ssh.run(
         "dd if=/dev/zero bs=1048576 count=2 2>/dev/null; { dd if=/dev/zero bs=1048576 count=2 2>/dev/null; } >&2; exit 7",
@@ -84,6 +86,7 @@ fn ssh_run_does_not_wait_for_detached_output_handles() {
         port: 22,
         key: None,
         local: true,
+        exec: None,
     };
     let start = std::time::Instant::now();
     let result = ssh
@@ -123,6 +126,7 @@ fn ssh_argv_expands_tilde_in_the_key_for_both_transports() {
         port: 22,
         key: Some("~/.ssh/k".into()),
         local: false,
+        exec: None,
     };
     let args = ssh.ssh_args();
     let i = args
@@ -143,6 +147,7 @@ fn ssh_argv_expands_tilde_in_the_key_for_both_transports() {
         port: 2222,
         key: None,
         local: false,
+        exec: None,
     };
     assert!(
         !bare.ssh_args().contains(&"-i".to_string()),

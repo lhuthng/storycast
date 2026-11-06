@@ -374,6 +374,19 @@ pub(crate) fn submit_text(app: &mut App, prompt: &TextPrompt) -> Result<Job, Str
                 args,
             })
         }
+        // `:ibx` takes the key alone. Empty is a deliberate clear, not a typo.
+        TextKind::IbxLogin => {
+            let key = prompt.buf.trim().to_string();
+            if key.split_whitespace().count() > 1 {
+                return Err(
+                    "a key has no spaces — paste the whole key, one token (empty clears it)".into(),
+                );
+            }
+            Ok(Job::IbxLogin {
+                root: app.layout.root.clone(),
+                key,
+            })
+        }
         TextKind::Profile => {
             // Same grammar: `pack <name>` bundles the live tree, a bare name
             let buf = prompt.buf.trim();

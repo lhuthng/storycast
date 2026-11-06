@@ -61,6 +61,7 @@ fn targets(layout: &Layout, settings: &Settings, only: &[String]) -> Vec<Target>
                     port,
                     key: key.map(|p| p.to_string_lossy().to_string()),
                     local: bm_core::is_local_node(&addr),
+                    exec: None,
                 },
                 addr,
             }

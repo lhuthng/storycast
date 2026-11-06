@@ -225,6 +225,11 @@ pub(crate) enum Cmd {
         #[command(subcommand)]
         cmd: AwsCmd,
     },
+    /// The InstaBox provider: the API key, the definition in `.bm/instabox.json`.
+    Ibx {
+        #[command(subcommand)]
+        cmd: IbxCmd,
+    },
     /// Asset composition: fold the assets this one depends on into the live
     Asset {
         #[command(subcommand)]
@@ -323,10 +328,16 @@ pub(crate) enum AwsCmd {
     },
     /// Launch boxes and leave them running, tagged, ready to provision.
     Up {
-        /// How many. Refused if it would take the pool past `max_workers`.
+        /// How many. Launches fewer when the cap or the quota allows fewer.
         #[arg(long, default_value = "1")]
         count: u32,
-        /// Print the call instead of making it.
+        /// Per-launch lifetime: `7h`, `90m`, or `0` for no deadline.
+        #[arg(long)]
+        ttl: Option<String>,
+        /// Refuse rather than launch fewer than asked.
+        #[arg(long)]
+        strict: bool,
+        /// Print the plan instead of making the call.
         #[arg(long)]
         dry_run: bool,
     },
@@ -335,6 +346,23 @@ pub(crate) enum AwsCmd {
         /// Print what would be terminated instead of doing it.
         #[arg(long)]
         dry_run: bool,
+    },
+}
+
+#[derive(Subcommand)]
+pub(crate) enum IbxCmd {
+    /// Print the definition, what is still missing, and whether the key works.
+    Show,
+    /// Write a `.bm/instabox.json` template to fill in.
+    Init {
+        /// Overwrite an existing definition. The stored key goes with it.
+        #[arg(long)]
+        force: bool,
+    },
+    /// Store the workspace's API key, then prove it against the API.
+    Login {
+        #[command(flatten)]
+        args: instabox_ops::LoginArgs,
     },
 }
 

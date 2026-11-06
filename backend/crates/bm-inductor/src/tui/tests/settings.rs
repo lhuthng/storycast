@@ -598,7 +598,10 @@ async fn the_stage_folder_words_open_prefilled_prompts_that_ask_use_or_move() {
     assert_eq!(command_key("segdir"), Some(Command::SegmentsDir));
     assert_eq!(
         command_key("o"),
-        Some(Command::AwsDown { force: false }),
+        Some(Command::Down {
+            provider: None,
+            force: false
+        }),
         "no single-key form: `o` still terminates the pool"
     );
 

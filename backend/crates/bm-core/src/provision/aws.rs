@@ -58,7 +58,7 @@ impl Default for AwsConfig {
             images: BTreeMap::new(),
             spot: true,
             max_workers: 8,
-            ttl_hours: 6,
+            ttl_hours: 7,
             tag_key: DEFAULT_TAG.into(),
         }
     }
@@ -138,9 +138,7 @@ impl AwsConfig {
         if self.max_workers == 0 {
             out.push("max_workers is 0, no launch can ever be within the cap".into());
         }
-        if self.ttl_hours == 0 {
-            out.push("ttl_hours is 0, boxes would outlive their work by design".into());
-        }
+        // `ttl_hours: 0` is a deliberate "no deadline", not a gap.
         out
     }
 
@@ -148,7 +146,7 @@ impl AwsConfig {
     pub fn summary(&self) -> String {
         let keypair = self.keypair().unwrap_or("-");
         format!(
-            "{} · {} · {} GB · keypair={} · {} · spot={} · max {} · {}h",
+            "{} · {} · {} GB · keypair={} · {} · spot={} · max {} · {}",
             if self.region.is_empty() {
                 "(no region)"
             } else {
@@ -160,7 +158,11 @@ impl AwsConfig {
             "assets: rsync from here",
             self.spot,
             self.max_workers,
-            self.ttl_hours,
+            if self.ttl_hours == 0 {
+                "no deadline".to_string()
+            } else {
+                format!("{}h", self.ttl_hours)
+            },
         )
     }
 }

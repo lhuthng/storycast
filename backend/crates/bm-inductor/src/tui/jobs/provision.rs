@@ -112,13 +112,11 @@ pub(crate) async fn job_provision(
     )
     .await;
     let for_provision = layout.clone();
+    let for_transport = again.clone();
     let out = provision_live(&tx, move |live| {
         crate::provision_machine(
             &for_provision,
-            &machine.addr,
-            &machine.ssh_user,
-            machine.ssh_port,
-            key,
+            &for_transport,
             force,
             Some(live),
             // `None` reads `models_release` out of the workspace settings, which
@@ -156,7 +154,7 @@ pub(crate) async fn job_provision(
                 );
                 // Worker half only, never the inductor: a `p` retry
                 let root = layout.root.clone();
-                let boxm = again;
+                let boxm = again.clone();
                 match tokio::task::spawn_blocking(move || {
                     crate::backend::start_workers(&[boxm], &root)
                 })
@@ -171,19 +169,25 @@ pub(crate) async fn job_provision(
                         for l in lines {
                             send(&tx, Level::Error, l);
                         }
-                        send_update(
-                            &tx,
-                            MachineState::Error,
-                            "provisioned but the worker would not start — :prov again",
-                        );
-                        set_machine_state(
-                            &api,
-                            &layout,
-                            &addr,
-                            MachineState::Error,
-                            "provisioned but the worker would not start — :prov again",
-                        )
-                        .await;
+                        // The push succeeded and the box then stopped answering:
+                        // a second push would fail the same way, so this is the
+                        // one verdict that says "down it" instead of "retry".
+                        let reachable = crate::provision::transport_for(&layout, &again)
+                            .map(|ssh| ssh.probe(&layout.engine).reachable)
+                            .unwrap_or(false);
+                        let (state, note) = if reachable {
+                            (
+                                MachineState::Error,
+                                "provisioned but the worker would not start — :prov again",
+                            )
+                        } else {
+                            (
+                                MachineState::Offline,
+                                "unreachable after the push — nothing answers; :down it",
+                            )
+                        };
+                        send_update(&tx, state, note);
+                        set_machine_state(&api, &layout, &addr, state, note).await;
                         let _ = tx.send(Ev::Done(DoneKind::Other));
                         return;
                     }
@@ -354,10 +358,13 @@ pub(crate) async fn job_add_sample(
                     let layout = sync_layout.clone();
                     let enrolled = enrolled.clone();
                     joins.push(tokio::task::spawn_blocking(move || {
-                        let ssh = bm_core::provision::Ssh::for_machine(&m);
+                        let ssh = match crate::provision::transport_for(&layout, &m) {
+                            Ok(ssh) => ssh,
+                            Err(e) => return vec![format!("{}: {e}", m.handle())],
+                        };
                         match ssh.sync_voice(&layout, &enrolled) {
                             Ok(ls) => ls,
-                            Err(e) => vec![format!("{}: {e:#}", m.addr)],
+                            Err(e) => vec![format!("{}: {e:#}", m.handle())],
                         }
                     }));
                 }

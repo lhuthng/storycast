@@ -47,6 +47,8 @@ pub(crate) enum TextKind {
     AwsLogin,
     /// `:discover` — the flags for one account read, exactly as the CLI takes
     AwsDiscover,
+    /// `:ibx` — the InstaBox workspace key: typed, then proved before stored.
+    IbxLogin,
     /// `:` command line: the buffer names a key (`m`) or a word
     Command,
     /// A provider the operator names (`L` → `n`): `<name> <url> [kind]`.
@@ -57,6 +59,14 @@ pub(crate) enum TextKind {
     LlmUrl(String),
     /// One provider's model name (`L` → `m`): typed, or picked from the
     LlmModel(String),
+}
+
+impl TextKind {
+    /// Whether the buffer is a credential, so nothing echoes it into the
+    /// status line after submit.
+    pub(crate) fn holds_a_secret(&self) -> bool {
+        matches!(self, TextKind::IbxLogin | TextKind::LlmKey(_))
+    }
 }
 
 /// A single-line editor with a real cursor. The old prompt could only append
@@ -254,8 +264,10 @@ pub(crate) struct SoundRemoval {
 #[derive(Debug, Clone)]
 pub(crate) enum ConfirmAction {
     Quit,
-    /// Terminate the named EC2 instance ids. Always explicit ids, never a
+    /// Delete the named provider ids. Always explicit ids, never a filter.
     AwsDown {
+        /// The cloud the ids belong to: what "terminate" means depends on it.
+        provider: bm_core::cloud::Provider,
         ids: Vec<String>,
     },
     Provision {

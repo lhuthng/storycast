@@ -5,11 +5,11 @@ use crate::{
     TaskResult, WorkerIdentity,
 };
 use axum::{
-    body::Body,
-    extract::{Query, State},
+    body::{Body, Bytes},
+    extract::{DefaultBodyLimit, Query, State},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
-    routing::{get, post},
+    routing::{get, post, put},
     Json, Router,
 };
 use bm_core::{config::Settings, Layout};
@@ -23,6 +23,11 @@ use std::time::Duration;
 
 /// Sentinel for [`Push::tts_threads`]: no inductor instruction, so the
 pub(crate) const THREADS_UNSET: u64 = u64::MAX;
+
+/// The body ceiling on a pushed take. A chapter's takes are a few hundred kB
+/// each and arrive one request per file; the default 2 MiB would refuse a long
+/// one and leave a merge that cannot pull it either.
+const TAKE_PUSH_MAX: usize = 64 << 20;
 
 /// What the server needs to answer: who this worker is, what it is doing, and
 pub(crate) struct Push {
@@ -106,8 +111,10 @@ pub(crate) fn router(push: Arc<Push>) -> Router {
         .route("/status", get(status))
         .route("/task", post(task))
         .route("/unit", get(unit))
+        .route("/segment", put(put_segment))
         .route("/sidecar-policy", post(sidecar_policy))
         .route("/shutdown", post(shutdown))
+        .layer(DefaultBodyLimit::max(TAKE_PUSH_MAX))
         .with_state(push)
 }
 
@@ -319,6 +326,46 @@ async fn unit(
         // Absent is not an error: this worker does not have that unit — another
         Err(_) => (StatusCode::NOT_FOUND, format!("no {}", q.name)).into_response(),
     }
+}
+
+/// `PUT /segment` — a take the inductor hands over instead of being pulled.
+///
+/// The pull path (`run_merge`) dials the loopback hook port, which only an ssh
+/// reverse tunnel answers; a box with no ssh — an InstaBox machine — has
+/// nothing there, so the take has to arrive this way.
+async fn put_segment(
+    State(push): State<Arc<Push>>,
+    headers: HeaderMap,
+    Query(q): Query<UnitQuery>,
+    body: Bytes,
+) -> Response {
+    if let Err(e) = check(&headers, &push.token) {
+        return e.into_response();
+    }
+    push.touch();
+    if !safe_unit_name(&q.name) {
+        return (
+            StatusCode::BAD_REQUEST,
+            format!("bad unit name {:?}", q.name),
+        )
+            .into_response();
+    }
+    let dir = push.layout.seg_dir(&q.engine, q.chapter);
+    if let Err(e) = tokio::fs::create_dir_all(&dir).await {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("creating {}: {e}", dir.display()),
+        )
+            .into_response();
+    }
+    if let Err(e) = tokio::fs::write(dir.join(&q.name), &body).await {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("writing {}: {e}", q.name),
+        )
+            .into_response();
+    }
+    (StatusCode::OK, format!("{} ({} bytes)", q.name, body.len())).into_response()
 }
 
 /// The body of `POST /sidecar-policy`.

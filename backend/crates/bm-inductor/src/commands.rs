@@ -200,6 +200,16 @@ pub(crate) async fn cmd_provision(
     let mut m = Machine::new(&addr, &user, port, key.clone(), "worker");
     m.tts_url = Some("http://127.0.0.1:8818".into());
     carry_task_policy(&mut m, &layout);
+    // The command names an address; the box's own row knows its provider, and
+    // that is what decides whether this crosses ssh or the provider's API.
+    if let Some(row) = bm_core::provision::load_boxes(&layout.machines())
+        .into_iter()
+        .find(|b| b.addr == addr)
+    {
+        m.provider = row.provider;
+        m.provider_id = row.provider_id;
+        m.base_url = row.base_url;
+    }
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(10))
         .build()?;
@@ -218,8 +228,8 @@ pub(crate) async fn cmd_provision(
         .await;
     // The blocking SSH/rsync flow runs off the async runtime; registration
     let out = tokio::task::spawn_blocking({
-        let (layout, addr, user) = (layout.clone(), addr.clone(), user.clone());
-        move || provision_machine(&layout, &addr, &user, port, key, force, None, release_repo)
+        let (layout, machine) = (layout.clone(), m.clone());
+        move || provision_machine(&layout, &machine, force, None, release_repo)
     })
     .await?;
     for line in &out.lines {

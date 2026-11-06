@@ -82,16 +82,21 @@ const HOST_KEY_OPTS: [&str; 6] = [
     "LogLevel=ERROR",
 ];
 
+use super::exec::Exec;
 use super::REMOTE_DIR;
 use crate::util::expand_tilde;
 
-/// A resolved SSH connection to one machine.
+/// A resolved connection to one machine: ssh, a local shell, or the provider's
+/// own exec API.
 pub struct Ssh {
     pub target: String,
     pub port: u16,
     pub key: Option<String>,
     /// The inductor's own machine: run commands directly instead of ssh-ing out.
     pub local: bool,
+    /// Set when the machine has no ssh at all: every call goes over the
+    /// provider's API instead.
+    pub exec: Option<Exec>,
 }
 
 /// Where the winning ssh key came from. Highest wins; `SshDefault` means no
@@ -137,6 +142,20 @@ impl Ssh {
             port: m.ssh_port,
             key: m.ssh_key.clone(),
             local,
+            exec: None,
+        }
+    }
+
+    /// The same machine, reached by exec instead of ssh: what changes is only
+    /// the transport.
+    pub fn over_exec(m: &Machine, exec: Exec) -> Self {
+        Ssh {
+            // Only ever a label over exec: the box has no address to reach.
+            target: m.handle(),
+            port: 0,
+            key: None,
+            local: false,
+            exec: Some(exec),
         }
     }
 
@@ -202,6 +221,9 @@ impl Ssh {
 
     /// Run a shell script on the machine. Returns `(exit_code, stdout, stderr)`.
     pub fn run(&self, script: &str, timeout_secs: u64) -> Result<(i32, String, String)> {
+        if let Some(exec) = &self.exec {
+            return exec.exec(script, timeout_secs);
+        }
         let full = format!("export PATH=$HOME/.local/bin:$HOME/.cargo/bin:$PATH\n{script}");
         let mut cmd = if self.local {
             let mut c = Command::new("sh");
@@ -280,6 +302,17 @@ impl Ssh {
         compress: bool,
         excludes: &[&str],
     ) -> Result<()> {
+        if let Some(exec) = &self.exec {
+            if let Some(p) = &progress {
+                let _ = p.tx.send(format!(
+                    "[{}] {}: packing {}",
+                    self.target,
+                    p.label,
+                    src.display()
+                ));
+            }
+            return exec.push_dir(src, remote_rel, delete, excludes);
+        }
         if self.local {
             return self.rsync_push_local(src, remote_rel);
         }
@@ -345,6 +378,9 @@ impl Ssh {
             if f.starts_with('/') || f.split('/').any(|p| p == "..") {
                 anyhow::bail!("refusing to push {f:?}: manifest paths stay under the root");
             }
+        }
+        if let Some(exec) = &self.exec {
+            return exec.push_files(root, files);
         }
         if self.local {
             let home = std::env::var("HOME").context("HOME not set")?;
@@ -440,6 +476,9 @@ impl Ssh {
 
     /// Pull a path from the machine's worker root into a local destination.
     pub fn rsync_pull(&self, remote_rel: &str, dst: &Path) -> Result<()> {
+        if let Some(exec) = &self.exec {
+            return exec.pull(remote_rel, dst);
+        }
         if self.local {
             let home = std::env::var("HOME").context("HOME not set")?;
             let src = Path::new(&home).join(REMOTE_DIR).join(remote_rel);

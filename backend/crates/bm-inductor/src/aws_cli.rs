@@ -181,7 +181,12 @@ pub(crate) fn aws_cmd(root: &std::path::Path, cmd: AwsCmd) -> anyhow::Result<Vec
             out.extend(aws_ops::pool_lines(root)?);
             Ok(out)
         }
-        AwsCmd::Up { count, dry_run } => {
+        AwsCmd::Up {
+            count,
+            ttl,
+            strict,
+            dry_run,
+        } => {
             let cfg = AwsConfig::load_layered(root);
             let missing = cfg.missing();
             let layout = bm_core::Layout::resolve_or_root(root).0;
@@ -192,8 +197,9 @@ pub(crate) fn aws_cmd(root: &std::path::Path, cmd: AwsCmd) -> anyhow::Result<Vec
                 // No call at all, and that is the point: a dry run has to work
                 out.push("--dry-run: no call is made and nothing is launched.".into());
                 out.push(format!(
-                    "would run: aws {}",
-                    run_instances_args(&cfg, count, "<the AMI's root device>", &hash).join(" ")
+                    "would run {} time(s), one box each: aws {}",
+                    count,
+                    run_instances_args(&cfg, 1, "<the AMI's root device>", &hash).join(" ")
                 ));
                 out.push(format!(
                     "  after resolving it: aws {}",
@@ -215,8 +221,45 @@ pub(crate) fn aws_cmd(root: &std::path::Path, cmd: AwsCmd) -> anyhow::Result<Vec
                 }
                 return Ok(out);
             }
-            let (_, lines, _) = aws_ops::launch(root, count)?;
-            out.extend(lines);
+            let ttl_minutes = match ttl.as_deref() {
+                Some(raw) => Some(bm_core::cloud::parse_ttl_minutes(raw).ok_or_else(|| {
+                    anyhow::anyhow!("--ttl wants `7h`, `90m` or `0`, got {raw:?}")
+                })?),
+                None => None,
+            };
+            let cloud =
+                crate::cloud::for_provider(Some(bm_core::cloud::Provider::Aws), root, ttl_minutes)?;
+            let smoke = cloud.smoke().map_err(|s| anyhow::anyhow!("{}", s.line()))?;
+            out.extend(smoke.lines);
+            let plan = cloud
+                .plan(count)
+                .map_err(|s| anyhow::anyhow!("{}", s.line()))?;
+            out.extend(plan.notes.iter().cloned());
+            if (plan.clamped() && strict) || plan.fit == 0 {
+                for s in &plan.shortfalls {
+                    out.push(format!("not created: {}", s.line()));
+                }
+                if strict && plan.clamped() {
+                    anyhow::bail!(
+                        "--strict: {} of {} would be created — launched none",
+                        plan.fit,
+                        plan.want
+                    );
+                }
+                return Ok(out);
+            }
+            let launch = cloud.up(&plan);
+            for b in &launch.created {
+                // A box still waiting for its address is not news: it links
+                // and onboards itself once one arrives.
+                if !b.addr.is_empty() {
+                    out.push(format!("launched {}", b.label()));
+                }
+            }
+            for s in &launch.skipped {
+                out.push(format!("not created: {}", s.line()));
+            }
+            out.push(launch.summary());
             Ok(out)
         }
         AwsCmd::Down { dry_run } => {

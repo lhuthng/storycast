@@ -51,6 +51,52 @@ fn headers(token: Option<&str>) -> HeaderMap {
     h
 }
 
+#[tokio::test]
+async fn a_pushed_take_lands_where_the_merge_looks_for_it() {
+    // The point of the endpoint: a box with no tunnel cannot pull a take, so
+    // the merge has to find it already written.
+    let root = std::env::temp_dir().join(format!("bm-push-take-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    let p = push_at("s3cret", &root);
+    let take = || UnitQuery {
+        chapter: 7,
+        engine: "vieneu".into(),
+        name: "t-abc.mp3".into(),
+    };
+    let bytes = axum::body::Bytes::from(vec![7u8; 2048]);
+    let ok = put_segment(
+        State(p.clone()),
+        headers(Some("s3cret")),
+        Query(take()),
+        bytes.clone(),
+    )
+    .await;
+    assert_eq!(ok.status(), StatusCode::OK);
+    let path = p.layout.seg_dir("vieneu", 7).join("t-abc.mp3");
+    assert_eq!(std::fs::read(&path).unwrap().len(), 2048);
+
+    // A wrong token, then a name that could climb out of the segment dir:
+    // neither writes anything.
+    let climb = || UnitQuery {
+        chapter: 7,
+        engine: "vieneu".into(),
+        name: "../escape.mp3".into(),
+    };
+    let unauthorised = put_segment(
+        State(p.clone()),
+        headers(Some("wrong")),
+        Query(climb()),
+        bytes.clone(),
+    )
+    .await;
+    assert_eq!(unauthorised.status(), StatusCode::UNAUTHORIZED);
+    let bad = put_segment(State(p.clone()), headers(Some("s3cret")), Query(climb()), bytes).await;
+    assert_eq!(bad.status(), StatusCode::BAD_REQUEST);
+    assert!(!p.layout.seg_dir("vieneu", 7).join("../escape.mp3").exists());
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 #[test]
 fn the_header_is_the_whole_gate() {
     // "Authenticated or off" is the only safe pair of states, and the check

@@ -19,14 +19,16 @@ const FETCH: Duration = Duration::from_secs(60);
 /// Everything needed to ask one box anything.
 #[derive(Clone)]
 struct Peer {
+    /// The registry key, which is what every state lookup and log line uses.
     addr: String,
-    port: u16,
+    /// Where to dial: the box's published URL when it has one, else `addr:port`.
+    base: String,
     token: String,
 }
 
 impl Peer {
     fn base(&self) -> String {
-        format!("http://{}:{}", self.addr, self.port)
+        self.base.clone()
     }
 }
 
@@ -51,7 +53,7 @@ pub async fn run(state: Shared, layout: Layout) {
 
     loop {
         // Re-read the roster every tick: machines are added and removed while
-        for (addr, port) in targets(&state).await {
+        for (addr, base) in targets(&state).await {
             let alive = running
                 .get(&addr)
                 .map(|h| !h.is_finished())
@@ -61,7 +63,7 @@ pub async fn run(state: Shared, layout: Layout) {
             }
             let peer = Peer {
                 addr: addr.clone(),
-                port,
+                base,
                 token: token.clone(),
             };
             let (st, lay) = (state.clone(), layout.clone());
@@ -366,6 +368,59 @@ async fn converge_sidecar_policy(
     }
 }
 
+/// Send a merging box the takes it would otherwise pull through the tunnel.
+///
+/// A take it already holds costs nothing to overwrite, so there is no
+/// inventory question to answer first: send what this machine has.
+async fn push_takes(
+    http: &reqwest::Client,
+    layout: &Layout,
+    peer: &Peer,
+    offer: &TaskOffer,
+    task_id: &str,
+) {
+    if offer.merge_takes.is_empty() || bm_core::is_local_node(&peer.addr) {
+        return;
+    }
+    let dir = layout.seg_dir(&offer.engine, offer.chapter);
+    let mut sent = 0usize;
+    for name in &offer.merge_takes {
+        let Ok(bytes) = std::fs::read(dir.join(name)) else {
+            continue;
+        };
+        let answer = http
+            .put(format!("{}/segment", peer.base()))
+            .bearer_auth(&peer.token)
+            .query(&[
+                ("chapter", offer.chapter.to_string()),
+                ("engine", offer.engine.clone()),
+                ("name", name.clone()),
+            ])
+            .body(bytes)
+            .timeout(FETCH)
+            .send()
+            .await;
+        match answer {
+            Ok(r) if r.status().is_success() => sent += 1,
+            // A worker that predates the endpoint answers 404: its own pull
+            // path is still there, so this is not worth failing the task over.
+            Ok(r) => println!(
+                "dispatch: {} take {name} refused ({}), its merge will pull what it can",
+                peer.addr,
+                r.status()
+            ),
+            Err(e) => println!("dispatch: {} take {name} not pushed: {e}", peer.addr),
+        }
+    }
+    if sent > 0 {
+        println!(
+            "dispatch: {} {task_id} — sent {sent}/{} take(s) for the merge",
+            peer.addr,
+            offer.merge_takes.len()
+        );
+    }
+}
+
 /// Hand one offer over, bring its artifacts home, then record the outcome.
 async fn run_one(
     state: &Shared,
@@ -378,6 +433,13 @@ async fn run_one(
     let stage = offer.stage;
     let chapter = offer.chapter;
     let engine = offer.engine.clone();
+    // Before the offer, not after a failed pull: a box with no ssh has no
+    // reverse tunnel, so the loopback hook its merge would pull from has
+    // nothing behind it. Harmless for a box that can pull — it finds the
+    // files already in its segment directory and skips them.
+    if stage == Stage::Merge {
+        push_takes(http, layout, peer, &offer, &task_id).await;
+    }
     let sent = http
         .post(format!("{}/task", peer.base()))
         .bearer_auth(&peer.token)
@@ -499,6 +561,11 @@ async fn run_one(
 
     // **Before** the completion is applied. The gate reads the filesystem.
     if stage == Stage::Render {
+        // The answer already carries the takes. Store them first so the pull
+        // below only covers what genuinely did not arrive — otherwise every
+        // take crosses the wire twice, once base64 in the answer and once more
+        // over `/unit`.
+        crate::api::store_shipments(layout, &engine, &task_id, &complete.unit_files);
         collect_units(layout, http, peer, chapter, &engine).await;
     }
 
@@ -579,13 +646,24 @@ async fn ask(http: &reqwest::Client, base: &str, path: &str, token: &str) -> Opt
 }
 
 /// Every machine that answers the inverted protocol.
-async fn targets(state: &Shared) -> Vec<(String, u16)> {
+/// `(registry key, base URL)` — one per dialable box.
+async fn targets(state: &Shared) -> Vec<(String, String)> {
     let inner = state.lock().await;
-    let mut out: Vec<(String, u16)> = inner
+    let mut out: Vec<(String, String)> = inner
         .machines
         .values()
         .filter(|m| m.state.dialable())
-        .filter_map(|m| m.task_port.map(|p| (m.addr.clone(), p)))
+        .filter_map(|m| {
+            let port = m.task_port?;
+            let base = m
+                .base_url
+                .as_deref()
+                .map(str::trim)
+                .filter(|u| !u.is_empty())
+                .map(str::to_string)
+                .unwrap_or_else(|| format!("http://{}:{port}", m.addr));
+            Some((m.addr.clone(), base))
+        })
         .collect();
     out.sort();
     out
@@ -604,8 +682,8 @@ async fn idle_minutes(state: &Shared) -> Option<u64> {
 
 /// Tell every worker to stop, then stop.
 async fn stop_everything(state: &Shared, token: &str, http: &reqwest::Client) {
-    for (addr, port) in targets(state).await {
-        let url = format!("http://{addr}:{port}/shutdown");
+    for (addr, base) in targets(state).await {
+        let url = format!("{base}/shutdown");
         match http.post(&url).bearer_auth(token).timeout(ASK).send().await {
             Ok(r) if r.status().is_success() => println!("dispatch: {addr} acknowledged shutdown"),
             Ok(r) => println!("dispatch: {addr} refused shutdown ({})", r.status()),

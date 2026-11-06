@@ -564,6 +564,23 @@ pub(crate) fn do_command(
                 &initial,
             ));
         }
+        Command::IbxLogin => {
+            let cfg = crate::cloud::instabox::InstaboxConfig::load(&app.layout.root);
+            let hint = if cfg.key().is_empty() {
+                "the workspace's API key from instabox.sh: workspace → settings → API keys. \
+                 It is checked against the API before it is stored, so a wrong one is refused \
+                 here rather than at launch."
+            } else {
+                "a new key replaces the stored one; empty clears it, which turns `:up instabox` \
+                 off. The new key is checked against the API before it is stored."
+            };
+            app.screen = Screen::Text(TextPrompt::new(
+                TextKind::IbxLogin,
+                "InstaBox login — the key this workspace launches with",
+                hint,
+                "",
+            ));
+        }
         Command::AwsPool => {
             // Open the view first, then fill it: the screen renders its own
             app.screen = Screen::Cloud(CloudView::new());
@@ -578,24 +595,126 @@ pub(crate) fn do_command(
             );
             app.set_status(Level::Info, "reading the EC2 account…");
         }
-        Command::AwsUp { count } => {
-            // No confirmation: the CLI's review step is `aws up --dry-run`, and
+        Command::Up {
+            provider,
+            count,
+            ttl_minutes,
+            strict,
+            from_machine,
+        } => {
+            // A delete still owed means the provider has not released that
+            // capacity yet: launching into it asks for a quota refusal.
+            if app.pending_deletes > 0 {
+                app.set_status(
+                    Level::Warn,
+                    format!(
+                        "refused: {} cloud delete(s) still owed — `:cloud reap` retries them now",
+                        app.pending_deletes
+                    ),
+                );
+                return;
+            }
+            let provider = match crate::cloud::resolve(provider) {
+                Ok(p) => p,
+                Err(e) => {
+                    app.set_status(Level::Warn, format!("{e:#}"));
+                    return;
+                }
+            };
+            // No confirmation: the launch smoke-tests first and states what it
+            // will create before it creates anything.
             dispatch(
                 app,
                 job_tx,
-                Job::AwsUp {
+                Job::CloudUp {
                     root: app.layout.root.clone(),
                     api: app.api.clone(),
                     http: http.clone(),
-                    count,
+                    req: crate::tui::jobs::LaunchReq {
+                        provider,
+                        count,
+                        ttl_minutes,
+                        strict,
+                        from_machine,
+                    },
                 },
             );
             app.set_status(
                 Level::Info,
-                format!("launching {count} box(es) — watch events"),
+                format!(
+                    "launching {count} {provider} box(es){}{}{} — smoke test first",
+                    match ttl_minutes {
+                        Some(0) => " · no deadline".to_string(),
+                        Some(m) => format!(" · ttl {}", bm_core::cloud::ttl_label(Some(m))),
+                        None => String::new(),
+                    },
+                    if strict { " · strict" } else { "" },
+                    if from_machine {
+                        " · from this machine"
+                    } else {
+                        ""
+                    },
+                ),
             );
         }
-        Command::AwsDown { force } => {
+        Command::Down { provider, force } => {
+            let provider = provider.unwrap_or_else(crate::cloud::default_provider);
+            // Only AWS has a pool listing to filter (`:pool` reads the account),
+            // so another cloud's teardown works from the rows this workspace
+            // launched — which is exactly the set it may delete.
+            if provider != Provider::Aws {
+                let rows: Vec<&bm_proto::Machine> = app
+                    .machines
+                    .iter()
+                    .filter(|m| {
+                        m.provider.as_deref() == Some(provider.as_str()) && m.provider_id.is_some()
+                    })
+                    .collect();
+                if rows.is_empty() {
+                    app.set_status(
+                        Level::Info,
+                        format!(
+                            "nothing launched on {provider} that this workspace knows — bare \
+                             `:down` covers the EC2 pool"
+                        ),
+                    );
+                    return;
+                }
+                let ids: Vec<String> = rows.iter().filter_map(|m| m.provider_id.clone()).collect();
+                let addrs: Vec<String> = rows.iter().map(|m| m.addr.clone()).collect();
+                // Same guard as AWS: a box killed mid-render loses its take.
+                let busy = busy_on(&app.beats, &app.tasks, &addrs, bm_proto::now_secs());
+                if !busy.is_empty() && !force {
+                    app.set_status(
+                        Level::Warn,
+                        format!(
+                            "refused: {} task(s) in flight on those boxes — `:down force` to kill \
+                             a render mid-flight",
+                            busy.len()
+                        ),
+                    );
+                    return;
+                }
+                let mut body = vec![
+                    format!("Delete {} {provider} machine(s):", ids.len()),
+                    String::new(),
+                ];
+                for id in &ids {
+                    body.push(format!("  {id}"));
+                }
+                body.push(String::new());
+                body.push(format!(
+                    "Deleted boxes cannot be restarted; a replacement is `:up {provider}`."
+                ));
+                body.push("Their registry entries go once the provider accepts.".into());
+                app.screen = Screen::Confirm(Confirm {
+                    title: format!("Delete {} {provider} box(es)?", ids.len()),
+                    danger: true,
+                    body,
+                    action: ConfirmAction::AwsDown { provider, ids },
+                });
+                return;
+            }
             if app.cloud.is_empty() {
                 app.set_status(Level::Warn, "no cloud listing yet — run :pool first");
                 return;
@@ -649,8 +768,28 @@ pub(crate) fn do_command(
                 title: format!("Terminate {} box(es)?", ids.len()),
                 danger: true,
                 body,
-                action: ConfirmAction::AwsDown { ids },
+                action: ConfirmAction::AwsDown {
+                    provider: Provider::Aws,
+                    ids,
+                },
             });
+        }
+        Command::CloudReap => {
+            dispatch(
+                app,
+                job_tx,
+                Job::CloudReap {
+                    api: app.api.clone(),
+                    http: http.clone(),
+                },
+            );
+            app.set_status(
+                Level::Info,
+                format!(
+                    "retrying {} owed delete(s) and sweeping now…",
+                    app.pending_deletes
+                ),
+            );
         }
         Command::Script => {
             // The window reads the scripts off disk itself, so it works
@@ -793,7 +932,8 @@ pub(crate) fn do_command(
                     "Remote boxes swept over ssh: {}.",
                     remotes.join(", ")
                 ));
-                body.push("Unreachable boxes report and are skipped.".into());
+                body.push("Unreachable boxes are flagged offline; their tasks return".into());
+                body.push("to the pool instead of waiting on a box nobody can reach.".into());
             }
             app.screen = Screen::Confirm(Confirm {
                 title: "Stop everything, everywhere?".into(),

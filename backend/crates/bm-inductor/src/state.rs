@@ -13,6 +13,7 @@ mod observe;
 mod offer;
 mod ops;
 mod plan;
+mod reclaim;
 mod reconcile;
 mod relink;
 mod retire;
@@ -99,6 +100,25 @@ pub struct Inner {
     pub(crate) exclusive: Vec<exclusive::Exclusive>,
     /// Ledger rows this build could not deserialise, kept **verbatim** and
     pub unreadable_tasks: Vec<serde_json::Value>,
+    /// Boxes taken out of service whose cloud-side delete has not succeeded
+    /// yet. Persisted, so a restart resumes the delete instead of leaking it.
+    pub(crate) intents: Vec<DeleteIntent>,
+}
+
+/// Delete this id on this provider, until the provider agrees it is gone.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeleteIntent {
+    pub provider: String,
+    pub provider_id: String,
+    /// The registry key it was, for the log line and the operator.
+    pub addr: String,
+    /// Why the box was reclaimed, so the line reads `killed: idle-paused`.
+    pub why: String,
+    #[serde(default)]
+    pub attempts: u32,
+    #[serde(default)]
+    pub last_error: Option<String>,
+    pub created: u64,
 }
 
 /// Per-worker per-stage completions, with a capped run of durations.

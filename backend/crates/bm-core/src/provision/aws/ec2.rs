@@ -188,6 +188,10 @@ pub fn run_instances_args(
         ),
         // Ask for a public address explicitly instead of trusting the subnet's
         "--associate-public-ip-address".into(),
+        // A box that shuts itself down at its deadline terminates instead of
+        // lingering as `stopped` with a volume and no record.
+        "--instance-initiated-shutdown-behavior".into(),
+        "terminate".into(),
         "--output".into(),
         "json".into(),
     ];
@@ -201,6 +205,23 @@ pub fn run_instances_args(
         args.push("--instance-market-options".into());
         args.push("MarketType=spot".into());
     }
+    args
+}
+
+/// One `describe-instances` for exact ids, with **no state filter**: a
+/// terminated box must still answer here as `terminated`, so an id missing
+/// from a successful answer is gone rather than merely filtered out.
+pub fn describe_instances_args(region: &str, ids: &[String]) -> Vec<String> {
+    let mut args: Vec<String> = vec![
+        "ec2".into(),
+        "describe-instances".into(),
+        "--region".into(),
+        region.into(),
+        "--instance-ids".into(),
+    ];
+    args.extend(ids.iter().cloned());
+    args.push("--output".into());
+    args.push("json".into());
     args
 }
 
@@ -348,6 +369,9 @@ pub fn machine_from_instance(i: &AwsInstance, cfg: &AwsConfig) -> Machine {
         MachineState::AwaitingIp
     });
     m.note = instance_note(i, dialable);
+    // Both halves: the cloud that launched it, and the id that cloud knows.
+    m.provider = Some(crate::cloud::Provider::Aws.as_str().to_string());
+    m.provider_id = Some(i.id.clone());
     m
 }
 

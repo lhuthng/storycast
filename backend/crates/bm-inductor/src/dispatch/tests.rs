@@ -61,7 +61,7 @@ async fn an_addressless_box_is_tracked_but_never_dialed() {
     }
     assert_eq!(
         targets(&st).await,
-        vec![("10.0.0.5".to_string(), 8917)],
+        vec![("10.0.0.5".to_string(), "http://10.0.0.5:8917".to_string())],
         "only the dialable box is a target"
     );
     // Once the account hands it an address, it is a target like any other.
@@ -76,8 +76,8 @@ async fn an_addressless_box_is_tracked_but_never_dialed() {
     assert_eq!(
         targets(&st).await,
         vec![
-            ("10.0.0.5".to_string(), 8917),
-            ("52.2.2.2".to_string(), 8917)
+            ("10.0.0.5".to_string(), "http://10.0.0.5:8917".to_string()),
+            ("52.2.2.2".to_string(), "http://52.2.2.2:8917".to_string())
         ]
     );
 }
@@ -215,7 +215,7 @@ async fn render_off_tells_the_worker_to_drop_its_sidecar() {
     machine_with_policy(&st, "127.0.0.1", port, Some(false)).await;
     let peer = Peer {
         addr: "127.0.0.1".into(),
-        port,
+        base: format!("http://127.0.0.1:{port}"),
         token: "t".into(),
     };
     let http = reqwest::Client::builder().no_proxy().build().unwrap();
@@ -258,7 +258,7 @@ async fn no_stored_policy_never_pushes_and_404_gives_up_after_five() {
     machine_with_policy(&st, "127.0.0.1", port, None).await;
     let peer = Peer {
         addr: "127.0.0.1".into(),
-        port,
+        base: format!("http://127.0.0.1:{port}"),
         token: "t".into(),
     };
     let http = reqwest::Client::builder().no_proxy().build().unwrap();
@@ -275,7 +275,7 @@ async fn no_stored_policy_never_pushes_and_404_gives_up_after_five() {
     machine_with_policy(&st, "127.0.0.1", port404, Some(false)).await;
     let peer404 = Peer {
         addr: "127.0.0.1".into(),
-        port: port404,
+        base: format!("http://127.0.0.1:{port404}"),
         token: "t".into(),
     };
     let mut book404 = SidecarBook::default();
@@ -377,7 +377,7 @@ async fn a_box_busy_with_another_task_gives_the_row_back_and_says_so() {
     let port = stub_answering("409 Conflict", "already running render:3").await;
     let peer = Peer {
         addr: "127.0.0.1".into(),
-        port,
+        base: format!("http://127.0.0.1:{port}"),
         token: "t".into(),
     };
     let http = reqwest::Client::builder().no_proxy().build().unwrap();
@@ -411,7 +411,7 @@ async fn a_box_busy_with_this_row_is_left_alone() {
     let port = stub_answering("409 Conflict", "already running merge:7").await;
     let peer = Peer {
         addr: "127.0.0.1".into(),
-        port,
+        base: format!("http://127.0.0.1:{port}"),
         token: "t".into(),
     };
     let http = reqwest::Client::builder().no_proxy().build().unwrap();
@@ -442,7 +442,7 @@ async fn an_undelivered_offer_is_an_event_not_a_silence() {
     }
     let peer = Peer {
         addr: "127.0.0.1".into(),
-        port: 1,
+        base: "http://127.0.0.1:1".into(),
         token: "t".into(),
     };
     let http = reqwest::Client::builder().no_proxy().build().unwrap();

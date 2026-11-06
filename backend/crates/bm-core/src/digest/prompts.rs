@@ -378,10 +378,13 @@ Return ONE strict JSON object containing only `segments` and `fixes`:
 }
 
 Emit a field only where it CHANGES. `mood`, `scene` and `music` are carried
-forward: omit the key and the previous segment's value is used. `text` is
-carried forward too — omit it when you neither split the source event nor fix a
-typo, and code fills it from the prepared event. A value you do emit replaces
-the carried one for that segment and every segment after it until the next.
+forward: omit the key and the previous segment's value is used. `text` is for a
+SPLIT and nothing else: omit it on every event you do not split, and code fills
+it from the prepared event character for character. Never restate an event's
+text in order to correct it — a tone mark or a spelling that looks wrong is the
+chapter's own, rule 5 has no exceptions, and a second copy of the line is how it
+gets lost. A value you do emit replaces the carried one for that segment and
+every segment after it until the next.
 
 ---MOOD PALETTE--- (one token, copied exactly)
 {mood_palette}
@@ -420,10 +423,13 @@ Return ONE strict JSON object containing only `segments` and `fixes`:
 }
 
 Emit a field only where it CHANGES. `mood` is carried forward: omit the key and
-the previous segment's value is used. `text` is carried forward too — omit it
-when you neither split the source event nor fix a typo, and code fills it from
-the prepared event. A value you do emit replaces the carried one for that
-segment and every segment after it until the next.
+the previous segment's value is used. `text` is for a SPLIT and nothing else:
+omit it on every event you do not split, and code fills it from the prepared
+event character for character. Never restate an event's text in order to correct
+it — a tone mark or a spelling that looks wrong is the chapter's own, rule 5 has
+no exceptions, and a second copy of the line is how it gets lost. A value you do
+emit replaces the carried one for that segment and every segment after it until
+the next.
 
 ---MOOD PALETTE--- (one token, copied exactly)
 {mood_palette}

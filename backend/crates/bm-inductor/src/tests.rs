@@ -397,7 +397,8 @@ fn provisioning_localhost_syncs_nothing_and_reports_ready() {
     std::fs::create_dir_all(&dir).unwrap();
     let layout = bm_core::Layout::new(&dir);
     for addr in ["127.0.0.1", "localhost", "::1"] {
-        let out = provision_machine(&layout, addr, "thang", 22, None, false, None, None);
+        let machine = Machine::new(addr, "thang", 22, None, "worker");
+        let out = provision_machine(&layout, &machine, false, None, None);
         assert!(out.ready, "{addr} must always be ready");
         assert!(out.reachable, "{addr} is local — ssh is never involved");
         assert_eq!(out.lines.len(), 1, "{:?}", out.lines);
@@ -447,6 +448,10 @@ fn reprovision_keeps_the_stored_work_policy() {
             task_policy: Some(policy.clone()),
             accepting_work: true,
             tts_threads: None,
+            expires_at: None,
+            provider: None,
+            provider_id: None,
+            base_url: None,
         },
     )
     .unwrap();

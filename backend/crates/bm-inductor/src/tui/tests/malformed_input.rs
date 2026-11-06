@@ -138,10 +138,28 @@ fn split_args_treats_only_double_quotes_as_syntax() {
 
 #[test]
 fn command_key_refuses_out_of_range_arguments() {
-    assert_eq!(command_key("up"), Some(Command::AwsUp { count: 1 }));
+    assert_eq!(
+        command_key("up"),
+        Some(Command::Up {
+            provider: None,
+            count: 1,
+            ttl_minutes: None,
+            strict: false,
+            from_machine: false,
+        })
+    );
     assert_eq!(command_key("up 0"), None, "zero boxes is not a launch");
     assert_eq!(command_key("up abc"), None);
-    assert_eq!(command_key("up 3"), Some(Command::AwsUp { count: 3 }));
+    assert_eq!(
+        command_key("up 3"),
+        Some(Command::Up {
+            provider: None,
+            count: 3,
+            ttl_minutes: None,
+            strict: false,
+            from_machine: false,
+        })
+    );
 
     assert_eq!(
         command_key("threads 1"),
@@ -405,11 +423,29 @@ fn split_args_treats_every_unicode_space_as_a_separator() {
 
 #[test]
 fn command_key_reads_the_whole_argument_surface() {
-    assert_eq!(command_key("UP"), Some(Command::AwsUp { count: 1 }));
-    assert_eq!(command_key("down"), Some(Command::AwsDown { force: false }));
+    assert_eq!(
+        command_key("UP"),
+        Some(Command::Up {
+            provider: None,
+            count: 1,
+            ttl_minutes: None,
+            strict: false,
+            from_machine: false,
+        })
+    );
+    assert_eq!(
+        command_key("down"),
+        Some(Command::Down {
+            provider: None,
+            force: false
+        })
+    );
     assert_eq!(
         command_key("down force"),
-        Some(Command::AwsDown { force: true })
+        Some(Command::Down {
+            provider: None,
+            force: true
+        })
     );
     assert_eq!(command_key("down nonsense"), None);
 

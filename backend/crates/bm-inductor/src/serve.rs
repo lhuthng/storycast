@@ -72,21 +72,35 @@ pub(crate) async fn cmd_serve(
     }
     // Lease reaper: expired leases return to the pool, no strike.
     let reaper = shared.clone();
+    let reap_root = drive_root.clone();
     tokio::spawn(async move {
+        // The cloud poll shells out to a CLI, so it runs once a minute rather
+        // than on every lease tick.
+        let mut ticks: u64 = 0;
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(10)).await;
-            let (expired, never_came_up) = {
+            ticks += 1;
+            let (expired, never_came_up, deadlines) = {
                 let mut inner = reaper.lock().await;
                 // Boot deadline first, then leases: a box that never answered
                 let expired = inner.reap();
                 let never_came_up = inner.expire_initializing();
-                (expired, never_came_up)
+                let deadlines = inner.expire_deadlines();
+                (expired, never_came_up, deadlines)
             };
             for id in expired {
                 println!("[inductor] lease expired, requeued {id} (no strike)");
             }
             for line in never_came_up {
                 println!("[inductor] {line} — marked error");
+            }
+            for line in deadlines {
+                println!("[inductor] {line}");
+            }
+            if ticks.is_multiple_of(6) {
+                for line in cloud::sweep(reaper.clone(), reap_root.clone()).await {
+                    println!("[inductor] {line}");
+                }
             }
         }
     });

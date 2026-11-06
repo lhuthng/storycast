@@ -25,13 +25,189 @@ pub(crate) fn corrected_source(event: &PreparedEvent, fixes: &[Value]) -> String
     text
 }
 
-/// Whether the segment's own words are the source event's words, in order. The
-/// two spellings of a split — the halves touching, or one space between them —
-/// are the same words; whitespace is not a change.
+/// The words a span says, in order. Whitespace and punctuation are not words,
+/// so a re-punctuated line is still the source's line, and a split that lands
+/// mid-word still spells it.
+fn words(text: &str) -> Vec<&str> {
+    text.split(|c: char| !c.is_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .collect()
+}
+
+/// How a segment's words stand against the source event's.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Align {
+    /// The source's words, in the source's spelling.
+    Same,
+    /// The same words, with a tone mark or a capital different: (the source's
+    /// spelling, the answer's) for each word that slipped.
+    Slip(Vec<(String, String)>),
+    /// Different words, or the same words out of order: a change of content.
+    Changed(String),
+}
+
+/// The first place two word lists part, with a few words either side so the
+/// log line names the difference before it is cut.
+fn drift(expected: &[&str], got: &[&str]) -> String {
+    const SIDE: usize = 7;
+    let at = expected
+        .iter()
+        .zip(got)
+        .position(|(a, b)| a != b)
+        .unwrap_or_else(|| expected.len().min(got.len()));
+    let window = |ws: &[&str]| {
+        let from = at.saturating_sub(SIDE);
+        let to = (at + SIDE).min(ws.len());
+        let mut text = ws[from..to].join(" ");
+        if from > 0 {
+            text.insert(0, '…');
+        }
+        if to < ws.len() {
+            text.push('…');
+        }
+        text
+    };
+    format!(
+        "the source reads {:?} where the answer reads {:?}",
+        window(expected),
+        window(got)
+    )
+}
+
+fn alignment(expected: &[&str], got: &[&str]) -> Align {
+    if got == expected {
+        return Align::Same;
+    }
+    if got.len() == expected.len() {
+        let mut slips: Vec<(String, String)> = Vec::new();
+        for (want, have) in expected.iter().zip(got) {
+            if want == have {
+                continue;
+            }
+            if crate::util::fold(want) != crate::util::fold(have) {
+                return Align::Changed(drift(expected, got));
+            }
+            slips.push((want.to_string(), have.to_string()));
+        }
+        if !slips.is_empty() {
+            return Align::Slip(slips);
+        }
+    }
+    Align::Changed(drift(expected, got))
+}
+
+/// The source gate's text rule: the same words, in order. A tone mark that
+/// slipped is reported rather than refused — it moves one vowel and says
+/// nothing different — while every other difference is the content the gate
+/// exists to hold.
+pub(crate) fn source_alignment(expected: &str, actual: &[String]) -> Align {
+    let expected = words(expected);
+    // The two spellings of a split: halves that touch, and halves with a space
+    // between them. The gate judges whichever answers better.
+    let touching_text = actual.concat();
+    let spaced_text = actual.join(" ");
+    let touching = words(&touching_text);
+    let spaced = words(&spaced_text);
+    [
+        alignment(&expected, &touching),
+        alignment(&expected, &spaced),
+    ]
+    .into_iter()
+    .min_by_key(|seen| match seen {
+        Align::Same => 0,
+        Align::Slip(_) => 1,
+        Align::Changed(_) => 2,
+    })
+    .expect("two spellings of the same split")
+}
+
+/// Whether a segment says the source's words in the source's spelling: a
+/// sound split's halves must reproduce a staged line exactly.
 pub(crate) fn source_text_matches(expected: &str, actual: &[String]) -> bool {
-    let expected = crate::util::squeeze_ws(expected);
-    crate::util::squeeze_ws(&actual.concat()) == expected
-        || crate::util::squeeze_ws(&actual.join(" ")) == expected
+    source_alignment(expected, actual) == Align::Same
+}
+
+/// A word the answer spelt with another tone mark, and the source's spelling.
+#[derive(Debug)]
+pub(crate) struct Spelling {
+    pub id: String,
+    pub source: String,
+    pub answer: String,
+}
+
+/// The whole-word spans of `word` in `text`.
+fn word_spans(text: &str, word: &str) -> Vec<(usize, usize)> {
+    let mut spans = Vec::new();
+    if word.is_empty() {
+        return spans;
+    }
+    let mut at = 0usize;
+    while let Some(found) = text[at..].find(word) {
+        let start = at + found;
+        let end = start + word.len();
+        let left = text[..start].chars().next_back();
+        let right = text[end..].chars().next();
+        if left.is_none_or(|c| !c.is_alphanumeric()) && right.is_none_or(|c| !c.is_alphanumeric()) {
+            spans.push((start, end));
+        }
+        at = end;
+    }
+    spans
+}
+
+/// `text` with its one whole-word `from` said as `to`.
+fn spelled_as_source(text: &str, from: &str, to: &str) -> Option<String> {
+    let mut spans = word_spans(text, from);
+    if spans.len() != 1 {
+        return None;
+    }
+    let (start, end) = spans.pop()?;
+    Some(format!("{}{to}{}", &text[..start], &text[end..]))
+}
+
+/// Put the chapter's own spelling back where the answer slipped a tone mark.
+/// The prompt already asks for character-for-character copy, and the text the
+/// operator reviewed is the one the script speaks; a word the event says more
+/// than once is left as written, because which of them slipped is unknowable.
+pub(crate) fn apply_source_spelling(data: &mut Value, spellings: &[Spelling]) {
+    if spellings.is_empty() {
+        return;
+    }
+    let Some(segments) = data.get_mut("segments").and_then(Value::as_array_mut) else {
+        return;
+    };
+    for slip in spellings {
+        let carried: Vec<&mut Value> = segments
+            .iter_mut()
+            .filter(|s| s.get("source_id").and_then(Value::as_str) == Some(slip.id.as_str()))
+            .collect();
+        let seen: usize = carried
+            .iter()
+            .filter_map(|s| s.get("text").and_then(Value::as_str))
+            .map(|text| word_spans(text, &slip.answer).len())
+            .sum();
+        if seen != 1 {
+            eprintln!(
+                "staging: source event {:?} writes {:?} where the chapter says {:?}, in {seen} \
+                 place(s); left as written",
+                slip.id, slip.answer, slip.source
+            );
+            continue;
+        }
+        for segment in carried {
+            let Some(text) = segment.get("text").and_then(Value::as_str) else {
+                continue;
+            };
+            if let Some(fixed) = spelled_as_source(text, &slip.answer, &slip.source) {
+                eprintln!(
+                    "staging: source event {:?} wrote {:?} for the chapter's {:?}; the chapter's \
+                     spelling stands",
+                    slip.id, slip.answer, slip.source
+                );
+                segment["text"] = json!(fixed);
+            }
+        }
+    }
 }
 
 /// The non-verbal sound a segment declares, checked against the only things the
@@ -89,7 +265,7 @@ pub(crate) fn validate_source_alignment(
     prepared: &PreparedChapter,
     not_speech: &HashSet<String>,
     engine: &str,
-) -> Result<()> {
+) -> Result<Vec<Spelling>> {
     let segments = data
         .get("segments")
         .and_then(Value::as_array)
@@ -179,20 +355,27 @@ pub(crate) fn validate_source_alignment(
         validate_nonverbal(segment, i, id, kind, text, engine)?;
     }
 
+    let mut spellings = Vec::new();
     for event in &prepared.events {
         if !seen.contains(event.id.as_str()) {
             anyhow::bail!("source event {:?} was dropped", event.id);
         }
         let actual = by_id.get(event.id.as_str()).cloned().unwrap_or_default();
         let expected = corrected_source(event, &fixes);
-        if !source_text_matches(&expected, &actual) {
-            anyhow::bail!(
-                "source event {:?} was changed, duplicated, or split out of order (expected {:?}, got {:?})",
-                event.id,
-                expected,
-                actual
-            );
+        match source_alignment(&expected, &actual) {
+            Align::Same => {}
+            Align::Slip(slips) => {
+                spellings.extend(slips.into_iter().map(|(source, answer)| Spelling {
+                    id: event.id.clone(),
+                    source,
+                    answer,
+                }))
+            }
+            Align::Changed(why) => anyhow::bail!(
+                "source event {:?} was changed, duplicated, or split out of order: {why}",
+                event.id
+            ),
         }
     }
-    Ok(())
+    Ok(spellings)
 }

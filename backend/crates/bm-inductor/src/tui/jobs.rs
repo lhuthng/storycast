@@ -7,10 +7,12 @@ use crate::tui::{
 #[allow(unused_imports)]
 pub(crate) use aws::instance_machines;
 use aws::job_aws_discover;
-use aws::job_aws_down;
 use aws::job_aws_login;
 pub(crate) use aws::job_aws_pool;
-use aws::job_aws_up;
+use aws::job_cloud_down;
+use aws::job_cloud_reap;
+use aws::job_cloud_up;
+use aws::job_ibx_login;
 use aws::job_relink_machine;
 use backend::job_drop_machine;
 use backend::job_save_task_policy;
@@ -38,6 +40,7 @@ pub(crate) use reqs::{
     fetch_state, op_job, send, set_machine_state, unreachable_verdict,
     verdict_after_failed_provision, DoneKind, Ev, Job, ProfileReq, WorkspaceReq,
 };
+pub(crate) use reqs::{DownReq, LaunchReq};
 use stage_dir::job_move_stage_dir;
 use std::collections::{BTreeSet, VecDeque};
 use std::sync::{
@@ -175,7 +178,7 @@ where
         if let (Some(id), Ev::Log(line)) = (id, &ev) {
             let _ = tx.send(Ev::JobProgress {
                 id,
-                text: line.text.clone(),
+                text: progress_text(&line.text),
             });
         }
         let _ = tx.send(ev);
@@ -203,6 +206,17 @@ where
     if let Some(id) = id {
         let _ = tx.send(Ev::JobFinished(id));
     }
+}
+
+/// A progress line without the `[box] ` prefix: the row names the box already,
+/// and the prefix is a URL on an InstaBox, which would leave room for nothing
+/// else. The event pane still gets the whole line.
+fn progress_text(line: &str) -> String {
+    let body = match line.strip_prefix('[') {
+        Some(rest) => rest.split_once("] ").map(|(_, body)| body).unwrap_or(line),
+        None => line,
+    };
+    bm_core::util::head_chars(body, 300)
 }
 
 /// Refuse to move what the cluster is reading, or `None` when it is quiet.
@@ -240,20 +254,21 @@ pub(crate) async fn run_job(job: Job, tx: tokio::sync::mpsc::UnboundedSender<Ev>
         Job::AwsPool { root, api, http } => job_aws_pool(tx, root, api, http).await,
         Job::AwsLogin { root, csv } => job_aws_login(tx, root, csv).await,
         Job::AwsDiscover { root, args } => job_aws_discover(tx, root, args).await,
-        Job::AwsUp {
+        Job::IbxLogin { root, key } => job_ibx_login(tx, root, key).await,
+        Job::CloudUp {
             root,
             api,
             http,
-            count,
-        } => job_aws_up(tx, root, api, http, count).await,
-        Job::AwsDown {
+            req,
+        } => job_cloud_up(tx, root, api, http, req).await,
+        Job::CloudDown {
             root,
             layout,
             api,
             http,
-            ids,
-            machines,
-        } => job_aws_down(tx, root, layout, api, http, ids, machines).await,
+            req,
+        } => job_cloud_down(tx, root, layout, api, http, req).await,
+        Job::CloudReap { api, http } => job_cloud_reap(tx, api, http).await,
         Job::AddSample {
             layout,
             path,

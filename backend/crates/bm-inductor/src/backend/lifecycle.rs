@@ -13,12 +13,25 @@ fn remote_worker_check_script() -> String {
 }
 
 /// The remote half of the launch. **No inductor URL is passed**, and that is
-fn remote_worker_launch_script(addr: &str) -> String {
-    format!(
+///
+/// With a deadline, a watchdog also stops the worker and shuts the box down at
+/// that second: on EC2 `--instance-initiated-shutdown-behavior terminate` turns
+/// the shutdown into a termination, so the box cannot outlive its work even if
+/// this inductor is gone.
+fn remote_worker_launch_script(addr: &str, expires_at: Option<u64>) -> String {
+    let start = format!(
         "cd \"$HOME/{d}\" && nohup ./bm-agent --root \"$HOME/{d}\" worker --serve-tasks {p} --addr {} >> agent.log 2>&1 & echo STARTED:$!",
         shq(addr),
         d = REMOTE_DIR,
         p = bm_proto::DEFAULT_TASK_PORT,
+    );
+    let Some(at) = expires_at else {
+        return start;
+    };
+    let secs = at.saturating_sub(bm_proto::now_secs());
+    format!(
+        "{start}; ( sleep {secs}; pkill -f 'bm-agent.*worke[r]' >/dev/null 2>&1 || true; \
+         sync; sudo -n shutdown -h now >/dev/null 2>&1 || true ) >/dev/null 2>&1 &"
     )
 }
 
@@ -37,7 +50,7 @@ pub fn start_workers(machines: &[Machine], layout_root: &Path) -> (bool, Vec<Str
         .cloned()
         .collect();
     if !remotes.is_empty() {
-        let (o, l) = start_remote_workers(&remotes);
+        let (o, l) = start_remote_workers(&remotes, layout_root);
         ok &= o;
         lines.extend(l);
     }
@@ -45,9 +58,10 @@ pub fn start_workers(machines: &[Machine], layout_root: &Path) -> (bool, Vec<Str
 }
 
 /// Start a worker on every remote machine (blocking): skip boxes that already
-pub fn start_remote_workers(machines: &[Machine]) -> (bool, Vec<String>) {
+pub fn start_remote_workers(machines: &[Machine], layout_root: &Path) -> (bool, Vec<String>) {
     let mut lines = Vec::new();
     let mut ok = true;
+    let layout = Layout::new(layout_root);
     let mut remotes: Vec<&Machine> = machines
         .iter()
         .filter(|m| !is_local_addr(&m.addr))
@@ -55,8 +69,17 @@ pub fn start_remote_workers(machines: &[Machine]) -> (bool, Vec<String>) {
     remotes.sort_by(|a, b| a.addr.cmp(&b.addr));
     remotes.dedup_by(|a, b| a.addr == b.addr);
     for m in remotes {
-        // pgrep first: a second worker per box is harmless but noisy, and the
-        let ssh = Ssh::for_machine(m);
+        let at = m.handle();
+        // The provider picks the transport. An InstaBox box has no ssh at all:
+        // sshing to its published URL is a DNS error, not a worker start.
+        let ssh = match crate::provision::transport_for(&layout, m) {
+            Ok(ssh) => ssh,
+            Err(e) => {
+                lines.push(format!("[{at}] no transport: {e}"));
+                ok = false;
+                continue;
+            }
+        };
         // Check first, launch second (two round trips — see the builders for
         let already: Option<String> = match ssh.run(&remote_worker_check_script(), 30) {
             Ok((_, stdout, _)) => stdout
@@ -64,44 +87,46 @@ pub fn start_remote_workers(machines: &[Machine]) -> (bool, Vec<String>) {
                 .strip_prefix("ALREADY:")
                 .map(|s| s.to_string()),
             Err(e) => {
-                lines.push(format!("[{}] worker check failed ({e:#})", m.addr));
+                lines.push(format!("[{at}] worker check failed ({e:#})"));
                 ok = false;
                 continue;
             }
         };
         match already {
             Some(pids) if !pids.is_empty() => {
-                lines.push(format!("[{}] worker already running (pid {pids})", m.addr));
+                lines.push(format!("[{at}] worker already running (pid {pids})"));
                 continue;
             }
             _ => {}
         }
-        let script = remote_worker_launch_script(&m.addr);
+        // Past its deadline the box is going away: starting a worker on it is
+        // work that would be thrown away, and the watchdog would kill it anyway.
+        if m.expires_at.is_some_and(|until| until <= bm_proto::now_secs()) {
+            lines.push(format!("[{at}] past its deadline — not starting a worker"));
+            continue;
+        }
+        let script = remote_worker_launch_script(&m.addr, m.expires_at);
         match ssh.run(&script, 60) {
             Ok((0, stdout, _)) => {
                 let out = stdout.trim().to_string();
                 if let Some(pids) = out.strip_prefix("ALREADY:") {
-                    lines.push(format!("[{}] worker already running (pid {pids})", m.addr));
+                    lines.push(format!("[{at}] worker already running (pid {pids})"));
                 } else if let Some(pid) = out.strip_prefix("STARTED:") {
-                    lines.push(format!("[{}] worker started (pid {pid})", m.addr));
+                    lines.push(format!("[{at}] worker started (pid {pid})"));
                 } else {
-                    lines.push(format!(
-                        "[{}] unexpected worker start output: {out}",
-                        m.addr
-                    ));
+                    lines.push(format!("[{at}] unexpected worker start output: {out}"));
                     ok = false;
                 }
             }
             Ok((code, _, stderr)) => {
                 lines.push(format!(
-                    "[{}] worker start failed (exit {code}): {}",
-                    m.addr,
+                    "[{at}] worker start failed (exit {code}): {}",
                     stderr.trim()
                 ));
                 ok = false;
             }
             Err(e) => {
-                lines.push(format!("[{}] worker start failed ({e:#})", m.addr));
+                lines.push(format!("[{at}] worker start failed ({e:#})"));
                 ok = false;
             }
         }
@@ -240,15 +265,18 @@ fn sidecar_kill_script() -> String {
         .into()
 }
 
-/// Sweep one machine for leftover workers + sidecars. Returns the report
-fn sweep_one(label: &str, ssh: &Ssh) -> Vec<String> {
+/// Sweep one machine for leftover workers + sidecars. Returns whether the box
+/// answered at all, and the report.
+fn sweep_one(label: &str, ssh: &Ssh) -> (bool, Vec<String>) {
     let mut out = Vec::new();
+    let mut reached = false;
     for (what, script) in [
         ("worker", worker_kill_script()),
         ("sidecar", sidecar_kill_script()),
     ] {
         match ssh.run(&script, 30) {
             Ok((_, stdout, _)) => {
+                reached = true;
                 let left = stdout
                     .lines()
                     .rev()
@@ -266,20 +294,59 @@ fn sweep_one(label: &str, ssh: &Ssh) -> Vec<String> {
                     ));
                 }
             }
-            Err(e) => out.push(format!(
-                "{label}: sweep failed ({e:#}) — anything there keeps running"
-            )),
+            Err(e) => out.push(format!("{label}: sweep failed ({e:#}) — nothing answered")),
         }
     }
-    out
+    (reached, out)
 }
 
-/// Remote task endpoints for an HTTP shutdown: `(addr, port)`, one per box.
-fn shutdown_targets(machines: &[Machine]) -> Vec<(String, u16)> {
-    let mut out: Vec<(String, u16)> = machines
+/// Whether there is anywhere to dial: an InstaBox box with no published port
+/// answers to nothing, and a sweep would only spend its timeout proving that.
+fn dialable(m: &Machine) -> bool {
+    let via_api = m.provider.as_deref() == Some(bm_core::cloud::Provider::InstaBox.as_str());
+    !(via_api && m.base_url.as_deref().map(str::is_empty).unwrap_or(true))
+}
+
+/// File boxes that answered nothing as offline, so the scheduler stops counting
+/// them as live and their rows go back to the pool instead of waiting on a box
+/// nobody can reach.
+async fn mark_unreachable(api: &str, machines: &[Machine]) {
+    let Ok(http) = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+    else {
+        return;
+    };
+    let url = format!("{}/api/machines/state", api.trim_end_matches('/'));
+    for m in machines {
+        let _ = http
+            .post(&url)
+            .json(&serde_json::json!({
+                "addr": m.addr,
+                "state": bm_proto::MachineState::Offline.as_str(),
+                "note": "unreachable at stop — nothing there answered",
+            }))
+            .send()
+            .await;
+    }
+}
+
+/// Remote task endpoints for an HTTP shutdown: `(addr, base URL)`, one per box.
+fn shutdown_targets(machines: &[Machine]) -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = machines
         .iter()
         .filter(|m| !is_local_addr(&m.addr))
-        .filter_map(|m| m.task_port.map(|p| (m.addr.clone(), p)))
+        .filter_map(|m| {
+            let port = m.task_port?;
+            let base = m
+                .base_url
+                .as_deref()
+                .map(str::trim)
+                .filter(|u| !u.is_empty())
+                .map(str::to_string)
+                .unwrap_or_else(|| format!("http://{}:{port}", m.addr));
+            Some((m.addr.clone(), base))
+        })
         .collect();
     out.sort();
     out.dedup();
@@ -304,10 +371,10 @@ async fn shutdown_remotes_http(layout_root: &Path, machines: &[Machine]) -> Vec<
         }
     };
     let mut jobs = Vec::new();
-    for (addr, port) in shutdown_targets(machines) {
+    for (addr, base) in shutdown_targets(machines) {
         let (http, token) = (http.clone(), token.clone());
         jobs.push(tokio::spawn(async move {
-            let url = format!("http://{addr}:{port}/shutdown");
+            let url = format!("{base}/shutdown");
             match http.post(&url).bearer_auth(&token).send().await {
                 Ok(r) if r.status().is_success() => {
                     format!("[{addr}] worker stopping (shutdown acknowledged)")
@@ -360,27 +427,61 @@ pub async fn stop_everywhere(layout: &Layout, machines: &[Machine], api: &str) -
             port: 22,
             key: None,
             local: true,
+            exec: None,
         };
         sweep_one("local", &local)
     })
     .await;
     match local_sweep {
-        Ok(ls) => lines.extend(ls),
+        Ok((_, ls)) => lines.extend(ls),
         Err(e) => lines.push(format!("local sweep task failed ({e})")),
     }
-    let mut remotes: Vec<&Machine> = machines
+    let mut remotes: Vec<Machine> = machines
         .iter()
         .filter(|m| !is_local_addr(&m.addr))
+        .cloned()
         .collect();
     remotes.sort_by(|a, b| a.addr.cmp(&b.addr));
     remotes.dedup_by(|a, b| a.addr == b.addr);
-    for m in remotes {
-        let addr = m.addr.clone();
-        let ssh = Ssh::for_machine(m);
-        let swept = tokio::task::spawn_blocking(move || sweep_one(&addr, &ssh)).await;
-        match swept {
-            Ok(ls) => lines.extend(ls),
-            Err(e) => lines.push(format!("[{}] sweep task failed ({e})", m.addr)),
+    let (dial, mut unreachable): (Vec<Machine>, Vec<Machine>) =
+        remotes.into_iter().partition(dialable);
+    // One task per box: a dead one costs its own timeout, not every other box's
+    // as well.
+    let mut jobs = Vec::new();
+    for m in dial {
+        let layout = layout.clone();
+        jobs.push(tokio::spawn(async move {
+            let addr = m.addr.clone();
+            let at = m.handle();
+            let swept = match crate::provision::transport_for(&layout, &m) {
+                Ok(ssh) => tokio::task::spawn_blocking(move || sweep_one(&addr, &ssh)).await,
+                Err(e) => Ok((false, vec![format!("{at}: no transport ({e})")])),
+            };
+            (m, swept)
+        }));
+    }
+    for j in jobs {
+        match j.await {
+            Ok((m, Ok((reached, ls)))) => {
+                lines.extend(ls);
+                if !reached {
+                    unreachable.push(m);
+                }
+            }
+            Ok((m, Err(e))) => {
+                lines.push(format!("[{}] sweep task failed ({e})", m.addr));
+                unreachable.push(m);
+            }
+            Err(e) => lines.push(format!("sweep task failed ({e})")),
+        }
+    }
+    if !unreachable.is_empty() {
+        mark_unreachable(api, &unreachable).await;
+        for m in &unreachable {
+            lines.push(format!(
+                "{}: unreachable — flagged offline, its rows return to the pool",
+                m.handle()
+            ));
         }
     }
     lines
@@ -535,12 +636,53 @@ mod tests {
         let lan = Machine::new("192.168.2.2", "thang", 22, None, "worker");
         assert_eq!(
             shutdown_targets(&[lan]),
-            vec![("192.168.2.2".into(), bm_proto::DEFAULT_TASK_PORT)]
+            vec![(
+                "192.168.2.2".into(),
+                format!("http://192.168.2.2:{}", bm_proto::DEFAULT_TASK_PORT)
+            )]
         );
         let mut quiet = Machine::new("192.168.2.2", "thang", 22, None, "worker");
         quiet.task_port = None;
         let local = Machine::new("127.0.0.1", "me", 22, None, "worker");
         assert!(shutdown_targets(&[quiet, local]).is_empty());
+    }
+
+    #[test]
+    fn a_worker_is_never_started_over_ssh_on_an_instabox_box() {
+        // The url is not a hostname: ssh reads it as a bad CNAME and exits 255.
+        let layout = Layout::new("");
+        let mut m = Machine::new(
+            "https://8917-x.instabox.tech",
+            "instabox",
+            22,
+            None,
+            "worker",
+        );
+        m.provider = Some(bm_core::cloud::Provider::InstaBox.as_str().to_string());
+        m.provider_id = Some("m_agq".into());
+        match crate::provision::transport_for(&layout, &m) {
+            Ok(ssh) => {
+                assert!(ssh.exec.is_some(), "an InstaBox box has no ssh to dial");
+                assert!(!ssh.target.contains("://"), "target is a label: {}", ssh.target);
+            }
+            // No key on this checkout: refusing is the other correct answer.
+            Err(e) => assert!(!e.is_empty()),
+        }
+        assert!(!dialable(&m), "a box with no published port is not swept");
+    }
+
+    #[test]
+    fn a_box_with_no_address_is_not_dialable() {
+        // An InstaBox box with no published port answers to nothing: sweeping it
+        // would spend two 30 s timeouts to learn that, and `:X` would look hung.
+        let mut boxed =
+            Machine::new("m_agqzns2gx7lfvbhf7ddsayzq2m", "instabox", 22, None, "worker");
+        boxed.provider = Some(bm_core::cloud::Provider::InstaBox.as_str().to_string());
+        assert!(!dialable(&boxed));
+        boxed.base_url = Some("https://8917-x.instabox.tech".into());
+        assert!(dialable(&boxed));
+        // Any other provider is dialled by its address alone.
+        assert!(dialable(&Machine::new("18.1.2.3", "ubuntu", 22, None, "worker")));
     }
 
     #[test]
@@ -569,7 +711,7 @@ mod tests {
         let check = remote_worker_check_script();
         assert!(!check.contains("bm-agent worker"), "self-match: {check}");
         assert!(check.contains("ALREADY:"), "{check}");
-        let launch = remote_worker_launch_script("192.168.2.2");
+        let launch = remote_worker_launch_script("192.168.2.2", None);
         assert!(
             !launch.contains("pkill") && !launch.contains("pgrep"),
             "launch must not inspect: {launch}"
@@ -601,6 +743,32 @@ mod tests {
         // The root travels with the launch: the worker mirror has no backend/
         assert!(launch.contains("--root \"$HOME/bm-worker\""), "{launch}");
         assert!(launch.contains("192.168.2.2"), "{launch}");
+    }
+
+    #[test]
+    fn a_deadline_arms_a_watchdog_and_a_box_without_one_gets_none() {
+        let at = bm_proto::now_secs() + 3600;
+        let launch = remote_worker_launch_script("192.0.2.9", Some(at));
+        let secs = at.saturating_sub(bm_proto::now_secs());
+        assert!(
+            launch.contains(&format!("sleep {secs}"))
+                || launch.contains(&format!("sleep {}", secs.saturating_sub(1))),
+            "{launch}"
+        );
+        assert!(launch.contains("worke[r]"), "stops the worker: {launch}");
+        assert!(
+            launch.contains("shutdown -h now"),
+            "and the box, the only part that stops billing: {launch}"
+        );
+        assert!(
+            launch.starts_with("cd \"$HOME/bm-worker\""),
+            "the worker launch itself is unchanged: {launch}"
+        );
+        assert!(launch.contains("192.0.2.9"), "{launch}");
+        assert!(
+            !remote_worker_launch_script("192.0.2.9", None).contains("shutdown"),
+            "no deadline, no shutdown"
+        );
     }
 
     #[test]

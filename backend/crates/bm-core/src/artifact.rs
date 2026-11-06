@@ -297,11 +297,19 @@ impl ModelsRelease {
 }
 
 impl PackRelease {
+    /// The bucket's `latest.json` entry for this pack, or `None` when the
+    /// bucket has no pack under that name. One definition of where a pack
+    /// lives, so a preflight and the push it guards cannot drift apart.
+    pub fn in_bucket(base: &str, name: &str) -> Result<Option<PresetFile>> {
+        preset_latest_opt(base, "sounds", name, &format!("{name}.tar.zst"))
+    }
+
     /// The pack release an R2 preset base names: the bundle entry of the
     /// pack's latest.json, floating on latest rather than pinned to the
     /// checkout pointer the GitHub path uses. Same tree-hash contract.
     pub fn for_r2(base: &str, name: &str) -> Result<Self> {
-        let f = preset_latest(base, "sounds", name, &format!("{name}.tar.zst"))?;
+        let f = Self::in_bucket(base, name)?
+            .ok_or_else(|| anyhow!("{base}: no pack `{name}` in the bucket"))?;
         Ok(Self {
             repo: base.to_string(),
             name: name.to_string(),

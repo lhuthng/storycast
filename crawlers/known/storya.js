@@ -76,6 +76,24 @@ const SITE = {
     // the only stable part of it. `Mời ` alone is not enough: prose can start
     // that way, and one chapter's dialogue does.
     promo_prefix: ["mời đọc", "mời các bạn", "mời mọi người"],
+    // The ad the site appends after the last paragraph is plain paragraphs with
+    // no wrapper, so only the tail is searched, and this holds promo copy — never
+    // a book or character name. The `Name: …` form is recognised by shape.
+    promo_tail: [
+      "kỹ năng bị động",
+      "điệp viên 007", "Điệp viên 007",
+      "hãy đến ngay với",
+      "xuất phẩm",
+      "bộ này không phải truyện hay",
+      "biên tập lại nhân sinh",
+      "xuyên qua vô tận thứ nguyên",
+      "cùng chư thiên vạn giới",
+      "nghiền nát mọi kẻ thù",
+      "nghịch thiên cải mệnh",
+      "mời đọc", "mời mọi người", "đón đọc", "đón xem", "đọc ngay",
+      "đề cử đọc", "giới thiệu truyện", "truyện của ta", "truyện giải trí",
+      "cẩu đạo", "bạo chương", "xuyên nhanh", "vô địch lưu",
+    ],
   },
   // The first line longer than this is prose rather than a stray label.
   min_line: 40,
@@ -154,6 +172,72 @@ function isNumberedHeading(line) {
 function isPromo(line) {
   const lower = asciiLower(line);
   return SITE.artifact.promo_prefix.some((p) => lower.startsWith(p));
+}
+
+// `Name: …` with a one- or two-word label, unquoted: the ad's dialogue form.
+// Prose reports speech that way too (`Hắn nói: …`), so one line is never
+// enough — the block below needs two, with different labels.
+function adLabel(line) {
+  if (line.includes('"')) return null;
+  const m = line.match(/^([^\s:][^:]*?):\s/);
+  if (m === null) return null;
+  const label = m[1];
+  if (label.split(/\s+/).filter(Boolean).length > 2 || chars(label) > 24) return null;
+  return label;
+}
+
+// Whether a line ends its sentence. A multi-byte last character (`…`, a curly
+// quote) is an ending too.
+function endsClosed(line) {
+  const last = line.slice(-1);
+  if (".!?:)]\"'".includes(last)) return true;
+  return last.codePointAt(0) >= 128;
+}
+
+// Any quote means the line is reported speech, not a pitch.
+const QUOTE = /["'\u2018\u2019\u201c\u201d]/;
+
+// Short enough to be a pitch, so a whole paragraph of prose that merely carries
+// an ad keeps the prose.
+function isTagline(line) {
+  return chars(line) <= 160 && !endsClosed(line) && !QUOTE.test(line);
+}
+
+// `…! Name: … Name: …` — the ad typed into the last paragraph behind the prose.
+// One tag is how prose reports speech, so two are required.
+function gluedAt(line) {
+  if (QUOTE.test(line)) return null;
+  const re = /[.!?]\s+[^\s:][^:]*?:\s/g;
+  const at = [];
+  let m;
+  while ((m = re.exec(line)) !== null) at.push(m.index);
+  return at.length >= 2 ? at[0] : null;
+}
+
+function isPromoLine(line) {
+  return anyOf(asciiLower(line), SITE.artifact.promo_tail) || isTagline(line);
+}
+
+// Drop the ad from the end: a block of `Name:` lines, then any trailing promo
+// line, then a dialogue line glued onto the prose (`…! Name: …`).
+function stripPromoTail(out) {
+  while (out.length > 2) {
+    const a = adLabel(out[out.length - 1]);
+    const b = adLabel(out[out.length - 2]);
+    if (a === null || b === null || a === b) break;
+    out.pop();
+    out.pop();
+  }
+  while (out.length > 1) {
+    const last = out[out.length - 1];
+    if (isPromoLine(last)) {
+      out.pop();
+      continue;
+    }
+    const at = gluedAt(last);
+    if (at !== null) out[out.length - 1] = last.slice(0, at + 1);
+    break;
+  }
 }
 
 // Whether a line is the site's furniture rather than the novel. Every word
@@ -290,8 +374,9 @@ function extract(html) {
   const all = title === null ? tail : [title].concat(tail);
   // The cross-promo is a block: `Mời đọc:` introduces the titles it
   // recommends, so everything from that line on is the site's, not the book's.
-  const promoAt = all.findIndex(isPromo);
-  const kept = promoAt === -1 ? all : all.slice(0, promoAt);
+  const promoStart = all.findIndex(isPromo);
+  const kept = promoStart === -1 ? all : all.slice(0, promoStart);
+  stripPromoTail(kept);
   // The site's own lines go here, where the site is described: the numbered
   // headline copy, the promo strip, the completion footer, the author's PS.
   // What is left is prose, and the host's `sanitize` is then only tidying —

@@ -28,6 +28,7 @@ impl Inner {
             stats: super::StatsAgg::default(),
             unreadable_tasks: Vec::new(),
             exclusive: Vec::new(),
+            intents: Vec::new(),
         }
     }
 
@@ -225,7 +226,8 @@ impl Inner {
                          "caps": self.caps,
                          "dropped": self.dropped,
                          "profile": self.ledger_profile,
-                         "exclusive": self.exclusive});
+                         "exclusive": self.exclusive,
+                         "delete_intents": self.intents});
         let _ = bm_core::write_json(&self.ledger_path(), &doc);
     }
 
@@ -325,6 +327,10 @@ impl Inner {
                 }
             }
         }
+        self.intents = doc
+            .get("delete_intents")
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .unwrap_or_default();
         self.dropped = doc
             .get("dropped")
             .and_then(|d| d.as_array())

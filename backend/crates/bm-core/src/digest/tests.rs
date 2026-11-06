@@ -6,9 +6,13 @@ use super::attribution::Continuity;
 use super::excerpt::content_language;
 use super::excerpt::excerpt_rule;
 use super::excerpt::previous_excerpts;
+use super::gate::apply_source_spelling;
 use super::gate::corrected_source;
+use super::gate::source_alignment;
 use super::gate::source_text_matches;
 use super::gate::validate_source_alignment;
+use super::gate::Align;
+use super::gate::Spelling;
 use super::json::json_failure;
 use super::json::parse_json_repaired;
 use super::json::strip_fences;
@@ -59,7 +63,7 @@ fn validate_source_alignment_no_retractions(
     data: &Value,
     prepared: &PreparedChapter,
 ) -> Result<()> {
-    validate_source_alignment(data, prepared, &HashSet::new(), "vieneu")
+    validate_source_alignment(data, prepared, &HashSet::new(), "vieneu").map(|_| ())
 }
 
 /// The chain the whole program rests on, as one test: **a crawler's output
@@ -457,6 +461,14 @@ fn the_two_prompts_render_their_own_placeholders() {
         !staging.contains("{scene_words}") && !staging.contains("{effect_tags}"),
         "placeholder leaked into the staging prompt: {staging}"
     );
+    // A contract that offers `text` for a "typo" is the one that hands back a
+    // corrected chapter: text is a split's, and a correction is nobody's.
+    let flat_staging = staging.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(
+        flat_staging.contains("`text` is for a SPLIT and nothing else"),
+        "{staging}"
+    );
+    assert!(!flat_staging.contains("fix a typo"), "{staging}");
 
     // The script prompt: the four vocabularies and the resolved cast.
     let p = build_script_prompt(&layout, "vieneu", &bible, &context, "text").unwrap();
@@ -2240,10 +2252,10 @@ fn a_declared_sound_is_checked_against_the_engine_and_the_line() {
     );
 }
 
-/// Whitespace is not a change and a different word is: that is the whole of the
-/// source gate's text rule, now that the code writes nothing.
+/// Whitespace is not a change, a word is, and a tone mark that slipped is the
+/// same word: that is the whole of the source gate's text rule.
 #[test]
-fn source_text_matches_ignores_whitespace_and_nothing_else() {
+fn source_text_matches_ignores_whitespace_and_punctuation() {
     assert!(source_text_matches(
         "Hắn đứng đợi. Ài...",
         &["Hắn đứng đợi.  Ài...".into()]
@@ -2252,8 +2264,66 @@ fn source_text_matches_ignores_whitespace_and_nothing_else() {
         "Hắn đi.",
         &["Hắn ".into(), "đi.".into()]
     ));
+    // A split that lands mid-word still spells the word.
+    assert!(source_text_matches(
+        "Hắn đi.",
+        &["Hắ".into(), "n đi.".into()]
+    ));
+    // Re-punctuating a line is not changing it.
+    assert!(source_text_matches(
+        "Hắn đi, rồi về!",
+        &["Hắn đi rồi về.".into()]
+    ));
     assert!(!source_text_matches("Hắn đi.", &["Hắn đi và về.".into()]));
     assert!(!source_text_matches("Ài...", &["Ơi...".into()]));
+}
+
+/// The ch1019 shape: the answer kept writing `lão giả` for the chapter's `lão
+/// già`, one vowel apart and never the same line twice, so no retry could pass.
+#[test]
+fn a_tone_mark_that_slipped_is_the_same_word() {
+    assert_eq!(
+        source_alignment(
+            "Hai lão già cứ thế chen chúc trước mặt.",
+            &["Hai lão giả cứ thế chen chúc trước mặt.".into()]
+        ),
+        Align::Slip(vec![("già".to_string(), "giả".to_string())])
+    );
+    // The same words in another order are a rewrite, and the gate says where.
+    match source_alignment(
+        "Túy Vô Nhai đắc ý khóe miệng hơi nhếch.",
+        &["Túy Vô Nhai đắc ý khẽ nhếch khóe miệng.".into()],
+    ) {
+        Align::Changed(why) => assert!(why.contains("the source reads"), "{why}"),
+        other => panic!("a reword must be refused, got {other:?}"),
+    }
+}
+
+/// The slip is only tolerated in the gate: the script still says the chapter's
+/// own words, so what is spoken is what the operator reviewed.
+#[test]
+fn a_slip_is_put_back_to_the_chapters_spelling() {
+    let mut data = json!({
+        "segments": [
+            {"source_id": "e0001", "text": "Hai lão giả cứ thế chen chúc."},
+            {"source_id": "e0002", "text": "Lão giả kia lại giả vờ."},
+        ]
+    });
+    let slip = |id: &str| Spelling {
+        id: id.to_string(),
+        source: "già".to_string(),
+        answer: "giả".to_string(),
+    };
+    apply_source_spelling(&mut data, &[slip("e0001"), slip("e0002")]);
+    assert_eq!(
+        data["segments"][0]["text"],
+        json!("Hai lão già cứ thế chen chúc.")
+    );
+    // Said twice, so which one slipped is unknowable: left as written.
+    assert_eq!(
+        data["segments"][1]["text"],
+        json!("Lão giả kia lại giả vờ.")
+    );
 }
 
 /// The ch51 shape: right person, the chapter's spelling. It used to cost

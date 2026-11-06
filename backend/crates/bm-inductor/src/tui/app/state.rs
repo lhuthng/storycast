@@ -12,6 +12,7 @@ pub(crate) struct StateSnap {
     dispatch: Option<Dispatch>,
     settings: Option<serde_json::Value>,
     events: Vec<crate::state::EventRecord>,
+    pending_deletes: usize,
 }
 
 /// The payload as the server writes it, deserialized straight into the types
@@ -35,6 +36,8 @@ struct RawDoc {
     settings: Option<serde_json::Value>,
     #[serde(default)]
     events: Vec<crate::state::EventRecord>,
+    #[serde(default)]
+    pending_deletes: usize,
 }
 
 impl RawDoc {
@@ -48,6 +51,7 @@ impl RawDoc {
             dispatch,
             settings,
             events,
+            pending_deletes,
         } = self;
         // The API serialises HashMaps, whose iteration order is not
         machines.sort_by(|a, b| a.addr.cmp(&b.addr));
@@ -62,6 +66,7 @@ impl RawDoc {
             dispatch: parse_dispatch(dispatch.as_ref()),
             settings,
             events,
+            pending_deletes,
         }
     }
 }
@@ -105,6 +110,10 @@ impl StateSnap {
             dispatch: parse_dispatch(v.get("dispatch")),
             settings: v.get_mut("settings").map(std::mem::take),
             events,
+            pending_deletes: v
+                .get("pending_deletes")
+                .and_then(|n| n.as_u64())
+                .unwrap_or_default() as usize,
         }
     }
 }
@@ -290,6 +299,7 @@ impl App {
             dispatch,
             settings,
             events,
+            pending_deletes,
         } = snap;
         // Which launched boxes are waiting to be onboarded, read off the note
         self.onboarded.retain(|addr| {
@@ -311,6 +321,7 @@ impl App {
         self.stats = stats;
         self.dispatch = dispatch;
         self.settings = settings;
+        self.pending_deletes = pending_deletes;
         self.ingest_events(events);
         if self.selected >= self.machines.len() {
             self.selected = self.machines.len().saturating_sub(1);
@@ -374,7 +385,6 @@ impl App {
             Ev::JobStarted(id) => {
                 if let Some(job) = self.background_jobs.iter_mut().find(|job| job.id == id) {
                     job.started.get_or_insert_with(Instant::now);
-                    job.activity = "running".into();
                 }
             }
             Ev::JobProgress { id, text } => {

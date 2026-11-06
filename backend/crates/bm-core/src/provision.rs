@@ -8,6 +8,8 @@ use std::path::Path;
 mod aws;
 /// Public rather than re-exported: the callers that need it are the CLI's
 pub mod aws_credentials;
+/// The provider's own exec and files API, for a machine that has no ssh.
+mod exec;
 /// What a worker is handed, selected by its work policy. Public because the
 pub mod sources;
 mod ssh;
@@ -16,12 +18,13 @@ mod steps;
 
 pub use aws::{
     admits_port, awaiting_onboard, default_security_group_args, default_subnet_args,
-    describe_image_args, describe_security_group_args, ec2_id_from_note, instance_line,
-    instance_note, instance_profile_names_args, keypair_names_args, machine_from_instance,
-    parse_instances, parse_name_list, preserve_ec2_id, run_instances_args, sole_name,
-    terminate_args, ubuntu_ami_args, AwsConfig, AwsInstance, AWAITING_ONBOARD, DEFAULT_FILE,
-    DEFAULT_TAG, REQUIRED_INGRESS, UBUNTU_LTS,
+    describe_image_args, describe_instances_args, describe_security_group_args, ec2_id_from_note,
+    instance_line, instance_note, instance_profile_names_args, keypair_names_args,
+    machine_from_instance, parse_instances, parse_name_list, preserve_ec2_id, run_instances_args,
+    sole_name, terminate_args, ubuntu_ami_args, AwsConfig, AwsInstance, AWAITING_ONBOARD,
+    DEFAULT_FILE, DEFAULT_TAG, REQUIRED_INGRESS, UBUNTU_LTS,
 };
+pub use exec::Exec;
 pub use ssh::{resolve_key, KeySource, RsyncProgress, Ssh};
 pub use stamp::{compute_provision_stamp, ProvisionStamp};
 pub use steps::{provision, LiveLog, Probe};
@@ -54,6 +57,17 @@ pub struct LinkedBox {
     /// ONNX intra-op threads this box's sidecar should open with. Config, like
     #[serde(default)]
     pub tts_threads: Option<u16>,
+    /// Unix seconds this box was launched to live until. `None` is no deadline.
+    #[serde(default)]
+    pub expires_at: Option<u64>,
+    /// Launch provider and its own id for this box. Both or neither.
+    #[serde(default)]
+    pub provider: Option<String>,
+    #[serde(default)]
+    pub provider_id: Option<String>,
+    /// A published worker URL, when the provider has no dialable address.
+    #[serde(default)]
+    pub base_url: Option<String>,
 }
 
 fn default_true() -> bool {
@@ -86,6 +100,10 @@ impl LinkedBox {
         m.task_policy = self.task_policy.clone();
         m.accepting_work = self.accepting_work;
         m.tts_threads = self.tts_threads;
+        m.expires_at = self.expires_at;
+        m.provider = self.provider.clone();
+        m.provider_id = self.provider_id.clone();
+        m.base_url = self.base_url.clone();
         m
     }
 }
@@ -152,6 +170,10 @@ pub fn split_machine(m: &Machine, name: &str) -> (LinkedBox, MachineRuntime) {
         task_policy: m.task_policy.clone(),
         accepting_work: m.accepting_work,
         tts_threads: m.tts_threads,
+        expires_at: m.expires_at,
+        provider: m.provider.clone(),
+        provider_id: m.provider_id.clone(),
+        base_url: m.base_url.clone(),
     };
     let rt = MachineRuntime {
         state: m.state,
@@ -177,6 +199,10 @@ pub fn join_machine(bxo: &LinkedBox, rt: Option<&MachineRuntime>) -> Machine {
     m.task_policy = bxo.task_policy.clone();
     m.accepting_work = bxo.accepting_work;
     m.tts_threads = bxo.tts_threads;
+    m.expires_at = bxo.expires_at;
+    m.provider = bxo.provider.clone();
+    m.provider_id = bxo.provider_id.clone();
+    m.base_url = bxo.base_url.clone();
     m
 }
 
@@ -265,6 +291,10 @@ mod tests {
             task_policy: None,
             accepting_work: true,
             tts_threads: None,
+            expires_at: None,
+            provider: None,
+            provider_id: None,
+            base_url: None,
         };
         let one = super::join_all(vec![bxo], &serde_json::Map::new());
         assert!(
@@ -293,6 +323,10 @@ mod tests {
             task_policy: None,
             accepting_work: true,
             tts_threads: None,
+            expires_at: None,
+            provider: None,
+            provider_id: None,
+            base_url: None,
         };
         super::save_box(&path, &bxo).unwrap();
         // Same address re-binds in place (the name may change); a new
@@ -330,6 +364,10 @@ mod tests {
             task_policy: None,
             accepting_work: true,
             tts_threads: None,
+            expires_at: None,
+            provider: None,
+            provider_id: None,
+            base_url: None,
         }
         .machine();
         assert_eq!(m.ssh_target(), "thang@10.0.0.9");

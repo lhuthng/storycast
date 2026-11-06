@@ -184,6 +184,8 @@ pub(crate) fn state_color(s: &str) -> Color {
         "running" | "assigned" | "probing" | "provisioning" | "initializing" | "awaiting-ip" => {
             Color::Yellow
         }
+        // `killed` is a finished box, not a fault: dim, the way a tombstone
+        "killed" => Color::DarkGray,
         "offline" | "failed" | "shelved" | "error" => Color::Red,
         "pending" => Color::Gray,
         // Parked by the operator. Grey rather than yellow: it is neither a wait
@@ -207,6 +209,9 @@ pub(crate) fn stage_color(s: &str) -> Color {
 pub(crate) fn machine_tint(work: &str, stage: Option<&str>) -> Color {
     if matches!(work, "offline" | "error") {
         return Color::Red;
+    }
+    if work == "killed" {
+        return Color::DarkGray;
     }
     match stage {
         Some(s) => stage_color(s),
@@ -361,6 +366,7 @@ pub(crate) fn state_glyph_cell(colour: bool, text: &str) -> Line<'static> {
         "running" | "assigned" | "probing" | "provisioning" | "initializing" | "awaiting-ip" => {
             "◐ "
         }
+        "killed" => "⊘ ",
         "offline" | "failed" | "shelved" | "error" => "✗ ",
         // See `state_color`: parked is the hollow circle — nothing running,
         "relaxed" => "○ ",

@@ -253,9 +253,16 @@ pub(crate) async fn key_text(
                     },
                 }
             } else {
+                // A credential is submitted, never echoed: the status line is
+                // drawn on the same screen a screen-share sees.
+                let said = if p.kind.holds_a_secret() {
+                    "submitted — checking the key with the API".to_string()
+                } else {
+                    format!("submitted: {}", p.buf.trim())
+                };
                 match submit_text(app, &p) {
                     Ok(job) => {
-                        app.set_status(Level::Ok, format!("submitted: {}", p.buf.trim()));
+                        app.set_status(Level::Ok, said);
                         app.screen = Screen::Normal;
                         dispatch(app, job_tx, job);
                     }

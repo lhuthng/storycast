@@ -23,6 +23,27 @@ pub(crate) enum ProfileReq {
     Pack(String),
 }
 
+/// What a `:up` asked for, kept together so the job takes a request, not a flag.
+#[derive(Debug, Clone)]
+pub(crate) struct LaunchReq {
+    pub(crate) provider: bm_core::cloud::Provider,
+    pub(crate) count: u32,
+    pub(crate) ttl_minutes: Option<u32>,
+    pub(crate) strict: bool,
+    /// `--from-machine`: push the packs from here instead of requiring them
+    /// to be published first.
+    pub(crate) from_machine: bool,
+}
+
+/// What a `:down` was pointed at.
+#[derive(Debug, Clone)]
+pub(crate) struct DownReq {
+    pub(crate) provider: bm_core::cloud::Provider,
+    pub(crate) ids: Vec<String>,
+    /// The registry rows to match the provider ids against.
+    pub(crate) machines: Vec<Machine>,
+}
+
 #[derive(Debug)]
 #[allow(clippy::large_enum_variant)] // boxed at every send site (`Job::Tracked`); the variants are construction-time only
 pub(crate) enum Job {
@@ -195,24 +216,36 @@ pub(crate) enum Job {
         root: std::path::PathBuf,
         args: crate::aws_ops::DiscoverArgs,
     },
-    /// Launch boxes, stream the lines, then **link what came back** into the
-    AwsUp {
+    /// Store the InstaBox workspace key, off the UI thread: the proof is two
+    /// HTTP calls, and a blocked one must not freeze the dashboard.
+    IbxLogin {
+        root: std::path::PathBuf,
+        /// Empty clears the key, which is how the provider is turned off.
+        key: String,
+    },
+    /// Launch boxes on one provider, stream the lines, then **link what came
+    /// back** into the registry.
+    CloudUp {
         root: std::path::PathBuf,
         api: String,
         http: reqwest::Client,
-        count: u32,
+        req: LaunchReq,
     },
-    /// Terminate explicit instance ids, stream the lines, then take the boxes
-    /// they were off the registry — a terminated instance cannot come back, so
-    /// its record has nothing left to describe.
-    AwsDown {
+    /// Terminate explicit provider ids, stream the lines, then take the boxes
+    /// they were off the registry — a terminated box cannot come back, so its
+    /// record has nothing left to describe.
+    CloudDown {
         root: std::path::PathBuf,
         layout: bm_core::Layout,
         api: String,
         http: reqwest::Client,
-        ids: Vec<String>,
-        /// The registry rows to match the instance ids against.
-        machines: Vec<Machine>,
+        req: DownReq,
+    },
+    /// Retry the cloud deletes that kept failing (`:cloud reap`), and run the
+    /// sweep now instead of at its next minute.
+    CloudReap {
+        api: String,
+        http: reqwest::Client,
     },
     /// List what one LLM provider serves (`GET {base}/models`), off the UI
     LlmModels {
@@ -251,12 +284,13 @@ impl Job {
 
     pub(crate) fn label(&self) -> String {
         match self.bare() {
-            Job::Provision { .. } => "provision machine",
+            Job::Provision { machine, .. } => return format!("provision {}", machine.handle()),
             Job::AddMachine { .. } => "add machine",
             Job::StartBackend { .. } => "start backend",
             Job::StopBackend { .. } => "stop backend",
             Job::AddSample { .. } => "add sample",
             Job::DropMachine { .. } => "drop machine",
+            Job::CloudReap { .. } => "reap cloud deletes",
             Job::RelinkMachine { .. } => "relink machine",
             Job::SaveTaskPolicy { .. } => "save task policy",
             Job::SetAccepting {
@@ -291,15 +325,78 @@ impl Job {
                 ProfileReq::Pack(_) => "pack profile",
             },
             Job::AwsPool { .. } => "aws pool",
-            Job::AwsUp { .. } => "aws up",
-            Job::AwsDown { .. } => "aws down",
+            Job::CloudUp { req, .. } => return format!("{} up", req.provider),
+            Job::CloudDown { req, .. } => return format!("{} down", req.provider),
             Job::AwsLogin { .. } => "aws login",
             Job::AwsDiscover { .. } => "aws discover",
+            Job::IbxLogin { .. } => "instabox login",
             Job::LlmModels { provider, .. } => return format!("fetch {provider} models"),
             Job::MoveStageDir { kind, .. } => return format!("move {} folder", kind.label()),
             Job::Tracked { .. } => unreachable!(),
         }
         .to_string()
+    }
+
+    /// What the job is *doing*, in its own terms: the row's starting activity,
+    /// and what it comes back to when a job streams no lines of its own.
+    pub(crate) fn detail(&self) -> String {
+        match self.bare() {
+            Job::Provision { machine, .. } => format!("provisioning {}", machine.handle()),
+            Job::AddMachine { m, .. } => format!("adding {}", m.handle()),
+            Job::RelinkMachine { machine, .. } => format!("relinking {}", machine.handle()),
+            Job::DropMachine { addr, .. } => format!("dropping {addr}"),
+            Job::SaveTaskPolicy { addr, .. } => format!("saving work policy for {addr}"),
+            Job::SetAccepting {
+                addr,
+                accepting_work,
+                ..
+            } => format!(
+                "{} {addr}",
+                if *accepting_work { "waking" } else { "parking" }
+            ),
+            Job::SetTtsThreads { addr, .. } => format!("tts threads for {addr}"),
+            Job::CloudUp { req, .. } => {
+                format!("launching {} {} box(es)", req.count, req.provider)
+            }
+            Job::CloudDown { req, .. } => {
+                format!("terminating {} {} box(es)", req.ids.len(), req.provider)
+            }
+            Job::CloudReap { .. } => "retrying the deletes it owes".to_string(),
+            Job::AwsPool { .. } | Job::AwsDiscover { .. } => "reading the EC2 account".to_string(),
+            Job::AwsLogin { .. } => "checking the EC2 credentials".to_string(),
+            Job::IbxLogin { .. } => "checking the InstaBox key".to_string(),
+            Job::StartBackend {
+                count, machines, ..
+            } => format!(
+                "starting {count} worker(s) across {} box(es)",
+                machines.len()
+            ),
+            Job::StopBackend { machines, .. } => {
+                format!("stopping {} box(es)", machines.len())
+            }
+            Job::AddSample { name, path, .. } => {
+                let what = name
+                    .clone()
+                    .or_else(|| path.rsplit('/').next().map(str::to_string))
+                    .unwrap_or_default();
+                format!("adding sample {what}")
+            }
+            Job::LlmModels { provider, .. } => format!("reading {provider} models"),
+            Job::MoveStageDir { kind, .. } => format!("moving the {} folder", kind.label()),
+            // The row already says which op and which stage column; what it
+            // cannot say is the chapter, and that is the whole question.
+            Job::Op { req, .. } => {
+                let mut what = req.op.as_str().to_string();
+                if let Some(stage) = req.stage {
+                    what.push_str(&format!(" {}", stage.as_str()));
+                }
+                if let Some(chapter) = req.chapter {
+                    what.push_str(&format!(" ch.{chapter}"));
+                }
+                what
+            }
+            other => other.label(),
+        }
     }
 
     /// What this job needs to itself for its whole life.
@@ -320,9 +417,23 @@ impl Job {
             | Job::SetTtsThreads { addr, .. } => vec![Res::Box(addr.clone())],
             Job::AddMachine { m, .. } => vec![Res::Box(m.addr.clone())],
             Job::RelinkMachine { machine, .. } => vec![Res::Box(machine.addr.clone())],
-            // These four read-modify-write `.bm/aws/` and the account it
-            Job::AwsUp { .. }
-            | Job::AwsDown { .. }
+            // These read-modify-write `.bm/aws/` and the account it names.
+            Job::CloudUp {
+                req:
+                    LaunchReq {
+                        provider: bm_core::cloud::Provider::Aws,
+                        ..
+                    },
+                ..
+            }
+            | Job::CloudDown {
+                req:
+                    DownReq {
+                        provider: bm_core::cloud::Provider::Aws,
+                        ..
+                    },
+                ..
+            }
             | Job::AwsLogin { .. }
             | Job::AwsDiscover { .. } => vec![Res::Aws],
             // It holds distribution and rewrites where the stages look, so

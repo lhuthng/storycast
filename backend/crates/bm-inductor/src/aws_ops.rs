@@ -2,10 +2,10 @@
 
 use anyhow::Result;
 use bm_core::provision::{
-    admits_port, default_security_group_args, default_subnet_args, describe_image_args,
-    describe_security_group_args, instance_line, instance_profile_names_args, keypair_names_args,
-    parse_instances, parse_name_list, run_instances_args, sole_name, terminate_args,
-    ubuntu_ami_args, AwsConfig, AwsInstance, REQUIRED_INGRESS, UBUNTU_LTS,
+    admits_port, default_security_group_args, default_subnet_args, describe_security_group_args,
+    instance_line, instance_profile_names_args, keypair_names_args, parse_instances,
+    parse_name_list, sole_name, terminate_args, ubuntu_ami_args, AwsConfig, AwsInstance,
+    REQUIRED_INGRESS, UBUNTU_LTS,
 };
 use std::path::{Path, PathBuf};
 
@@ -589,66 +589,6 @@ pub(crate) fn discover(root: &Path, args: DiscoverArgs) -> Result<Vec<String>> {
         }
     }
     Ok(out)
-}
-
-/// Launch `count` boxes, returning the lines to show, what the account answered,
-pub(crate) fn launch(
-    root: &Path,
-    count: u32,
-) -> Result<(AwsConfig, Vec<String>, Vec<AwsInstance>)> {
-    let cfg = AwsConfig::load_layered(root);
-    let missing = cfg.missing();
-    if !missing.is_empty() {
-        let mut msg = String::from("the pool is not ready to launch:");
-        for m in missing {
-            msg.push_str(&format!("\n  - {m}"));
-        }
-        anyhow::bail!("{msg}");
-    }
-    // The marker tag's value *is* the profile hash, so without one the box would
-    let layout = bm_core::Layout::resolve_or_root(root).0;
-    let hash = bm_core::profile::in_force(&layout)
-        .map(|b| b.pack.hash)
-        .unwrap_or_default();
-    if hash.is_empty() {
-        anyhow::bail!(
-            "no profile loaded — the marker tag records which profile a box was built for, and provisioning refuses without one; load one first: `:profile` in the dashboard (pack <name>, then <name>), or `tools/profile.sh fetch/unpack <name>`"
-        );
-    }
-    let json = crate::aws_cli_instances(root, &cfg.region, &cfg.tag_key)?;
-    let live = parse_instances(&json, &cfg.tag_key)
-        .ok_or_else(|| anyhow::anyhow!("the aws CLI answered something unexpected"))?
-        .iter()
-        .filter(|i| matches!(i.state.as_str(), "pending" | "running" | "stopping"))
-        .count() as u32;
-    if live + count > cfg.max_workers {
-        anyhow::bail!(
-            "{live} box(es) already live and {count} asked for, over max_workers={} — raise it in `.bm/aws.json` or launch fewer",
-            cfg.max_workers
-        );
-    }
-    // The mapping must name the image's own root device (`/dev/sda1` on Ubuntu,
-    let image = cfg.image().unwrap_or_default().to_string();
-    let root_device = crate::aws_cli_text(root, &describe_image_args(&cfg, &image))?;
-    let argv = run_instances_args(&cfg, count, root_device.trim(), &hash);
-    let mut out = vec![
-        format!(
-            "{live} live, cap {}, launching {count} tagged {}",
-            cfg.max_workers, cfg.tag_key
-        ),
-        format!("aws {}", argv.join(" ")),
-    ];
-    let raw = crate::aws_cli_raw(root, &argv)?;
-    let launched = parse_instances(&raw, &cfg.tag_key).unwrap_or_default();
-    if launched.is_empty() {
-        out.push("the launch answered without any instances — check the account".into());
-    }
-    for i in &launched {
-        out.push(format!("launched {}", instance_line(i)));
-    }
-    out.push(String::new());
-    out.push("Next: `provision --addr <ip>` each one, then `:B` to start their workers.".into());
-    Ok((cfg, out, launched))
 }
 
 /// Terminate exactly the ids given, and report what the API said.

@@ -318,6 +318,10 @@ fn the_state_column_leads_with_a_glyph_and_the_word_stays() {
         note: String::new(),
         accepting_work: true,
         tts_threads: None,
+        expires_at: None,
+        provider: None,
+        provider_id: None,
+        base_url: None,
     });
     let text = render_text(&mut app, 140, 44);
     assert!(

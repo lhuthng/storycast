@@ -211,6 +211,8 @@ pub(crate) struct App {
     /// What the EC2 account holds, from the last `describe-instances`. Empty
     pub(crate) cloud: Vec<AwsInstance>,
     pub(crate) cloud_error: Option<String>,
+    /// Cloud deletes the inductor still owes: `:up` refuses while one is.
+    pub(crate) pending_deletes: usize,
     /// The Logs pane filter, stepped with `←/→`. TUI-local: polls never reset it.
     pub(crate) log_filter: crate::tui::model::LogFilter,
     /// The pane highlighted by keyboard focus or a mouse click.
@@ -290,6 +292,7 @@ impl App {
             player: Player::new(),
             cloud: Vec::new(),
             cloud_error: None,
+            pending_deletes: 0,
             focused_panel: Panel::Machines,
             hit_regions: Vec::new(),
             last_click: None,

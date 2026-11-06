@@ -220,6 +220,33 @@ pub(crate) async fn job_aws_login(
     let _ = tx.send(Ev::Done(DoneKind::Other));
 }
 
+/// Store the InstaBox key. The proof is the launch's own first call, made off
+/// the UI thread because it is two round trips.
+pub(crate) async fn job_ibx_login(
+    tx: tokio::sync::mpsc::UnboundedSender<Ev>,
+    root: std::path::PathBuf,
+    key: String,
+) {
+    let out = tokio::task::spawn_blocking(move || {
+        crate::instabox_ops::login(&root, crate::instabox_ops::LoginArgs::default(), Some(key))
+    })
+    .await;
+    match out {
+        Ok(Ok(lines)) => {
+            for l in lines {
+                send(&tx, Level::Info, l);
+            }
+        }
+        Ok(Err(e)) => send(&tx, Level::Error, format!("instabox login: {e:#}")),
+        Err(e) => send(
+            &tx,
+            Level::Error,
+            format!("instabox login task failed: {e}"),
+        ),
+    }
+    let _ = tx.send(Ev::Done(DoneKind::Other));
+}
+
 /// Read the account into the pool definition. Several read-only AWS calls, so
 pub(crate) async fn job_aws_discover(
     tx: tokio::sync::mpsc::UnboundedSender<Ev>,
@@ -242,73 +269,155 @@ pub(crate) async fn job_aws_discover(
     let _ = tx.send(Ev::Done(DoneKind::Other));
 }
 
-pub(crate) async fn job_aws_up(
+pub(crate) async fn job_cloud_up(
     tx: tokio::sync::mpsc::UnboundedSender<Ev>,
     root: std::path::PathBuf,
     api: String,
     http: reqwest::Client,
-    count: u32,
+    req: LaunchReq,
 ) {
-    let up_root = root.clone();
-    let out = tokio::task::spawn_blocking(move || crate::aws_ops::launch(&up_root, count)).await;
-    let (cfg, launched) = match out {
-        Ok(Ok((cfg, lines, launched))) => {
-            for l in lines {
-                send(&tx, Level::Info, l);
+    let LaunchReq {
+        provider,
+        count,
+        ttl_minutes,
+        strict,
+        from_machine,
+    } = req;
+    let work_root = root.clone();
+    let work_tx = tx.clone();
+    // Packs, credentials and the capacity plan all run before a call that
+    // spends; a shortfall is the answer when any refuses.
+    let out = tokio::task::spawn_blocking(move || {
+        let layout = bm_core::Layout::resolve_or_root(&work_root).0;
+        if from_machine {
+            send(
+                &work_tx,
+                Level::Warn,
+                "packs: --from-machine — the box takes its files from this machine's uplink".into(),
+            );
+        } else {
+            let settings = bm_core::config::Settings::load(&layout.settings());
+            let gaps = crate::cloud::pack_gaps(&layout, &settings);
+            for gap in &gaps {
+                send(&work_tx, Level::Warn, format!("packs: {}", gap.line()));
             }
-            (cfg, launched)
+            if !gaps.is_empty() {
+                return Err(format!(
+                    "packs: {} gap(s) — a box would fetch its files from here; publish them, \
+                     or pass --from-machine",
+                    gaps.len()
+                ));
+            }
+            send(
+                &work_tx,
+                Level::Info,
+                "packs: models, profile and voice pins are published".into(),
+            );
         }
-        Ok(Err(e)) => {
-            send(&tx, Level::Error, format!("aws up: {e:#}"));
+        let cloud = crate::cloud::for_provider(Some(provider), &work_root, ttl_minutes)
+            .map_err(|e| format!("{e:#}"))?;
+        let smoke = cloud.smoke().map_err(|s| s.line())?;
+        for line in &smoke.lines {
+            send(&work_tx, Level::Info, line.clone());
+        }
+        let plan = cloud.plan(count).map_err(|s| s.line())?;
+        for note in &plan.notes {
+            send(&work_tx, Level::Info, note.clone());
+        }
+        if plan.clamped() && strict {
+            for s in &plan.shortfalls {
+                send(&work_tx, Level::Warn, format!("not created: {}", s.line()));
+            }
+            return Err(format!(
+                "strict: {} of {} would be created — launched none",
+                plan.fit, plan.want
+            ));
+        }
+        if plan.fit == 0 {
+            for s in &plan.shortfalls {
+                send(&work_tx, Level::Warn, format!("not created: {}", s.line()));
+            }
+            return Err("nothing to launch — the numbers above say why".into());
+        }
+        let launch = cloud.up(&plan);
+        for b in &launch.created {
+            // A box still waiting for its address is not news: it links and
+            // onboards itself once one arrives.
+            if !b.addr.is_empty() {
+                send(&work_tx, Level::Info, format!("launched {}", b.label()));
+            }
+        }
+        for s in &launch.skipped {
+            send(&work_tx, Level::Warn, format!("not created: {}", s.line()));
+        }
+        send(
+            &work_tx,
+            if launch.skipped.is_empty() {
+                Level::Ok
+            } else {
+                Level::Warn
+            },
+            launch.summary(),
+        );
+        Ok::<_, String>(launch.created)
+    })
+    .await;
+    let launched = match out {
+        Ok(Ok(created)) => created,
+        Ok(Err(line)) => {
+            send(&tx, Level::Error, line);
             let _ = tx.send(Ev::Done(DoneKind::Other));
             return;
         }
         Err(e) => {
-            send(&tx, Level::Error, format!("aws up task failed: {e}"));
+            send(&tx, Level::Error, format!("{provider} up task failed: {e}"));
             let _ = tx.send(Ev::Done(DoneKind::Other));
             return;
         }
     };
-    // The join, made at birth: every returned instance becomes a registry entry,
+    // The join, made at birth: every returned box becomes a registry entry,
     let mut linked = 0usize;
     let mut waiting = 0usize;
-    for i in &launched {
-        let m = bm_core::provision::machine_from_instance(i, &cfg);
+    for b in &launched {
+        let m = b.machine();
         let newborn = m.state == MachineState::AwaitingIp;
+        let at = if m.addr.contains("://") {
+            String::new()
+        } else {
+            format!(" → {}", m.addr)
+        };
         let url = format!("{}/api/machines", api.trim_end_matches('/'));
         match http.post(&url).json(&m).send().await {
             Ok(r) if r.status().is_success() => {
                 linked += 1;
                 if newborn {
                     waiting += 1;
-                    send(
-                        &tx,
-                        Level::Info,
-                        format!(
-                            "tracking {} — no address yet; it will be relinked and onboarded by itself",
-                            i.id
-                        ),
-                    );
                 } else {
-                    send(&tx, Level::Ok, format!("linked {} → {}", i.id, m.addr));
+                    let ttl = b
+                        .expires_at
+                        .map(|at| {
+                            let left = at.saturating_sub(bm_proto::now_secs()) / 60;
+                            format!(" · {} left", bm_core::cloud::ttl_label(Some(left as u32)))
+                        })
+                        .unwrap_or_default();
+                    send(&tx, Level::Ok, format!("linked {}{}{ttl}", m.handle(), at));
                 }
             }
             Ok(r) => send(
                 &tx,
                 Level::Warn,
                 format!(
-                    "launched {} but the registry refused it: HTTP {} — start the inductor (:B), then `:add {}`",
-                    i.id,
-                    r.status(),
-                    m.addr
+                    "launched {} but the registry refused it: HTTP {} — start the inductor (:B) and launch again",
+                    m.handle(),
+                    r.status()
                 ),
             ),
             Err(e) => send(
                 &tx,
                 Level::Warn,
                 format!(
-                    "launched {} but linking failed ({e}) — `:add {}` once the inductor is up",
-                    i.id, m.addr
+                    "launched {} but linking failed ({e}) — launch again once the inductor is up",
+                    m.handle()
                 ),
             ),
         }
@@ -327,19 +436,27 @@ pub(crate) async fn job_aws_up(
     let _ = tx.send(Ev::Done(DoneKind::Other));
 }
 
-pub(crate) async fn job_aws_down(
+pub(crate) async fn job_cloud_down(
     tx: tokio::sync::mpsc::UnboundedSender<Ev>,
     root: std::path::PathBuf,
     layout: bm_core::Layout,
     api: String,
     http: reqwest::Client,
-    ids: Vec<String>,
-    machines: Vec<Machine>,
+    req: DownReq,
 ) {
+    let DownReq {
+        provider,
+        ids,
+        machines,
+    } = req;
     let down_root = root.clone();
     let wanted = ids.clone();
-    let out =
-        tokio::task::spawn_blocking(move || crate::aws_ops::terminate(&down_root, &wanted)).await;
+    let out = tokio::task::spawn_blocking(move || {
+        let cloud = crate::cloud::for_provider(Some(provider), &down_root, None)
+            .map_err(|e| format!("{e:#}"))?;
+        cloud.down(&wanted).map_err(|s| s.line())
+    })
+    .await;
     let terminated = match out {
         Ok(Ok(lines)) => {
             for l in lines {
@@ -347,12 +464,16 @@ pub(crate) async fn job_aws_down(
             }
             true
         }
-        Ok(Err(e)) => {
-            send(&tx, Level::Error, format!("aws down: {e:#}"));
+        Ok(Err(line)) => {
+            send(&tx, Level::Error, format!("{provider} down: {line}"));
             false
         }
         Err(e) => {
-            send(&tx, Level::Error, format!("aws down task failed: {e}"));
+            send(
+                &tx,
+                Level::Error,
+                format!("{provider} down task failed: {e}"),
+            );
             false
         }
     };
@@ -400,7 +521,13 @@ pub(crate) fn instance_machines(machines: &[Machine], ids: &[String]) -> Vec<Str
     let mut addrs: Vec<String> = machines
         .iter()
         .filter(|m| {
-            bm_core::provision::ec2_id_from_note(&m.note).is_some_and(|id| ids.contains(&id))
+            // The registry's own half first: a provider that keeps its device
+            // list (InstaBox) names the id there. EC2 boxes predate that field,
+            // so their note carries it.
+            m.provider_id
+                .as_deref()
+                .is_some_and(|id| ids.iter().any(|want| want == id))
+                || bm_core::provision::ec2_id_from_note(&m.note).is_some_and(|id| ids.contains(&id))
         })
         .map(|m| m.addr.clone())
         .collect();
@@ -447,4 +574,41 @@ async fn drop_box(
         Ok(line) => (true, line),
         Err(e) => (false, format!("drop {addr} task failed: {e}")),
     }
+}
+
+/// `:cloud reap`: the inductor retries the deletes it still owes, then sweeps
+/// immediately. Nothing here spends; the boxes are already gone or going.
+pub(crate) async fn job_cloud_reap(
+    tx: tokio::sync::mpsc::UnboundedSender<Ev>,
+    api: String,
+    http: reqwest::Client,
+) {
+    let url = format!("{}/api/cloud/reap", api.trim_end_matches('/'));
+    match http
+        .post(&url)
+        .timeout(std::time::Duration::from_secs(90))
+        .send()
+        .await
+    {
+        Ok(r) if r.status().is_success() => {
+            let doc = r.json::<serde_json::Value>().await.unwrap_or_default();
+            let line = doc
+                .get("line")
+                .and_then(|l| l.as_str())
+                .unwrap_or("reap")
+                .to_string();
+            send(&tx, Level::Info, line);
+            for l in doc
+                .get("lines")
+                .and_then(|l| l.as_array())
+                .map(|a| a.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>())
+                .unwrap_or_default()
+            {
+                send(&tx, Level::Info, l.to_string());
+            }
+        }
+        Ok(r) => send(&tx, Level::Error, format!("reap: HTTP {}", r.status())),
+        Err(e) => send(&tx, Level::Error, format!("reap failed: {e}")),
+    }
+    let _ = tx.send(Ev::Done(DoneKind::Other));
 }

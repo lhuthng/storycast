@@ -5,6 +5,7 @@ use bm_proto::{now_secs, Complete, Machine, MachineState, Stage, Task, TaskState
 use serde_json::Value;
 
 mod perf;
+mod reclaim;
 
 fn fixture() -> (tempfile::TempDir, Inner) {
     let d = tempfile::tempdir().unwrap();

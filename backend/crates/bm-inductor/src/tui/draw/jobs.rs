@@ -1,14 +1,22 @@
-//! The jobs overlay: one row per background job, live state and elapsed time.
+//! The jobs overlay: one entry per background job, its activity wrapped in full.
 use crate::tui::{
     app::{App, HitTarget, ListTarget},
     style::{centered_padded, spinner},
 };
 use ratatui::{
-    layout::{Constraint, Rect},
+    layout::Rect,
     style::{Color, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, Paragraph, Row, Table},
+    widgets::{Block, Borders, Clear, Paragraph},
 };
+
+/// Column widths: `id`, `job`, `state`, `time`, then the activity takes the rest.
+const ID: usize = 6;
+const NAME: usize = 22;
+const STATE: usize = 8;
+const TIME: usize = 8;
+/// Two spaces between the time column and the activity.
+const HEAD: usize = ID + NAME + STATE + TIME + 2;
 
 fn secs_label(secs: u64) -> String {
     if secs < 60 {
@@ -20,8 +28,42 @@ fn secs_label(secs: u64) -> String {
     }
 }
 
+/// `s` padded or cut to exactly `w` cells, so the columns never shift.
+fn fit(s: &str, w: usize) -> String {
+    if s.chars().count() <= w {
+        format!("{s:<w$}")
+    } else {
+        format!("{}…", bm_core::util::head_chars(s, w.saturating_sub(1)))
+    }
+}
+
+/// Word wrap to `w` cells; a word longer than the row is hard-split.
+fn wrap(text: &str, w: usize) -> Vec<String> {
+    let w = w.max(8);
+    let mut out: Vec<String> = Vec::new();
+    let mut line = String::new();
+    for word in text.split_whitespace() {
+        let gap = usize::from(!line.is_empty());
+        if !line.is_empty() && line.chars().count() + gap + word.chars().count() > w {
+            out.push(std::mem::take(&mut line));
+        }
+        if !line.is_empty() {
+            line.push(' ');
+        }
+        line.push_str(word);
+        while line.chars().count() > w {
+            out.push(line.chars().take(w).collect());
+            line = line.chars().skip(w).collect();
+        }
+    }
+    if !line.is_empty() || out.is_empty() {
+        out.push(line);
+    }
+    out
+}
+
 pub(crate) fn draw_jobs(f: &mut ratatui::Frame, app: &mut App, scroll: usize) {
-    let area = centered_padded(f.area(), 76, 18, 1);
+    let area = centered_padded(f.area(), 100, 24, 1);
     f.render_widget(Clear, area);
     app.add_hit_region(
         area,
@@ -55,36 +97,57 @@ pub(crate) fn draw_jobs(f: &mut ratatui::Frame, app: &mut App, scroll: usize) {
         width: area.width.saturating_sub(2),
     };
 
-    let rows: Vec<Row> = jobs
-        .iter()
-        .skip(scroll.min(jobs.len()))
-        .map(|job| {
-            let (state, colour) = match job.started {
-                Some(_) => ("running", Color::Green),
-                None => ("queued", Color::Yellow),
-            };
-            // Only a running job spins: a queued row spinning would claim
-            let mark = match job.started {
-                Some(_) => format!("{} ", spinner(app.tick)),
-                None => "  ".to_string(),
-            };
-            let anchor = job.started.unwrap_or(job.queued);
-            let elapsed = anchor.elapsed().as_secs();
-            Row::new([
-                Line::from(Span::styled(format!("#{:<4}", job.id), dim)),
-                Line::from(Span::styled(
-                    format!("{mark}{:<12}", job.name),
-                    app.style(Color::Cyan),
-                )),
-                Line::from(Span::styled(format!("{state:<8}"), app.style(colour))),
-                Line::from(Span::styled(
-                    format!("{:>6}  ", secs_label(elapsed)),
-                    app.style(Color::Gray),
-                )),
-                Line::from(Span::styled(job.activity.clone(), dim)),
-            ])
-        })
-        .collect();
+    // The activity column: whatever the fixed columns leave of the inner width.
+    let inner = area.width.saturating_sub(2) as usize;
+    let text_w = inner.saturating_sub(HEAD).max(12);
+
+    let mut lines: Vec<Line> = Vec::new();
+    if !jobs.is_empty() {
+        lines.push(Line::from(Span::styled(
+            format!(
+                "{}{}{}{}  {}",
+                fit("id", ID),
+                fit("job", NAME),
+                fit("state", STATE),
+                fit("time", TIME),
+                "activity"
+            ),
+            app.style_bold(Color::Gray),
+        )));
+    }
+    for job in &jobs {
+        let (state, colour) = match job.started {
+            Some(_) => ("running", Color::Green),
+            None => ("queued", Color::Yellow),
+        };
+        // Only a running job spins: a queued row spinning would claim
+        let mark = match job.started {
+            Some(_) => format!("{} ", spinner(app.tick)),
+            None => "  ".to_string(),
+        };
+        let anchor = job.started.unwrap_or(job.queued);
+        let elapsed = anchor.elapsed().as_secs();
+        let chunks = wrap(&job.activity, text_w);
+        for (i, chunk) in chunks.into_iter().enumerate() {
+            if i == 0 {
+                lines.push(Line::from(vec![
+                    Span::styled(format!("#{:<5}", job.id), dim),
+                    Span::styled(
+                        format!("{mark}{}", fit(&job.name, NAME - 2)),
+                        app.style(Color::Cyan),
+                    ),
+                    Span::styled(fit(state, STATE), app.style(colour)),
+                    Span::styled(format!("{:>TIME$}", secs_label(elapsed)), app.style(Color::Gray)),
+                    Span::styled(format!("  {chunk}"), dim),
+                ]));
+            } else {
+                lines.push(Line::from(Span::styled(
+                    format!("{}{chunk}", " ".repeat(HEAD)),
+                    dim,
+                )));
+            }
+        }
+    }
 
     let block = Block::default()
         .borders(Borders::ALL)
@@ -103,21 +166,15 @@ pub(crate) fn draw_jobs(f: &mut ratatui::Frame, app: &mut App, scroll: usize) {
             area,
         );
     } else {
-        let header =
-            Row::new(["id", "job", "state", "time", "activity"]).style(app.style_bold(Color::Gray));
-        let table = Table::new(
-            rows,
-            [
-                Constraint::Length(6),
-                Constraint::Length(16),
-                Constraint::Length(8),
-                Constraint::Length(8),
-                Constraint::Min(20),
-            ],
-        )
-        .header(header)
-        .block(block);
-        f.render_widget(table, area);
+        // The hint owns the last inner row; the body stops above it so a long
+        // activity never hides behind it.
+        let room = area.height.saturating_sub(3) as usize;
+        let body: Vec<Line> = lines
+            .into_iter()
+            .skip(scroll)
+            .take(room)
+            .collect();
+        f.render_widget(Paragraph::new(body).block(block), area);
     }
 
     // One honest hint line per state of the world: an empty list points at

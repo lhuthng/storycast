@@ -52,6 +52,49 @@ impl Inner {
         out
     }
 
+    /// Say something about the boxes whose deadline is close or past, once each.
+    ///
+    /// The box's own watchdog is what stops it (see `remote_worker_launch_script`)
+    /// — this pass only tells the operator, and the note is the marker that keeps
+    /// it to one line instead of one per tick.
+    pub fn expire_deadlines(&mut self) -> Vec<String> {
+        let now = now_secs();
+        let mut out = Vec::new();
+        for m in self.machines.values_mut() {
+            let Some(at) = m.expires_at else { continue };
+            if at <= now {
+                if !m.note.contains("deadline reached") {
+                    m.note = format!(
+                        "{} · deadline reached — its watchdog shuts the box down; :down if it is still there",
+                        m.note.trim_end_matches(' ')
+                    );
+                    out.push(format!(
+                        "[{}] past its deadline — its watchdog stops the worker and shuts the box down",
+                        m.addr
+                    ));
+                }
+            } else if at - now <= DEADLINE_WARN_SECS && !m.note.contains("deadline in") {
+                m.note = format!(
+                    "{} · deadline in {}m",
+                    m.note.trim_end_matches(' '),
+                    (at - now) / 60
+                );
+                out.push(format!(
+                    "[{}] deadline in {}m — it will stop itself",
+                    m.addr,
+                    (at - now) / 60
+                ));
+            }
+        }
+        for line in &out {
+            self.push_event("warn", line.clone());
+        }
+        if !out.is_empty() {
+            self.save();
+        }
+        out
+    }
+
     /// Ask every beating worker to exit on its next heartbeat (2s). The
     pub fn op_shutdown_workers(&mut self) -> String {
         self.shutdown_requested = true;

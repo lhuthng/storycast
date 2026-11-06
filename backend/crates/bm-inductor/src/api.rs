@@ -102,7 +102,7 @@ async fn complete(State(st): State<Shared>, Json(c): Json<Complete>) -> impl Int
 }
 
 /// Store the takes a completion report ships, before the row turns Done.
-fn store_shipments(
+pub(crate) fn store_shipments(
     layout: &bm_core::Layout,
     engine: &str,
     task_id: &str,
@@ -402,6 +402,18 @@ async fn relink(State(st): State<Shared>) -> impl IntoResponse {
     }
 }
 
+/// `:cloud reap`: give every stuck delete a fresh set of attempts and run the
+/// sweep now, instead of waiting for its minute.
+async fn cloud_reap(State(st): State<Shared>) -> impl IntoResponse {
+    let (line, root) = {
+        let mut inner = st.lock().await;
+        (inner.retry_intents(), inner.layout.root.clone())
+    };
+    // The sweep files its own events; the lines are for the caller's job log.
+    let lines = crate::cloud::sweep(st, root).await;
+    Json(serde_json::json!({"ok": true, "line": line, "lines": lines}))
+}
+
 async fn drop_machine(State(st): State<Shared>, Query(q): Query<AddrQuery>) -> impl IntoResponse {
     let mut inner = st.lock().await;
     let line = inner.drop_machine(&q.addr);
@@ -451,6 +463,9 @@ struct StateDoc {
     /// range stands. The footer says so while held — "held · ch4..100 ·
     /// 3 done, 97 to go — :go" — because neither is visible from the task
     dispatch: DispatchDoc,
+    /// Cloud deletes still owed: `:up` refuses while one is, because the
+    /// provider has not released the capacity it frees yet.
+    pending_deletes: usize,
 }
 
 #[derive(serde::Serialize)]
@@ -478,6 +493,7 @@ async fn state(State(st): State<Shared>) -> Json<StateDoc> {
             span: inner.remaining_line(),
             remaining: inner.remaining(),
         },
+        pending_deletes: inner.intents_pending(),
     })
 }
 
@@ -514,6 +530,7 @@ pub fn router(st: Shared) -> Router {
         .route("/api/machines/tts-threads", post(set_tts_threads))
         .route("/api/relink", post(relink))
         .route("/api/op", post(op))
+        .route("/api/cloud/reap", post(cloud_reap))
         .route("/api/state", get(state))
         .route("/api/roster", get(roster))
         // Merge reports carry base64 mp3s (~7MB); the 2MB default would 413 them.

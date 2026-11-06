@@ -1,3 +1,4 @@
+use super::gate::apply_source_spelling;
 use super::gate::validate_source_alignment;
 use super::json::parse_json_repaired;
 use super::json::strip_fences;
@@ -532,7 +533,9 @@ pub(crate) fn parse_staged_script(
     validate_inline_tags(&data, &vocab.engine).map_err(mine)?;
     validate_effect_tags(&data, &vocab.effects).map_err(mine)?;
     validate_injects(&data, &vocab.injects).map_err(mine)?;
-    validate_source_alignment(&data, prepared, &not_speech, &vocab.engine).map_err(mine)?;
+    let spellings =
+        validate_source_alignment(&data, prepared, &not_speech, &vocab.engine).map_err(mine)?;
+    apply_source_spelling(&mut data, &spellings);
     Ok(data)
 }
 

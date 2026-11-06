@@ -12,6 +12,7 @@ use crate::tui::{
     },
     style::{Conn, Level},
 };
+use bm_core::cloud::Provider;
 use bm_proto::{Op, OpRequest, Stage};
 use crossterm::event::KeyCode;
 use std::sync::{atomic::AtomicBool, Arc};
@@ -110,14 +111,27 @@ pub(crate) enum Command {
     AwsLogin,
     /// Read the account into the pool definition. Setup, once — and safe to
     AwsDiscover,
-    /// Launch `count` EC2 boxes and link what comes back into the registry.
-    AwsUp {
+    /// Store the InstaBox workspace key. Setup, once — proved against the API
+    IbxLogin,
+    /// Launch boxes on one cloud, each with its own deadline.
+    Up {
+        provider: Option<Provider>,
         count: u32,
+        /// `None` is the provider's default; `Some(0)` is no deadline.
+        ttl_minutes: Option<u32>,
+        /// Refuse rather than launch fewer than asked.
+        strict: bool,
+        /// Allow the packs to travel from this machine instead of requiring
+        /// them to be published first.
+        from_machine: bool,
     },
     /// Terminate the live boxes the Cloud view is showing. Destructive, so it
-    AwsDown {
+    Down {
+        provider: Option<Provider>,
         force: bool,
     },
+    /// `:cloud reap`: retry the cloud deletes that kept failing.
+    CloudReap,
 }
 
 /// One `:`-addressable command: its single-char form, its words, and its
@@ -164,10 +178,11 @@ pub(crate) static WORDS: &[Word] = &[
     Word { key: None, names: &["profile"], desc: Some("list, load or pack a genre profile — loading replaces assets/ + prompts/, so only with the cluster stopped"), cmd: Command::Profile },
     Word { key: None, names: &["login"], desc: Some("store the IAM user's key from the console's accessKeys.csv — setup, once"), cmd: Command::AwsLogin },
     Word { key: None, names: &["discover"], desc: Some("read the account into `.bm/aws.json`: AMI, subnet, group, keypair, instance profile"), cmd: Command::AwsDiscover },
+    Word { key: None, names: &["ibx", "instabox"], desc: Some("store the InstaBox workspace key — it is proved against the API before it is saved, and `.bm/instabox.json` says what is left to set"), cmd: Command::IbxLogin },
     Word { key: Some('l'), names: &["pool", "aws", "cloud"], desc: Some("what the EC2 account holds — launches nothing"), cmd: Command::AwsPool },
     Word { key: Some('L'), names: &["llm", "model", "models"], desc: Some("LLM providers: add a key, or name your own provider (`n`: name + URL), set the model, switch the active one — same as L"), cmd: Command::Llm },
-    Word { key: Some('w'), names: &["up", "launch"], desc: Some("launch EC2 boxes and link them into the cluster — spends money"), cmd: Command::AwsUp { count: 1 } },
-    Word { key: Some('o'), names: &["down", "terminate"], desc: Some("terminate the live EC2 boxes — destructive; asks first, refuses while a render is in flight"), cmd: Command::AwsDown { force: false } },
+    Word { key: Some('w'), names: &["up", "launch"], desc: Some("launch workers on a cloud — `:up aws 3 --ttl 6h`; refuses while the packs are unpublished (`--from-machine` overrides), then smoke-tests and says what fits first"), cmd: Command::Up { provider: None, count: 1, ttl_minutes: None, strict: false, from_machine: false } },
+    Word { key: Some('o'), names: &["down", "terminate"], desc: Some("terminate the live boxes the Cloud view shows — destructive; asks first, refuses while a render is in flight"), cmd: Command::Down { provider: None, force: false } },
     Word { key: Some('X'), names: &["stop"], desc: Some("stop everything everywhere: local backend plus workers on all machines"), cmd: Command::Stop },
     Word { key: None, names: &["sshkey"], desc: None, cmd: Command::SshKey },
     Word { key: None, names: &["sshuser"], desc: None, cmd: Command::SshUser },
@@ -214,18 +229,12 @@ pub(crate) fn command_key(input: &str) -> Option<Command> {
     if let Some(head) = parts.next() {
         let rest: Vec<&str> = parts.collect();
         match head.to_ascii_lowercase().as_str() {
-            "up" => {
-                let count = match rest.first() {
-                    None => 1,
-                    Some(s) => s.parse::<u32>().ok()?,
-                };
-                return (count > 0).then_some(Command::AwsUp { count });
+            "up" | "launch" => return parse_up(&rest),
+            // `:cloud` alone lists the pool; the one word after it retries
+            "cloud" | "aws" | "pool" if rest.len() == 1 && rest[0].eq_ignore_ascii_case("reap") => {
+                return Some(Command::CloudReap)
             }
-            "down" if !rest.is_empty() => {
-                return rest[0]
-                    .eq_ignore_ascii_case("force")
-                    .then_some(Command::AwsDown { force: true });
-            }
+            "down" | "terminate" if !rest.is_empty() => return parse_down(&rest),
             "retry" | "u" if !rest.is_empty() => return retry_scope(&rest),
             "threads" | "ttsthreads" if !rest.is_empty() => {
                 return Some(Command::TtsThreads {
@@ -282,6 +291,68 @@ pub(crate) fn command_key(input: &str) -> Option<Command> {
         .iter()
         .find(|w| w.names.iter().any(|n| *n == lower))
         .map(|w| w.cmd.clone())
+}
+
+/// `:up [provider] [count] [--ttl 7h] [--strict] [--from-machine]` → the
+/// launch it names.
+fn parse_up(rest: &[&str]) -> Option<Command> {
+    let mut provider: Option<Provider> = None;
+    let mut count: Option<u32> = None;
+    let mut ttl_minutes: Option<u32> = None;
+    let mut strict = false;
+    let mut from_machine = false;
+    let mut i = 0;
+    while i < rest.len() {
+        let token = rest[i].to_ascii_lowercase();
+        match token.as_str() {
+            "--strict" | "strict" => strict = true,
+            "--from-machine" | "from-machine" => from_machine = true,
+            "--ttl" => {
+                i += 1;
+                ttl_minutes = Some(bm_core::cloud::parse_ttl_minutes(rest.get(i)?)?);
+            }
+            t if t.starts_with("--ttl=") => {
+                ttl_minutes = Some(bm_core::cloud::parse_ttl_minutes(&t["--ttl=".len()..])?);
+            }
+            t => {
+                if let Some(p) = Provider::parse(t) {
+                    if provider.replace(p).is_some() {
+                        return None;
+                    }
+                } else if count.is_none() {
+                    count = Some(t.parse::<u32>().ok().filter(|n| *n > 0)?);
+                } else {
+                    return None;
+                }
+            }
+        }
+        i += 1;
+    }
+    Some(Command::Up {
+        provider,
+        count: count.unwrap_or(1),
+        ttl_minutes,
+        strict,
+        from_machine,
+    })
+}
+
+/// `:down [provider] [force]` → the teardown it names.
+fn parse_down(rest: &[&str]) -> Option<Command> {
+    let mut provider: Option<Provider> = None;
+    let mut force = false;
+    for token in rest {
+        match token.to_ascii_lowercase().as_str() {
+            "force" => force = true,
+            t => {
+                let p = Provider::parse(t)?;
+                if provider.replace(p).is_some() {
+                    return None;
+                }
+            }
+        }
+    }
+    Some(Command::Down { provider, force })
 }
 
 /// Split a command's arguments on whitespace, except inside double quotes, so

@@ -22,7 +22,9 @@ use crate::serve::cmd_serve;
 mod api;
 mod aws_ops;
 mod backend;
+mod cloud;
 mod dispatch;
+mod instabox_ops;
 mod manual;
 mod releases;
 mod roster;
@@ -72,6 +74,7 @@ async fn main() -> anyhow::Result<()> {
             | Cmd::QuoteScan { .. }
             | Cmd::Workspace { .. }
             | Cmd::Aws { .. }
+            | Cmd::Ibx { .. }
             | Cmd::Asset { .. }
             | Cmd::Profile { .. }
     ) {
@@ -235,6 +238,10 @@ async fn main() -> anyhow::Result<()> {
                 task_policy: None,
                 accepting_work: true,
                 tts_threads: None,
+                expires_at: None,
+                provider: None,
+                provider_id: None,
+                base_url: None,
             };
             bm_core::provision::save_box(&layout.machines(), &bxo)?;
             println!("linked {name} -> {}", layout.machines().display());
@@ -273,6 +280,12 @@ async fn main() -> anyhow::Result<()> {
         }
         Cmd::Aws { cmd } => {
             for line in aws_cmd(&layout.root, cmd)? {
+                println!("{line}");
+            }
+            Ok(())
+        }
+        Cmd::Ibx { cmd } => {
+            for line in instabox_ops::cmd(&layout.root, cmd)? {
                 println!("{line}");
             }
             Ok(())

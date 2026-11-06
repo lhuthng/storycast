@@ -36,15 +36,13 @@ pub(crate) fn stopped(
 #[allow(clippy::too_many_arguments)]
 pub fn provision_machine(
     layout: &Layout,
-    addr: &str,
-    user: &str,
-    port: u16,
-    key: Option<String>,
+    machine: &Machine,
     force: bool,
     live: Option<tokio::sync::mpsc::UnboundedSender<String>>,
     // `owner/name` of the releases hosting the model artifact, for a one-shot
     release_repo: Option<String>,
 ) -> ProvisionOutcome {
+    let addr = machine.addr.as_str();
     if bm_core::is_local_node(addr) {
         // No mirror to fill: the local worker runs in place from this repo
         return ProvisionOutcome {
@@ -56,15 +54,13 @@ pub fn provision_machine(
             )],
         };
     }
-    use bm_core::provision::{provision, LiveLog, Ssh};
+    use bm_core::provision::{provision, LiveLog};
     let mut log = LiveLog::new(live.clone());
-    let probe_ssh = Ssh {
-        target: format!("{user}@{addr}"),
-        port,
-        key: key.clone(),
-        local: bm_core::is_local_node(addr),
+    let transport = match transport_for(layout, machine) {
+        Ok(t) => t,
+        Err(e) => return stopped(&mut log, addr, e, false),
     };
-    let pre = probe_ssh.probe(&layout.engine);
+    let pre = transport.probe(&layout.engine);
     log.push(format!("[{addr}] {}", pre.summary()));
     // Unreachable means nothing downstream can run: no platform was learned
     if !pre.reachable {
@@ -72,7 +68,7 @@ pub fn provision_machine(
             &mut log,
             addr,
             format!(
-                "cannot provision: the box never answered ssh ({}) — check it is up, and that its address is reachable from here (an EC2 private IP like 172.31.x.x is only routable from inside the VPC; the pool prefers public IPs)",
+                "cannot provision: the box never answered ({}) — check it is up, and that its address is reachable from here (an EC2 private IP like 172.31.x.x is only routable from inside the VPC; the pool prefers public IPs)",
                 pre.note
             ),
             false,
@@ -108,12 +104,13 @@ pub fn provision_machine(
         Err(e) => return stopped(&mut log, addr, e, true),
     };
     log.push(format!("[{addr}] tts sidecar: {}", tts.display()));
-    let mut m = Machine::new(addr, user, port, key, "worker");
+    let mut m = machine.clone();
     m.tts_url = Some("http://127.0.0.1:8818".into());
     // The policy decides *what this box is handed* (`provision` plans the
     carry_task_policy(&mut m, layout);
     let (after, mut flow) = provision(
         &m,
+        transport,
         layout,
         &binary,
         &tts,
@@ -132,6 +129,38 @@ pub fn provision_machine(
         stop: None,
         lines: log.lines,
     }
+}
+
+/// The transport a box's provider dictates: ssh where the provider gives an
+/// address, its own exec API where it does not.
+pub(crate) fn transport_for(
+    layout: &Layout,
+    m: &Machine,
+) -> Result<bm_core::provision::Ssh, String> {
+    use bm_core::provision::{Exec, Ssh};
+    if m.provider.as_deref() != Some(bm_core::cloud::Provider::InstaBox.as_str()) {
+        return Ok(Ssh::for_machine(m));
+    }
+    let Some(id) = m
+        .provider_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+    else {
+        return Err(
+            "this box has no provider id, so the InstaBox API cannot address it — relaunch it"
+                .into(),
+        );
+    };
+    let cfg = crate::cloud::instabox::InstaboxConfig::load(&layout.root);
+    let key = cfg.key();
+    if key.is_empty() {
+        return Err(format!(
+            "no InstaBox key — `ibx login` (`:ibx`) stores one in {}",
+            crate::cloud::instabox::InstaboxConfig::path(&layout.root).display()
+        ));
+    }
+    Ok(Ssh::over_exec(m, Exec::new(&cfg.api_url, &key, id)))
 }
 
 /// A re-provision must not reset the operator's work policy: the machine

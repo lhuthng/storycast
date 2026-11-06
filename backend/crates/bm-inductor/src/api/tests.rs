@@ -339,6 +339,10 @@ async fn register_carries_the_registry_handle_to_the_panes() {
             task_policy: None,
             accepting_work: true,
             tts_threads: None,
+            expires_at: None,
+            provider: None,
+            provider_id: None,
+            base_url: None,
         },
     )
     .unwrap();

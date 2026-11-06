@@ -75,18 +75,21 @@ pub(crate) async fn key_confirm(
                         app.set_status(Level::Warn, format!("{addr} is no longer in the registry"));
                     }
                 }
-                ConfirmAction::AwsDown { ids } => {
+                ConfirmAction::AwsDown { provider, ids } => {
                     let n = ids.len();
                     dispatch(
                         app,
                         job_tx,
-                        Job::AwsDown {
+                        Job::CloudDown {
                             root: app.layout.root.clone(),
                             layout: app.layout.clone(),
                             api: app.api.clone(),
                             http: http.clone(),
-                            ids,
-                            machines: app.effective_machines(),
+                            req: crate::tui::jobs::DownReq {
+                                provider,
+                                ids,
+                                machines: app.effective_machines(),
+                            },
                         },
                     );
                     app.set_status(

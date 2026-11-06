@@ -49,7 +49,7 @@ impl Inner {
     /// Return every row held by these workers to the pool. Racing rows keep
     /// their other holders, exactly as the reaper's orphan pass does: only the
     /// dropped box's share is taken back.
-    fn release_held_rows(&mut self, workers: &BTreeSet<String>) -> usize {
+    pub(crate) fn release_held_rows(&mut self, workers: &BTreeSet<String>) -> usize {
         let now = now_secs();
         let mut released = 0;
         for t in self.tasks.values_mut() {

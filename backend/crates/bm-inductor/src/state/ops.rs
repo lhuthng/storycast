@@ -4,6 +4,9 @@ use bm_proto::{now_secs, Stage, Task, TaskState};
 /// How long a box may sit in `Initializing` before the inductor stops
 pub const BOOT_DEADLINE_SECS: u64 = 300;
 
+/// How long before a box's deadline the operator hears about it, once.
+pub const DEADLINE_WARN_SECS: u64 = 15 * 60;
+
 mod apply;
 mod claim;
 mod lifecycle;

@@ -51,6 +51,7 @@ pub(crate) fn dispatch(
     let name = job.label();
     // Read before the job is moved onto the channel. Naming the resource on a
     let needs = job.resource_label();
+    let detail = job.detail();
     let queued = std::time::Instant::now();
     match job_tx.send(Job::Tracked {
         id,
@@ -65,8 +66,8 @@ pub(crate) fn dispatch(
                 queued,
                 started: None,
                 activity: match needs {
-                    Some(what) => format!("queued · needs {what}"),
-                    None => "queued".into(),
+                    Some(what) => format!("{detail} · needs {what}"),
+                    None => detail,
                 },
             });
             true

@@ -120,6 +120,10 @@ async fn tunnel_targets(state: &Shared) -> Vec<TunnelTarget> {
         .values()
         .filter(|m| m.task_port.is_some())
         .filter(|m| !bm_core::is_local_node(&m.addr))
+        // A box with no ssh has nothing for `-R` to hold open: an InstaBox
+        // machine is reached over its published URL, and dialling its port 22
+        // failed every five seconds for as long as it was registered.
+        .filter(|m| m.provider.as_deref() != Some(bm_core::cloud::Provider::InstaBox.as_str()))
         .map(|m| {
             // Same chain as `segments::targets`: the box's key, else the app
             let (key, _) = resolve_key(m.ssh_key.as_deref(), settings_key.as_deref());
@@ -130,6 +134,7 @@ async fn tunnel_targets(state: &Shared) -> Vec<TunnelTarget> {
                     port: m.ssh_port,
                     key: key.map(|p| p.to_string_lossy().to_string()),
                     local: false,
+                    exec: None,
                 },
             }
         })
@@ -162,6 +167,17 @@ mod tests {
             let mut local = bm_proto::Machine::new("127.0.0.1", "me", 22, None, "worker");
             local.task_port = Some(bm_proto::DEFAULT_TASK_PORT);
             inner.machines.insert("127.0.0.1".into(), local);
+            // No ssh at all: the tunnel would fail on every pass.
+            let mut ibx = bm_proto::Machine::new(
+                "https://8917-abc.instabox.tech",
+                "instabox",
+                22,
+                None,
+                "worker",
+            );
+            ibx.task_port = Some(bm_proto::DEFAULT_TASK_PORT);
+            ibx.provider = Some(bm_core::cloud::Provider::InstaBox.as_str().to_string());
+            inner.machines.insert(ibx.addr.clone(), ibx);
             // Driven off: no drive, no tunnel.
             let mut undriven = bm_proto::Machine::new("10.0.0.9", "thang", 22, None, "worker");
             undriven.task_port = None;

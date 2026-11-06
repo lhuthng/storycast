@@ -341,6 +341,11 @@ pub enum MachineState {
     Online,
     /// Was answering, now silent.
     Offline,
+    /// **Finished.** The provider has the box paused, stopped, deleted, or it
+    /// reached its deadline: its processes are gone and it is not coming back.
+    /// Distinct from [`Self::Offline`], which is a box that was answering and
+    /// went quiet, and whose worker may yet return.
+    Killed,
     /// A transition failed. The note says which.
     Error,
 }
@@ -356,6 +361,7 @@ impl MachineState {
             MachineState::Provisioning => "provisioning",
             MachineState::Online => "online",
             MachineState::Offline => "offline",
+            MachineState::Killed => "killed",
             MachineState::Error => "error",
         }
     }
@@ -396,7 +402,7 @@ impl MachineState {
     /// `Unknown` deliberately passes: a hand-added machine has never been
     /// probed, and probing it is the only way to find out.
     pub fn dialable(self) -> bool {
-        !matches!(self, MachineState::AwaitingIp)
+        !matches!(self, MachineState::AwaitingIp | MachineState::Killed)
     }
 }
 
@@ -539,6 +545,23 @@ pub struct Machine {
     /// when it comes back.
     #[serde(default)]
     pub tts_threads: Option<u16>,
+    /// Unix seconds this box was launched to live until, or `None` for no
+    /// deadline. Written at launch, so a later config edit cannot re-time a
+    /// running box.
+    #[serde(default)]
+    pub expires_at: Option<u64>,
+    /// Which cloud launched this box (`aws`, `instabox`), or `None` for one an
+    /// operator linked by hand. Only a box with both halves is ever deleted by
+    /// a launch provider.
+    #[serde(default)]
+    pub provider: Option<String>,
+    /// The id that cloud knows the box by (an EC2 instance id, a machine id).
+    #[serde(default)]
+    pub provider_id: Option<String>,
+    /// Where the worker answers HTTP when the provider gives no dialable
+    /// address of its own (a published port). Empty means `addr:task_port`.
+    #[serde(default)]
+    pub base_url: Option<String>,
     /// Human-readable note: probe output, error, provision result.
     pub note: String,
 }
@@ -568,8 +591,38 @@ impl Machine {
             task_policy: None,
             accepting_work: true,
             tts_threads: None,
+            expires_at: None,
+            provider: None,
+            provider_id: None,
+            base_url: None,
             note: String::new(),
         }
+    }
+
+    /// What a log line calls this box: its own name when it has one, else its
+    /// address — except a published URL, which names a page and not a box.
+    pub fn handle(&self) -> String {
+        let name = self.name.trim();
+        if !name.is_empty() && name != self.addr {
+            return name.to_string();
+        }
+        if self.addr.contains("://") {
+            match self.provider_id.as_deref().map(str::trim) {
+                Some(id) if !id.is_empty() => return id.to_string(),
+                _ => {
+                    return self
+                        .addr
+                        .split("://")
+                        .nth(1)
+                        .unwrap_or_default()
+                        .split('.')
+                        .next()
+                        .unwrap_or_default()
+                        .to_string()
+                }
+            }
+        }
+        self.addr.clone()
     }
 
     /// Is this box parked by the operator?

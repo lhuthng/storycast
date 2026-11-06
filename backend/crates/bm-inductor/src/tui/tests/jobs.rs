@@ -172,7 +172,7 @@ async fn same_box_jobs_queue_but_another_box_does_not() {
     );
     assert_eq!(
         app.background_jobs[1].activity,
-        "queued · needs box 10.0.0.5"
+        "dropping 10.0.0.5 · needs box 10.0.0.5"
     );
 
     gate.notify_one();
@@ -219,9 +219,42 @@ fn a_queued_row_says_what_it_is_waiting_for() {
     );
     assert_eq!(
         app.background_jobs[0].activity,
-        "queued · needs box 10.0.0.5"
+        "provisioning 10.0.0.5 · needs box 10.0.0.5"
     );
-    assert_eq!(app.background_jobs[1].activity, "queued");
+    assert_eq!(app.background_jobs[1].activity, "index audition lines");
+}
+
+/// The activity used to be one clipped line, so an install failure was cut
+/// mid-path. Every word the job reported has to be readable.
+#[test]
+fn a_long_activity_wraps_instead_of_clipping() {
+    let mut app = App::new("http://unused");
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    super::input::dispatch(
+        &mut app,
+        &tx,
+        Job::LoadLines {
+            layout: bm_core::Layout::new(""),
+        },
+    );
+    app.apply(Ev::JobStarted(1));
+    app.apply(Ev::JobProgress {
+        id: 1,
+        text: "agent install failed: packing ./backend/target/x86_64-unknown-linux-gnu/debug/bm-agent \
+               failed: tar: could not chdir to \
+               './backend/target/x86_64-unknown-linux-gnu/debug/bm-agent'"
+            .into(),
+    });
+    app.screen = Screen::Jobs {
+        scroll: 0,
+        previous: Box::new(Screen::Normal),
+    };
+    let text = render_text(&mut app, 140, 40);
+    assert!(text.contains("could not chdir"), "middle lost:\n{text}");
+    assert!(
+        text.contains("agent'"),
+        "the tail of the failed path was clipped:\n{text}"
+    );
 }
 
 /// A job holds the thing it touches and nothing else.
@@ -294,11 +327,17 @@ fn resources_name_what_a_job_actually_touches() {
     );
     // The AWS four read-modify-write the same document.
     assert_eq!(
-        Job::AwsUp {
+        Job::CloudUp {
             root: std::path::PathBuf::from("/tmp/x"),
             api: "unused".into(),
             http: reqwest::Client::new(),
-            count: 1,
+            req: crate::tui::jobs::LaunchReq {
+                provider: bm_core::cloud::Provider::Aws,
+                count: 1,
+                ttl_minutes: None,
+                strict: false,
+                from_machine: false,
+            },
         }
         .resources(),
         vec![Res::Aws]
@@ -369,11 +408,17 @@ async fn a_free_job_does_not_wait_for_a_long_one() {
     assert!(dispatch(
         &mut app,
         &job_tx,
-        Job::AwsUp {
+        Job::CloudUp {
             root: std::path::PathBuf::from("/tmp/x"),
             api: "unused".into(),
             http: reqwest::Client::new(),
-            count: 1,
+            req: crate::tui::jobs::LaunchReq {
+                provider: bm_core::cloud::Provider::Aws,
+                count: 1,
+                ttl_minutes: None,
+                strict: false,
+                from_machine: false,
+            },
         }
     ));
     // The same box again: this one really does contend, so it waits.
@@ -448,7 +493,7 @@ fn tracked_activity_and_cleanup_use_identity_not_queue_order() {
         text: "late".into(),
     });
     assert_eq!(app.background_jobs[0].id, 1);
-    assert_eq!(app.background_jobs[0].activity, "queued");
+    assert_eq!(app.background_jobs[0].activity, "index audition lines");
     assert_eq!(app.pending, 1);
 }
 

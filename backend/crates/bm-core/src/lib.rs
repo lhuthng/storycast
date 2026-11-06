@@ -26,6 +26,7 @@ pub mod artifact;
 pub mod assemble;
 pub mod audio_pool;
 pub mod cast;
+pub mod cloud;
 pub mod compose;
 pub mod config;
 pub mod crawl;

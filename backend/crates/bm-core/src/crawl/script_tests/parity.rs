@@ -552,3 +552,85 @@ fn scripts_cannot_reach_the_environment_or_the_filesystem() {
     }
     assert!(text.starts_with("nil nil nil nil nil nil"), "{text:.60}");
 }
+
+/// The site appends an ad after the last paragraph: a blurb for another book,
+/// its characters' dialogue, or the same glued onto the final sentence.
+#[test]
+fn the_storya_engines_drop_the_ad_appended_after_the_last_paragraph() {
+    const TAIL: &str = r#"<html><body><article>
+<h1>Chương 999: Có muội tử ư?</h1>
+<p>Tiếng gầm thét như sấm vang trời, Cố Thái Uyên sửng sốt như bị sét đánh, và hắn không thể tin nổi điều mình vừa nhìn thấy trước mắt mình.</p>
+<p>Hắn đã ẩn mình trong nơi ẩn náu bí mật của Cố gia, vậy mà lại dễ dàng bị nhìn thấu như thế, còn không chút sức phản kháng mà bị bắt lấy.</p>
+<p>Hòa khôi: Em từ chối anh rồi, sao anh lại lạnh nhạt với em thế?</p>
+<p>Giang Chu: Tình trường lắm chiêu trò, ai tin người nấy bị lừa, sớm hợp sớm tan thôi, ngoan!</p>
+<p>Chương sau</p>
+</article></body></html>"#;
+    // ch1001: the ad shares a paragraph with the prose, so a line drop is not enough.
+    const GLUED: &str = r#"<html><body><article>
+<h1>Chương 1001: Cố gia tiên tổ thế nhưng Thánh Nhân viên mãn</h1>
+<p>Cố Đạo Hải miễn cưỡng thành thánh, ngay tại chỗ phun ra một ngụm máu tươi, và cả đại điện im phăng phắc không một ai dám lên tiếng nữa.</p>
+<p>Bọn họ chỉ có thể trơ mắt nhìn cảnh tượng trước mắt mà không làm được gì, trong lòng ai nấy đều dâng lên một nỗi sợ hãi khó tả thành lời.</p>
+<p>Hắn chậm rãi quay người lại, phun ra một ngụm máu tươi! Hoa khôi: Ta cự tuyệt ngươi sau đó, ngươi làm sao đối với ta lãnh đạm như vậy? Giang Chu: Ái tình sáo lộ sâu, ai tin ai bị lừa, sớm tụ sớm tan ah, ngoan!</p>
+<p>Chương sau</p>
+</article></body></html>"#;
+    // ch987: a blurb for another book, no dialogue at all.
+    const BLURB: &str = r#"<html><body><article>
+<h1>Chương 987: Bị động</h1>
+<p>Dịch Phong đứng yên tại chỗ rất lâu, trong lòng hắn chỉ còn lại một mảnh trống rỗng, và hắn biết mình đã không còn đường nào để quay lại nữa.</p>
+<p>Ngoài cửa sổ, ánh trăng lạnh lẽo rọi xuống mặt đất, phủ lên tất cả một tầng sương mỏng như thế giới này đang dần chìm vào giấc ngủ.</p>
+<p>Ngàn vạn kỹ năng bị động vào một thân, tu tiên toàn bộ nhờ bị động</p>
+<p>Chương sau</p>
+</article></body></html>"#;
+
+    for (engine, file) in [("lua", "storya.lua"), ("js", "storya.js")] {
+        for (name, page, keep) in [
+            ("tail", TAIL, "bị bắt lấy."),
+            ("glued", GLUED, "máu tươi!"),
+            ("blurb", BLURB, "giấc ngủ."),
+        ] {
+            let base = fixture::start(vec![(format!("/{name}"), 200, page.to_string())]);
+            let s = spec(engine, file, &template(file));
+            let got = Provider::new(&s)
+                .crawl(1, Some(&format!("{base}/{name}")), 1)
+                .expect("crawl");
+            let text = text_of(got.outcome);
+            assert!(
+                !text.contains("Giang Chu") && !text.contains("khôi:") && !text.contains("kỹ năng bị động"),
+                "{file} on {name} kept the ad: {text:?}"
+            );
+            assert!(
+                text.trim_end().ends_with(keep),
+                "{file} on {name} cut more than the ad: {text:?}"
+            );
+        }
+    }
+}
+
+/// Storya reports speech as `Hắn nói: …` and as quoted lines, so a single
+/// `Name:` line and a trailing `"…"` paragraph are never the ad.
+#[test]
+fn a_single_name_line_and_a_quoted_tail_are_never_the_ads_dialogue_block() {
+    const PAGE: &str = r#"<html><body><article>
+<h1>Chương 528: Hắn nói</h1>
+<p>Dịch Phong đứng trước cửa rất lâu, trong lòng hắn chỉ còn lại một mảnh trống rỗng, và hắn biết mình đã không còn đường nào để quay lại nữa.</p>
+<p>Hắn nói: Ta không đi.</p>
+<p>"Rất tốt!"</p>
+<p>Chương sau</p>
+</article></body></html>"#;
+    for (engine, file) in [("lua", "storya.lua"), ("js", "storya.js")] {
+        let base = fixture::start(vec![("/p".into(), 200, PAGE.to_string())]);
+        let s = spec(engine, file, &template(file));
+        let got = Provider::new(&s)
+            .crawl(1, Some(&format!("{base}/p")), 1)
+            .expect("crawl");
+        let text = text_of(got.outcome);
+        assert!(
+            text.contains("Hắn nói: Ta không đi."),
+            "{file} dropped reported speech: {text:?}"
+        );
+        assert!(
+            text.trim_end().ends_with("\"Rất tốt!\""),
+            "{file} dropped a quoted closing line: {text:?}"
+        );
+    }
+}

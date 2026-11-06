@@ -94,6 +94,24 @@ local SITE = {
     -- the only stable part of it. `Mời ` alone is not enough: prose can start
     -- that way, and one chapter's dialogue does.
     promo_prefix = { "mời đọc", "mời các bạn", "mời mọi người" },
+    -- The ad the site appends after the last paragraph is plain paragraphs with
+    -- no wrapper, so only the tail is searched, and this holds promo copy — never
+    -- a book or character name. The `Name: …` form is recognised by shape.
+    promo_tail = {
+      "kỹ năng bị động",
+      "điệp viên 007", "Điệp viên 007",
+      "hãy đến ngay với",
+      "xuất phẩm",
+      "bộ này không phải truyện hay",
+      "biên tập lại nhân sinh",
+      "xuyên qua vô tận thứ nguyên",
+      "cùng chư thiên vạn giới",
+      "nghiền nát mọi kẻ thù",
+      "nghịch thiên cải mệnh",
+      "mời đọc", "mời mọi người", "đón đọc", "đón xem", "đọc ngay",
+      "đề cử đọc", "giới thiệu truyện", "truyện của ta", "truyện giải trí",
+      "cẩu đạo", "bạo chương", "xuyên nhanh", "vô địch lưu",
+    },
   },
   -- The first line longer than this is prose rather than a stray label.
   min_line = 40,
@@ -216,6 +234,104 @@ local function is_promo(line)
     end
   end
   return false
+end
+
+-- `Name: …` with a one- or two-word label, unquoted: the ad's dialogue form.
+-- Prose reports speech that way too (`Hắn nói: …`), so one line is never
+-- enough — the block below needs two, with different labels.
+local function ad_label(line)
+  if string.find(line, '"', 1, true) then
+    return nil
+  end
+  local label = line:match("^([^%s:][^:]-):%s")
+  if not label then
+    return nil
+  end
+  local _, words = label:gsub("%S+", "")
+  if words > 2 or chars(label) > 24 then
+    return nil
+  end
+  return label
+end
+
+-- Whether a line ends its sentence. A multi-byte last character (`…`, a curly
+-- quote) is an ending too.
+local function ends_closed(line)
+  local last = line:sub(-1)
+  if string.find('.!?:)]"\'', last, 1, true) then
+    return true
+  end
+  return last:byte() >= 128
+end
+
+-- Any quote means the line is reported speech, not a pitch. The curly forms are
+-- spelled in UTF-8 so `string.lower` cannot disturb them.
+local QUOTES = { '"', "'", "\226\128\156", "\226\128\157", "\226\128\152", "\226\128\153" }
+
+local function has_quote(line)
+  for _, q in ipairs(QUOTES) do
+    if string.find(line, q, 1, true) then
+      return true
+    end
+  end
+  return false
+end
+
+-- Short enough to be a pitch, so a whole paragraph of prose that merely carries
+-- an ad keeps the prose.
+local function is_tagline(line)
+  return chars(line) <= 160 and not ends_closed(line) and not has_quote(line)
+end
+
+-- `…! Name: … Name: …` — the ad typed into the last paragraph behind the prose.
+-- One tag is how prose reports speech, so two are required.
+local function glued_at(line)
+  if has_quote(line) then
+    return nil
+  end
+  local init, count, first = 1, 0, nil
+  while true do
+    local s = string.find(line, "[%.!?]%s+[^%s:][^:]-:%s", init)
+    if not s then
+      break
+    end
+    count = count + 1
+    first = first or s
+    init = s + 1
+  end
+  if count < 2 then
+    return nil
+  end
+  return first
+end
+
+local function is_promo_line(line)
+  return any_of(string.lower(line), SITE.artifact.promo_tail) or is_tagline(line)
+end
+
+-- Drop the ad from the end: a block of `Name:` lines, then any trailing promo
+-- line, then a dialogue line glued onto the prose (`…! Name: …`).
+local function strip_promo_tail(out)
+  while #out > 2 do
+    local a, b = ad_label(out[#out]), ad_label(out[#out - 1])
+    if not a or not b or a == b then
+      break
+    end
+    table.remove(out)
+    table.remove(out)
+  end
+  while #out > 1 do
+    local last = out[#out]
+    if is_promo_line(last) then
+      table.remove(out)
+    else
+      local at = glued_at(last)
+      if at then
+        out[#out] = last:sub(1, at)
+      end
+      break
+    end
+  end
 end
 
 -- Whether a line is the site's furniture rather than the novel. Every word
@@ -389,6 +505,7 @@ local function extract(html)
       break
     end
   end
+  strip_promo_tail(out)
 
   -- The site's own lines go here, where the site is described: the numbered
   -- headline copy, the promo strip, the completion footer, the author's PS.
