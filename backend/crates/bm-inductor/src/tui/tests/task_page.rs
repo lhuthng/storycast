@@ -53,14 +53,23 @@ async fn retry_from_the_list_targets_the_highlighted_task_only() {
 }
 
 #[tokio::test]
-async fn tasks_bulk_keys_remerge_direct_and_rerender_asks_first() {
+async fn tasks_bulk_keys_remerge_and_rerender_ask_first() {
     let http = reqwest::Client::new();
     let (job_tx, mut job_rx) = tokio::sync::mpsc::unbounded_channel::<Job>();
     let mut app = tasks_app();
     app.screen = Screen::Tasks(TasksView::new());
 
-    // R needs no row and no confirm: every merge requeues at once.
+    // R deletes the finished mp3+cues pairs, so it confirms first too.
     handle_key(&mut app, key(KeyCode::Char('R')), &http, &job_tx).await;
+    assert!(
+        matches!(app.screen, Screen::Confirm(_)),
+        "R opens a confirm, not an op"
+    );
+    assert!(
+        job_rx.try_recv().is_err(),
+        "nothing dispatches before confirm"
+    );
+    handle_key(&mut app, key(KeyCode::Enter), &http, &job_tx).await;
     match job_rx.try_recv().map(Job::into_bare) {
         Ok(Job::Op { req, .. }) => assert_eq!(req.op, Op::Remerge),
         other => panic!("expected a remerge op, got {other:?}"),
@@ -71,7 +80,8 @@ async fn tasks_bulk_keys_remerge_direct_and_rerender_asks_first() {
         app.status.text
     );
 
-    // E is the destructive one: confirm first, op only on Enter.
+    // E is the destructive one: confirm first, op only on Enter. The ledger
+    app.screen = Screen::Tasks(TasksView::new());
     handle_key(&mut app, key(KeyCode::Char('E')), &http, &job_tx).await;
     assert!(
         matches!(app.screen, Screen::Confirm(_)),

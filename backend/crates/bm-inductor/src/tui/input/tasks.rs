@@ -144,17 +144,8 @@ pub(crate) async fn key_tasks(
             }
         }
         KeyCode::Char('R') => {
-            // Bulk requeue, row-independent: every merge back to pending,
-            dispatch_op(
-                app,
-                job_tx,
-                http,
-                OpRequest {
-                    op: Op::Remerge,
-                    ..Default::default()
-                },
-            );
-            app.set_status(Level::Info, "requeueing every merge — render cache kept");
+            // It deletes the finished mp3+cues pairs: worth one Enter, like
+            app.screen = Screen::Confirm(Confirm::remerge());
         }
         KeyCode::Char('E') => {
             // Bulk re-speak: worth one Enter, like every other destructive

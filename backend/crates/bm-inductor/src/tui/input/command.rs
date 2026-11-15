@@ -168,7 +168,7 @@ pub(crate) static WORDS: &[Word] = &[
     Word { key: Some('B'), names: &["backend"], desc: Some("backend up now, machines provision in background and join as ready"), cmd: Command::Backend },
     Word { key: None, names: &["mix"], desc: Some("story speed and fx/music/inject volumes — requeues every merge"), cmd: Command::Mix },
     Word { key: None, names: &["sound", "sounds", "pools"], desc: Some("the three clip pools: add, edit, retune, remove"), cmd: Command::Sound },
-    Word { key: None, names: &["remerge"], desc: Some("requeue every merge — render cache kept, no confirm"), cmd: Command::Remerge },
+    Word { key: None, names: &["remerge"], desc: Some("requeue every merge — finished mp3s deleted and rebuilt; asks first"), cmd: Command::Remerge },
     Word { key: None, names: &["rerender"], desc: Some("requeue every render + merge — full re-speak, asks first"), cmd: Command::Rerender },
     Word { key: None, names: &["shutdown-when-idle", "drain"], desc: Some("workers exit on their own once the queue drains — restart with :B"), cmd: Command::ShutdownWhenIdle },
     Word { key: None, names: &["xdrop"], desc: Some("drop the queued exclusive write (a merge/remix/retag waiting for the cluster to quiet) — :xdrop remix drops only that kind"), cmd: Command::ExclusiveCancel { route: None } },

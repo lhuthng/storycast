@@ -504,17 +504,8 @@ pub(crate) fn do_command(
             );
         }
         Command::Remerge => {
-            // Same blast radius as `:mix` (finished mp3s rebuild from cache),
-            dispatch_op(
-                app,
-                job_tx,
-                http,
-                OpRequest {
-                    op: Op::Remerge,
-                    ..Default::default()
-                },
-            );
-            app.set_status(Level::Info, "requeueing every merge — render cache kept");
+            // It deletes the finished mp3+cues pairs: worth one Enter, like
+            app.screen = Screen::Confirm(Confirm::remerge());
         }
         Command::AuditionCurrent => {
             audition::audition_word(app, job_tx, http, audition::AuditionKind::Current);

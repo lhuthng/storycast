@@ -236,6 +236,18 @@ pub(crate) async fn key_confirm(
                     );
                     app.set_status(Level::Info, "re-rendering everything — watch events");
                 }
+                ConfirmAction::Remerge => {
+                    dispatch_op(
+                        app,
+                        job_tx,
+                        http,
+                        OpRequest {
+                            op: Op::Remerge,
+                            ..Default::default()
+                        },
+                    );
+                    app.set_status(Level::Info, "requeueing every merge — render cache kept");
+                }
                 ConfirmAction::ReleaseWorker {
                     worker,
                     count,

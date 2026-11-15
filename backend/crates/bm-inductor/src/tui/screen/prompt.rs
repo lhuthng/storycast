@@ -293,6 +293,7 @@ pub(crate) enum ConfirmAction {
     StopBackend,
     Reconcile,
     Rerender,
+    Remerge,
     /// Point one stage folder elsewhere: Enter keeps the files where they
     /// are, `m` takes them along first.
     StageDir {
@@ -365,6 +366,22 @@ impl Confirm {
                 ":mix instead: it requeues merges and keeps this cache.".into(),
             ],
             action: ConfirmAction::Rerender,
+        }
+    }
+
+    /// Requeue every merge behind one Enter: the finished mp3+cues pairs
+    pub(crate) fn remerge() -> Self {
+        Confirm {
+            title: "Re-merge everything?".into(),
+            danger: true,
+            body: vec![
+                "Every merge goes back to pending and the finished".into(),
+                "mp3+cues pairs are deleted — they rebuild only as".into(),
+                "merges re-run, so nothing is listenable until then.".into(),
+                String::new(),
+                "The render cache is kept; for a full re-speak use E.".into(),
+            ],
+            action: ConfirmAction::Remerge,
         }
     }
 
