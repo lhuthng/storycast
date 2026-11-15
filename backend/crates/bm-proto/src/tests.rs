@@ -210,6 +210,8 @@ fn ops_roundtrip_through_kebab_case() {
         Op::SoundChanged,
         Op::Rerender,
         Op::Remerge,
+        Op::Upload,
+        Op::WipeSegments,
     ] {
         assert_eq!(Op::parse(op.as_str()), Some(op));
     }

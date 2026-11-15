@@ -21,8 +21,8 @@ mod llm;
 pub use crawl::CrawlSettings;
 pub use llm::{LlmConfig, LlmKind, ProviderEntry, ResolvedLlm};
 pub use settings::{
-    DigestSettings, JudgeSettings, RepairJudgeSettings, Settings, SshDefaults,
-    DEFAULT_ANSWER_TOKENS, DEFAULT_GEMINI_URL,
+    DigestSettings, JudgeSettings, RepairJudgeSettings, Settings, SshDefaults, UploadSettings,
+    DEFAULT_ANSWER_TOKENS, DEFAULT_GEMINI_URL, DEFAULT_UPLOAD_TOKEN_ENV,
 };
 mod settings;
 

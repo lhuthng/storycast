@@ -778,3 +778,62 @@ async fn the_stage_folder_choice_can_take_the_files_along() {
     );
     std::fs::remove_dir_all(&dir).ok();
 }
+
+#[tokio::test]
+async fn a_finished_upload_offers_the_wipe_and_enter_sends_it() {
+    let http = reqwest::Client::new();
+    let (job_tx, mut job_rx) = tokio::sync::mpsc::unbounded_channel::<Job>();
+    let mut app = bind_app();
+    app.screen = Screen::Normal;
+
+    let req = OpRequest {
+        op: Op::Upload,
+        ..Default::default()
+    };
+    app.apply(Ev::Done(DoneKind::Op {
+        op: Op::Upload,
+        key: op_key(&req),
+        ok: true,
+        voice: None,
+        audio_b64: None,
+        line_speaker: None,
+        line_text: None,
+    }));
+    match &app.screen {
+        Screen::Confirm(c) => {
+            assert!(matches!(c.action, ConfirmAction::WipeSegments));
+            assert!(c.danger, "a wipe is destructive");
+        }
+        other => panic!("the push should offer the wipe, got {other:?}"),
+    }
+    assert!(job_rx.try_recv().is_err(), "nothing dispatches before Enter");
+
+    handle_key(&mut app, key(KeyCode::Enter), &http, &job_tx).await;
+    match job_rx.try_recv().map(Job::into_bare) {
+        Ok(Job::Op { req, .. }) => assert_eq!(req.op, Op::WipeSegments),
+        other => panic!("expected a wipe-segments op, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_failed_upload_does_not_offer_a_wipe() {
+    let mut app = bind_app();
+    app.screen = Screen::Normal;
+    let req = OpRequest {
+        op: Op::Upload,
+        ..Default::default()
+    };
+    app.apply(Ev::Done(DoneKind::Op {
+        op: Op::Upload,
+        key: op_key(&req),
+        ok: false,
+        voice: None,
+        audio_b64: None,
+        line_speaker: None,
+        line_text: None,
+    }));
+    assert!(
+        matches!(app.screen, Screen::Normal),
+        "a failed push must not ask to delete anything"
+    );
+}

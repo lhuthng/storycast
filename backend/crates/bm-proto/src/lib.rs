@@ -1570,6 +1570,14 @@ pub enum Op {
     /// Requeue every merge without touching the mix or the render cache:
     /// effect clips, the scene map and the pools all apply at merge time.
     Remerge,
+    /// Push the finished mp3s to the author API named in `settings.upload`:
+    /// read its manifest, then PUT only the chapters whose sha256 differs.
+    /// Nothing local is touched, so it is safe to run at any time.
+    Upload,
+    /// Delete every cached render take; the finished mp3+cues pairs stay.
+    /// `:upload` offers this once its push is done, because the takes are what
+    /// a wipe reclaims and the published pairs are what `output/` still serves.
+    WipeSegments,
     /// Tell every beating worker to exit on its next heartbeat (2s). The
     /// graceful half of the cluster stop: in-flight tasks are reaped or
     /// requeued without strikes, and whatever stays behind (a dead box, the
@@ -1618,6 +1626,8 @@ impl Op {
             Op::SoundChanged => "sound-changed",
             Op::Rerender => "rerender",
             Op::Remerge => "remerge",
+            Op::Upload => "upload",
+            Op::WipeSegments => "wipe-segments",
             Op::ShutdownWorkers => "shutdown-workers",
             Op::ShutdownWhenIdle => "shutdown-when-idle",
             Op::Exclusive => "exclusive",
@@ -1649,6 +1659,8 @@ impl Op {
             Op::SoundChanged,
             Op::Rerender,
             Op::Remerge,
+            Op::Upload,
+            Op::WipeSegments,
             Op::ShutdownWorkers,
             Op::ShutdownWhenIdle,
             Op::Exclusive,

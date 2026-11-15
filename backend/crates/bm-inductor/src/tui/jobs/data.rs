@@ -11,8 +11,11 @@ pub(crate) async fn job_op(
     layout: bm_core::Layout,
 ) {
     // Ops can wait on the analyzer for minutes; the shared 15s
+    // budget would abandon a legitimately slow one. A whole book's push is
+    // slower still: it sends every chapter the server does not have yet.
+    let secs = if req.op == Op::Upload { 3600 } else { 300 };
     let http = reqwest::Client::builder()
-        .timeout(Duration::from_secs(300))
+        .timeout(Duration::from_secs(secs))
         .build()
         .unwrap_or(http);
     let name = req.op.as_str().to_string();

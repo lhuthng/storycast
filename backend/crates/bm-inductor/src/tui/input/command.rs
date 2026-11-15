@@ -82,6 +82,13 @@ pub(crate) enum Command {
     Sound,
     Rerender,
     Remerge,
+    /// Push finished chapters to the author API (`:upload`): its manifest is
+    /// the diff, so only the chapters whose sha256 differs are sent.
+    Upload,
+    /// The manifest URL the push writes to (`:uploadurl`).
+    UploadUrl,
+    /// The bearer token the push sends (`:uploadkey`).
+    UploadKey,
     /// Start or stop distributing work (`:go` / `:hold`).
     Dispatch {
         go: bool,
@@ -169,6 +176,9 @@ pub(crate) static WORDS: &[Word] = &[
     Word { key: None, names: &["mix"], desc: Some("story speed and fx/music/inject volumes — requeues every merge"), cmd: Command::Mix },
     Word { key: None, names: &["sound", "sounds", "pools"], desc: Some("the three clip pools: add, edit, retune, remove"), cmd: Command::Sound },
     Word { key: None, names: &["remerge"], desc: Some("requeue every merge — finished mp3s deleted and rebuilt; asks first"), cmd: Command::Remerge },
+    Word { key: None, names: &["upload", "publish"], desc: Some("push finished chapters to the author API — reads its manifest and sends only the ones whose sha256 differs; asks whether to wipe the cached takes after"), cmd: Command::Upload },
+    Word { key: None, names: &["uploadurl"], desc: Some("the book API's manifest URL, e.g. `:uploadurl https://site/api/author/audiobooks/id/1` — a chapter is written to `<url>/chapters/<n>`"), cmd: Command::UploadUrl },
+    Word { key: None, names: &["uploadkey"], desc: Some("the API bearer token — saved in this workspace's `.bm/settings.json`; `STORYCAST_UPLOAD_TOKEN` wins when exported"), cmd: Command::UploadKey },
     Word { key: None, names: &["rerender"], desc: Some("requeue every render + merge — full re-speak, asks first"), cmd: Command::Rerender },
     Word { key: None, names: &["shutdown-when-idle", "drain"], desc: Some("workers exit on their own once the queue drains — restart with :B"), cmd: Command::ShutdownWhenIdle },
     Word { key: None, names: &["xdrop"], desc: Some("drop the queued exclusive write (a merge/remix/retag waiting for the cluster to quiet) — :xdrop remix drops only that kind"), cmd: Command::ExclusiveCancel { route: None } },

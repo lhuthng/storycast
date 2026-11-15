@@ -114,6 +114,8 @@ pub(crate) async fn key_text(
                     | TextKind::Advertise
                     | TextKind::ModelsRelease
                     | TextKind::PacksRelease
+                    | TextKind::UploadUrl
+                    | TextKind::UploadKey
             ) {
                 match save_app_setting(app, p.kind.clone(), &p.buf) {
                     Ok(msg) => {

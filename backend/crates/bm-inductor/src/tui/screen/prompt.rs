@@ -25,6 +25,10 @@ pub(crate) enum TextKind {
     OutputDir,
     /// The folder rendered takes live in (`:segments`): save-only, per workspace.
     SegmentsDir,
+    /// The author API's manifest URL (`:uploadurl`): save-only, per workspace.
+    UploadUrl,
+    /// The author API's bearer token (`:uploadkey`): save-only, machine-local.
+    UploadKey,
     /// One box's TTS sidecar thread count (`:threads`): the ONNX threads its
     TtsThreads,
     /// Mix levels (`:mix`): story speed plus the two layer volumes, saved to
@@ -294,6 +298,8 @@ pub(crate) enum ConfirmAction {
     Reconcile,
     Rerender,
     Remerge,
+    /// Drop the cached takes after an upload: the pushed pairs stay.
+    WipeSegments,
     /// Point one stage folder elsewhere: Enter keeps the files where they
     /// are, `m` takes them along first.
     StageDir {
@@ -382,6 +388,23 @@ impl Confirm {
                 "The render cache is kept; for a full re-speak use E.".into(),
             ],
             action: ConfirmAction::Remerge,
+        }
+    }
+
+    /// After a push: the takes can go, the published pairs stay.
+    pub(crate) fn wipe_segments() -> Self {
+        Confirm {
+            title: "Wipe the cached takes?".into(),
+            danger: true,
+            body: vec![
+                "Every `segments-*` folder is deleted; the finished".into(),
+                "mp3+cues pairs stay in output/, so the book is still".into(),
+                "listenable and a second upload sends nothing.".into(),
+                String::new(),
+                "A later re-merge or re-render has to speak those lines".into(),
+                "again. Enter wipes, Esc keeps them.".into(),
+            ],
+            action: ConfirmAction::WipeSegments,
         }
     }
 

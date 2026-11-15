@@ -248,6 +248,18 @@ pub(crate) async fn key_confirm(
                     );
                     app.set_status(Level::Info, "requeueing every merge — render cache kept");
                 }
+                ConfirmAction::WipeSegments => {
+                    dispatch_op(
+                        app,
+                        job_tx,
+                        http,
+                        OpRequest {
+                            op: Op::WipeSegments,
+                            ..Default::default()
+                        },
+                    );
+                    app.set_status(Level::Info, "wiping cached takes — the finished mp3s stay");
+                }
                 ConfirmAction::ReleaseWorker {
                     worker,
                     count,

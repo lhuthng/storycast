@@ -275,6 +275,42 @@ pub(crate) fn do_command(
                 &cur,
             ));
         }
+        Command::Upload => {
+            dispatch_op(
+                app,
+                job_tx,
+                http,
+                OpRequest {
+                    op: Op::Upload,
+                    ..Default::default()
+                },
+            );
+        }
+        Command::UploadUrl => {
+            let cur = bm_core::config::Settings::load(&app.layout.settings())
+                .upload
+                .url;
+            app.screen = Screen::Text(TextPrompt::new(
+                TextKind::UploadUrl,
+                "Upload URL",
+                "the book's manifest URL — `GET` answers every chapter's sha256, and a \
+                 chapter is written to `<url>/chapters/<n>`. Empty turns `:upload` off.",
+                &cur,
+            ));
+        }
+        Command::UploadKey => {
+            let cur = bm_core::config::Settings::load(&app.layout.settings())
+                .upload
+                .token;
+            app.screen = Screen::Text(TextPrompt::new(
+                TextKind::UploadKey,
+                "Upload token",
+                "the bearer token for the author API, saved in this workspace's \
+                 `.bm/settings.json`. `STORYCAST_UPLOAD_TOKEN` wins when it is exported. \
+                 Empty clears it.",
+                &cur,
+            ));
+        }
         Command::OutputDir => {
             let cur = stage_dir_raw(app, bm_core::stage_dir::StageDir::Output);
             app.screen = Screen::Text(TextPrompt::new(

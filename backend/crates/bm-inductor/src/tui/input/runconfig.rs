@@ -312,6 +312,31 @@ pub(crate) fn save_app_setting(
     let settings_path = app.layout.settings();
     let mut settings = bm_core::config::Settings::load(&settings_path);
     let msg = match kind {
+        TextKind::UploadUrl => {
+            let url = buf.trim();
+            if url.is_empty() {
+                settings.upload.url = String::new();
+                ":upload has no target again — nothing will be sent".to_string()
+            } else if !(url.starts_with("https://") || url.starts_with("http://")) {
+                return Err(format!("“{url}” is not a URL — it must start http(s)://"));
+            } else {
+                settings.upload.url = url.trim_end_matches('/').to_string();
+                format!("chapters will be pushed to {url}")
+            }
+        }
+        TextKind::UploadKey => {
+            let token = buf.trim();
+            if token.is_empty() {
+                settings.upload.token = String::new();
+                format!(
+                    "upload token cleared — export {} to send one",
+                    settings.upload.token_env_name()
+                )
+            } else {
+                settings.upload.token = token.to_string();
+                "upload token saved in .bm/settings.json (machine-local)".to_string()
+            }
+        }
         TextKind::SshKey => {
             let key = buf.trim();
             if key.is_empty() {

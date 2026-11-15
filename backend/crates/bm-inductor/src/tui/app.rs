@@ -8,7 +8,7 @@ use crate::tui::{
     model::{
         cast_rows, parse_dispatch, parse_stats, registry_machines, CastRow, Dispatch, WorkerStats,
     },
-    screen::Screen,
+    screen::{Confirm, Screen},
     sound::SoundData,
     style::{level_from_str, style_bold_of, style_of, Conn, Level, LogLine, Theme},
 };

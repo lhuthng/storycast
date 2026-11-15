@@ -347,6 +347,29 @@ pub(crate) async fn op(State(st): State<Shared>, Json(req): Json<OpRequest>) -> 
                 Err(e) => Json(OpResult::fail(format!("remerge failed: {e:#}"))),
             }
         }
+        bm_proto::Op::Upload => {
+            // The push talks to someone else's API: take what it needs and
+            // stand outside the state lock for the whole conversation.
+            let (layout, upload) = {
+                let inner = st.lock().await;
+                (inner.layout.clone(), inner.settings.upload.clone())
+            };
+            let http = match reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(1800))
+                .build()
+            {
+                Ok(http) => http,
+                Err(e) => return Json(OpResult::fail(format!("upload failed: {e}"))),
+            };
+            match bm_core::upload::run(&upload, &http, &layout).await {
+                Ok(report) => Json(OpResult::ok(report.summary())),
+                Err(e) => Json(OpResult::fail(format!("upload failed: {e:#}"))),
+            }
+        }
+        bm_proto::Op::WipeSegments => {
+            let mut inner = st.lock().await;
+            Json(OpResult::ok(inner.op_wipe_segments()))
+        }
         bm_proto::Op::ShutdownWorkers => {
             let mut inner = st.lock().await;
             Json(OpResult::ok(inner.op_shutdown_workers()))

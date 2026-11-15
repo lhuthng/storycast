@@ -44,6 +44,7 @@ pub mod provision;
 pub mod segments;
 pub mod stage_dir;
 pub mod token;
+pub mod upload;
 pub mod util;
 pub mod voices;
 

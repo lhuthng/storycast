@@ -602,6 +602,11 @@ impl App {
                         if matches!(op, Op::SwapVoice | Op::ClaimVoice) && ok {
                             self.roster = None;
                         }
+                        // The push landed: the takes are re-render material
+                        // now, so reclaiming them is one Enter away.
+                        if op == Op::Upload && ok {
+                            self.screen = Screen::Confirm(Confirm::wipe_segments());
+                        }
                     }
                     _ => {}
                 }

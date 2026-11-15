@@ -83,6 +83,63 @@ pub struct Settings {
     /// empty. `~` expands; a relative path is workspace-relative.
     #[serde(default)]
     pub segments_dir: String,
+    /// Where finished chapters are pushed (`:upload`). See [`UploadSettings`].
+    #[serde(default)]
+    pub upload: UploadSettings,
+}
+
+/// The author API `:upload` writes to. The URL is the book's manifest, and a
+/// chapter lands at `<url>/chapters/<n>`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct UploadSettings {
+    /// The book's manifest URL; empty means uploading is off.
+    pub url: String,
+    /// Literal token, held in the machine-local `.bm/settings.json`. Prefer
+    /// [`Self::token_env`]: an exported value never lands on disk.
+    pub token: String,
+    /// Environment variable holding the token. Read before `token`.
+    pub token_env: String,
+}
+
+/// The variable `:upload` reads when a workspace has not named another.
+pub const DEFAULT_UPLOAD_TOKEN_ENV: &str = "STORYCAST_UPLOAD_TOKEN";
+
+impl Default for UploadSettings {
+    fn default() -> Self {
+        UploadSettings {
+            url: String::new(),
+            token: String::new(),
+            token_env: DEFAULT_UPLOAD_TOKEN_ENV.into(),
+        }
+    }
+}
+
+impl UploadSettings {
+    /// The token to send: the environment first, the saved literal second.
+    pub fn token(&self) -> Option<String> {
+        let var = self.token_env.trim();
+        if !var.is_empty() {
+            if let Ok(value) = std::env::var(var) {
+                let value = value.trim().to_string();
+                if !value.is_empty() {
+                    return Some(value);
+                }
+            }
+        }
+        let literal = self.token.trim();
+        (!literal.is_empty()).then(|| literal.to_string())
+    }
+
+    /// The variable to quote when there is no token at all.
+    pub fn token_env_name(&self) -> &str {
+        let var = self.token_env.trim();
+        if var.is_empty() {
+            DEFAULT_UPLOAD_TOKEN_ENV
+        } else {
+            var
+        }
+    }
 }
 
 fn default_excerpt_window() -> u32 {
@@ -259,6 +316,7 @@ impl Default for Settings {
             title_mode: default_title_mode(),
             output_dir: String::new(),
             segments_dir: String::new(),
+            upload: UploadSettings::default(),
         }
     }
 }

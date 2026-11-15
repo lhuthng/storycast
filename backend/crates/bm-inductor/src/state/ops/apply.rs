@@ -200,6 +200,33 @@ impl Inner {
         ))
     }
 
+    /// Drop every cached take, keeping the finished mp3+cues pairs: the
+    /// render cache after an upload, when what it can re-make is on the server.
+    pub(crate) fn op_wipe_segments(&mut self) -> String {
+        let dir = self.layout.audio();
+        let mut folders = 0usize;
+        let mut takes = 0usize;
+        if let Ok(entries) = std::fs::read_dir(&dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if !path.is_dir() {
+                    continue;
+                }
+                let held = std::fs::read_dir(&path)
+                    .map(|rd| rd.filter_map(|e| e.ok()).filter(|e| e.path().is_file()).count())
+                    .unwrap_or(0);
+                if std::fs::remove_dir_all(&path).is_ok() {
+                    folders += 1;
+                    takes += held;
+                }
+            }
+        }
+        if folders == 0 {
+            return "segments: nothing to wipe — the cache is already empty".into();
+        }
+        format!("segments wiped: {takes} take(s) in {folders} chapter folder(s) — output kept")
+    }
+
     /// Record what the chapter index says about a range, before anything is
     pub fn apply_index(&mut self, index: &bm_core::crawl::CrawlIndex) -> usize {
         let mut closed = 0;
