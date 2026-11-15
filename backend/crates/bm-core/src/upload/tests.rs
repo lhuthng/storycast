@@ -105,3 +105,21 @@ fn sha256_matches_the_published_test_vector() {
         "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
     );
 }
+
+#[test]
+fn one_chapter_is_found_by_number() {
+    let root = tmpdir("one");
+    let layout = crate::Layout::new(&root);
+    let out = layout.output();
+    std::fs::create_dir_all(&out).unwrap();
+    std::fs::write(out.join("Ch.4 - Old.mp3"), b"old").unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(10));
+    std::fs::write(out.join("Ch.4 - New.mp3"), b"newer").unwrap();
+    std::fs::write(out.join("Ch.5 - Other.mp3"), b"other").unwrap();
+
+    let found = chapter(&layout, 4).unwrap().expect("ch4");
+    assert_eq!(found.number, 4);
+    assert_eq!(found.sha256, sha256_hex(b"newer"));
+    assert_eq!(found.path.file_name().unwrap(), "Ch.4 - New.mp3");
+    assert!(chapter(&layout, 9).unwrap().is_none());
+}

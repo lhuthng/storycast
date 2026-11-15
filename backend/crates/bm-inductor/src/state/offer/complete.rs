@@ -254,6 +254,13 @@ impl Inner {
                     let side = bm_core::assemble::cues_path(&final_mp3);
                     self.layout
                         .drop_chapter_outputs(chapter, &[final_mp3, side]);
+                    // Auto mode: the pair is on disk, so the push can start the
+                    // moment the handler is out of this lock.
+                    if self.settings.upload.on_merge
+                        && !self.settings.upload.url.trim().is_empty()
+                    {
+                        self.upload_pending.push(chapter);
+                    }
                 }
                 // The design this mp3 was mixed under, read *before* the borrow
                 let design = if stage == Stage::Merge {

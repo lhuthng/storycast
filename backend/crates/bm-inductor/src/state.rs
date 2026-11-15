@@ -103,6 +103,10 @@ pub struct Inner {
     /// Boxes taken out of service whose cloud-side delete has not succeeded
     /// yet. Persisted, so a restart resumes the delete instead of leaking it.
     pub(crate) intents: Vec<DeleteIntent>,
+    /// Chapters whose merge just landed and whose bytes still have to go to the
+    /// author API (`upload.on_merge`). In memory only: a restart uploads
+    /// nothing, and `:upload` still catches whatever this lost.
+    pub(crate) upload_pending: Vec<u32>,
 }
 
 /// Delete this id on this provider, until the provider agrees it is gone.

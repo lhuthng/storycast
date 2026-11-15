@@ -316,11 +316,28 @@ pub(crate) fn do_command(
             app.screen = Screen::Text(TextPrompt::new(
                 TextKind::UploadKey,
                 "Upload token",
-                "the bearer token for the author API, saved in this workspace's \
-                 `.bm/settings.json`. `STORYCAST_UPLOAD_TOKEN` wins when it is exported. \
-                 Empty clears it.",
+                "the bearer token for the author API, saved in this workspace's `.bm/settings.json`. `STORYCAST_UPLOAD_TOKEN` wins when it is exported. Empty clears it.",
                 &cur,
             ));
+        }
+        Command::UploadAuto { on } => {
+            let mut settings = bm_core::config::Settings::load(&app.layout.settings());
+            if on && settings.upload.url.trim().is_empty() {
+                app.set_status(Level::Warn, "no upload target yet — set `:uploadurl` first");
+                return;
+            }
+            settings.upload.on_merge = on;
+            match settings.save(&app.layout.settings()) {
+                Ok(()) if on => app.set_status(
+                    Level::Ok,
+                    "auto-push on: a chapter goes to the author API as its merge lands",
+                ),
+                Ok(()) => app.set_status(
+                    Level::Info,
+                    "auto-push off: finished chapters wait in output/ for `:upload`",
+                ),
+                Err(e) => app.set_status(Level::Error, format!("{e:#}")),
+            }
         }
         Command::OutputDir => {
             let cur = stage_dir_raw(app, bm_core::stage_dir::StageDir::Output);

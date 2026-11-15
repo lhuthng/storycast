@@ -82,6 +82,7 @@ async fn the_push_speaks_the_documented_author_api() {
         url: format!("http://{addr}/api/author/audiobooks/id/1"),
         token: "abk_test".into(),
         token_env: "STORYCAST_UPLOAD_TOKEN_UNSET".into(),
+        on_merge: false,
     };
     let http = reqwest::Client::new();
     let report = bm_core::upload::run(&settings, &http, &layout)

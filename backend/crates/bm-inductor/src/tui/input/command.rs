@@ -91,6 +91,8 @@ pub(crate) enum Command {
     UploadUrl,
     /// The bearer token the push sends (`:uploadkey`).
     UploadKey,
+    /// Arm or stop the on-merge push (`:upload-auto` / `:upload-manual`).
+    UploadAuto { on: bool },
     /// Start or stop distributing work (`:go` / `:hold`).
     Dispatch {
         go: bool,
@@ -182,6 +184,8 @@ pub(crate) static WORDS: &[Word] = &[
     Word { key: None, names: &["upload-dry", "uploaddiff"], desc: Some("what :upload would send — reads the manifest and lists new/replace/unchanged per chapter in the log; sends nothing"), cmd: Command::UploadDry },
     Word { key: None, names: &["uploadurl"], desc: Some("the book API's manifest URL, e.g. `:uploadurl https://site/api/author/audiobooks/id/1` — a chapter is written to `<url>/chapters/<n>`"), cmd: Command::UploadUrl },
     Word { key: None, names: &["uploadkey"], desc: Some("the API bearer token — saved in this workspace's `.bm/settings.json`; `STORYCAST_UPLOAD_TOKEN` wins when exported"), cmd: Command::UploadKey },
+    Word { key: None, names: &["upload-auto"], desc: Some("push each chapter as its merge lands instead of waiting for `:upload` — same hash diff, one chapter at a time"), cmd: Command::UploadAuto { on: true } },
+    Word { key: None, names: &["upload-manual"], desc: Some("stop the on-merge push; finished chapters wait in output/ for `:upload` again"), cmd: Command::UploadAuto { on: false } },
     Word { key: None, names: &["rerender"], desc: Some("requeue every render + merge — full re-speak, asks first"), cmd: Command::Rerender },
     Word { key: None, names: &["shutdown-when-idle", "drain"], desc: Some("workers exit on their own once the queue drains — restart with :B"), cmd: Command::ShutdownWhenIdle },
     Word { key: None, names: &["xdrop"], desc: Some("drop the queued exclusive write (a merge/remix/retag waiting for the cluster to quiet) — :xdrop remix drops only that kind"), cmd: Command::ExclusiveCancel { route: None } },

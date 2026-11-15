@@ -11,7 +11,7 @@ use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 #[cfg(test)]
 mod tests;
@@ -141,7 +141,7 @@ pub fn chapters(layout: &crate::Layout) -> Result<Vec<Local>> {
     let Ok(entries) = std::fs::read_dir(layout.output()) else {
         return Ok(Vec::new());
     };
-    let mut newest: BTreeMap<u32, (u64, PathBuf, String)> = BTreeMap::new();
+    let mut newest: BTreeMap<u32, (SystemTime, PathBuf, String)> = BTreeMap::new();
     for entry in entries.flatten() {
         let path = entry.path();
         let Some((number, title)) = path
@@ -152,30 +152,78 @@ pub fn chapters(layout: &crate::Layout) -> Result<Vec<Local>> {
         else {
             continue;
         };
-        let mtime = entry
-            .metadata()
-            .and_then(|m| m.modified())
-            .ok()
-            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        if newest.get(&number).is_none_or(|(seen, ..)| mtime >= *seen) {
+        let mtime = mtime_of(&entry);
+        if newest
+            .get(&number)
+            .is_none_or(|(seen, seen_path, _)| newer(mtime, &path, *seen, seen_path))
+        {
             newest.insert(number, (mtime, path, title));
         }
     }
     let mut out = Vec::with_capacity(newest.len());
     for (number, (_, path, title)) in newest {
-        let bytes = std::fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
-        out.push(Local {
-            number,
-            duration_s: duration_s(&crate::assemble::cues_path(&path)),
-            sha256: sha256_hex(&bytes),
-            size: bytes.len() as u64,
-            title,
-            path,
-        });
+        out.push(local_at(path, number, title)?);
     }
     Ok(out)
+}
+
+fn mtime_of(entry: &std::fs::DirEntry) -> SystemTime {
+    entry
+        .metadata()
+        .and_then(|m| m.modified())
+        .unwrap_or(SystemTime::UNIX_EPOCH)
+}
+
+/// Which of two files for the same chapter is the one on disk today: the newer,
+/// and on a tie the later name (a deterministic answer where the clock is not).
+fn newer(mtime: SystemTime, path: &Path, seen: SystemTime, seen_path: &Path) -> bool {
+    mtime > seen || (mtime == seen && path > seen_path)
+}
+
+/// One chapter's finished file, if `output/` holds it: the newest title wins.
+pub fn chapter(layout: &crate::Layout, number: u32) -> Result<Option<Local>> {
+    let Ok(entries) = std::fs::read_dir(layout.output()) else {
+        return Ok(None);
+    };
+    let mut newest: Option<(SystemTime, PathBuf, String)> = None;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Some((n, title)) = path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .and_then(parse_output_name)
+            .map(|(n, t)| (n, t.to_string()))
+        else {
+            continue;
+        };
+        if n != number {
+            continue;
+        }
+        let mtime = mtime_of(&entry);
+        if newest
+            .as_ref()
+            .is_none_or(|(seen, seen_path, _)| newer(mtime, &path, *seen, seen_path))
+        {
+            newest = Some((mtime, path, title));
+        }
+    }
+    match newest {
+        Some((_, path, title)) => Ok(Some(local_at(path, number, title)?)),
+        None => Ok(None),
+    }
+}
+
+/// Read one finished file into the hash a push needs.
+fn local_at(path: PathBuf, number: u32, title: String) -> Result<Local> {
+    let bytes = std::fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
+    Ok(Local {
+        number,
+        duration_s: duration_s(&crate::assemble::cues_path(&path)),
+        sha256: sha256_hex(&bytes),
+        size: bytes.len() as u64,
+        title,
+        path,
+    })
 }
 
 /// The duration the mix was written on, which is the cue sidecar's clock.
@@ -278,6 +326,40 @@ pub async fn run(
         }
     }
     Ok(report)
+}
+
+/// Push one chapter, for the on-merge mode. `Ok(None)` means the server already
+/// holds those exact bytes, so nothing crossed the wire.
+pub async fn push_chapter(
+    settings: &UploadSettings,
+    http: &reqwest::Client,
+    layout: &crate::Layout,
+    number: u32,
+) -> Result<Option<Report>> {
+    let base = base_url(settings)?;
+    let token = token(settings)?;
+    let Some(local) = chapter(layout, number)? else {
+        bail!(
+            "chapter {number} has no finished mp3 in {}",
+            layout.output().display()
+        );
+    };
+    let manifest = fetch_manifest(http, base, &token).await?;
+    let planned = plan(&[local], &manifest);
+    let planned = &planned[0];
+    if planned.action == Action::Unchanged {
+        return Ok(None);
+    }
+    let bytes = std::fs::read(&planned.local.path)
+        .with_context(|| format!("reading {}", planned.local.path.display()))?;
+    let size = bytes.len() as u64;
+    put(http, base, &token, &planned.local, bytes).await?;
+    Ok(Some(Report {
+        created: usize::from(planned.action == Action::Create),
+        replaced: usize::from(planned.action == Action::Replace),
+        unchanged: 0,
+        bytes: size,
+    }))
 }
 
 async fn fetch_manifest(http: &reqwest::Client, base: &str, token: &str) -> Result<Manifest> {

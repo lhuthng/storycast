@@ -569,11 +569,15 @@ async fn run_one(
         collect_units(layout, http, peer, chapter, &engine).await;
     }
 
-    let line = {
+    let (line, pending) = {
         let mut inner = state.lock().await;
-        inner.complete(&complete)
+        let line = inner.complete(&complete);
+        (line, inner.take_upload_pending())
     };
     println!("dispatch: {line}");
+    for chapter in pending {
+        crate::api::spawn_chapter_upload(state.clone(), chapter);
+    }
 }
 
 /// Ask the worker for every unit the inductor does not have.

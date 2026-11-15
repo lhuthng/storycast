@@ -727,6 +727,41 @@ fn merge_without_a_payload_needs_the_file_on_disk() {
 }
 
 #[test]
+fn a_finished_merge_is_queued_for_the_push_when_auto_mode_is_on() {
+    let (_d, mut inner) = fixture();
+    let layout = inner.layout.clone();
+    inner.settings.upload.url = "https://example.test/api/author/audiobooks/id/1".into();
+    inner.settings.upload.on_merge = true;
+
+    let mut t = Task::new(8, Stage::Merge);
+    t.state = TaskState::Running;
+    t.assigned_to = Some("w1".into());
+    inner.tasks.insert("merge:8".into(), t);
+    std::fs::create_dir_all(layout.final_mp3(8).parent().unwrap()).unwrap();
+    std::fs::write(layout.final_mp3(8), vec![0u8; 2000]).unwrap();
+
+    inner.complete(&completion("w1", "merge:8", true, "merge ch8 -> out.mp3"));
+    assert_eq!(inner.take_upload_pending(), vec![8]);
+    assert!(
+        inner.take_upload_pending().is_empty(),
+        "the caller drains it once"
+    );
+
+    // Manual mode queues nothing: `:upload` is the only way.
+    inner.settings.upload.on_merge = false;
+    let mut t = Task::new(9, Stage::Merge);
+    t.state = TaskState::Running;
+    t.assigned_to = Some("w1".into());
+    inner.tasks.insert("merge:9".into(), t);
+    std::fs::write(layout.final_mp3(9), vec![0u8; 2000]).unwrap();
+    inner.complete(&completion("w1", "merge:9", true, "merge ch9 -> out.mp3"));
+    assert!(
+        inner.take_upload_pending().is_empty(),
+        "manual mode queues nothing"
+    );
+}
+
+#[test]
 fn render_offer_requires_the_upload_capability() {
     // Staged rollout: an agent without `render-segments` keeps every
     let (_d, mut inner) = fixture();

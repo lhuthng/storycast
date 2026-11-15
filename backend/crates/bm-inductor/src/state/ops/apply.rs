@@ -227,6 +227,12 @@ impl Inner {
         format!("segments wiped: {takes} take(s) in {folders} chapter folder(s) — output kept")
     }
 
+    /// Chapters the auto-push still owes the server, drained by the caller so
+    /// the network work happens outside this lock.
+    pub(crate) fn take_upload_pending(&mut self) -> Vec<u32> {
+        std::mem::take(&mut self.upload_pending)
+    }
+
     /// Record what the chapter index says about a range, before anything is
     pub fn apply_index(&mut self, index: &bm_core::crawl::CrawlIndex) -> usize {
         let mut closed = 0;

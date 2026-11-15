@@ -95,10 +95,49 @@ async fn complete(State(st): State<Shared>, Json(c): Json<Complete>) -> impl Int
         };
         store_shipments(&layout, &engine, &c.task_id, &c.unit_files);
     }
-    let mut inner = st.lock().await;
-    let line = inner.complete(&c);
+    let (line, pending) = {
+        let mut inner = st.lock().await;
+        let line = inner.complete(&c);
+        (line, inner.take_upload_pending())
+    };
     println!("{line}");
+    for chapter in pending {
+        spawn_chapter_upload(st.clone(), chapter);
+    }
     Json(serde_json::json!({"ok": true}))
+}
+
+/// Push one chapter whose merge just landed, when the workspace auto-uploads.
+/// Detached: the completion handler answers the worker now, not after an upload.
+pub(crate) fn spawn_chapter_upload(st: Shared, chapter: u32) {
+    tokio::spawn(async move {
+        let (layout, upload) = {
+            let inner = st.lock().await;
+            (inner.layout.clone(), inner.settings.upload.clone())
+        };
+        if upload.url.trim().is_empty() {
+            return;
+        }
+        let http = match reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(1800))
+            .build()
+        {
+            Ok(http) => http,
+            Err(e) => {
+                st.lock()
+                    .await
+                    .push_event("error", format!("upload ch{chapter}: no client: {e}"));
+                return;
+            }
+        };
+        let (level, text) =
+            match bm_core::upload::push_chapter(&upload, &http, &layout, chapter).await {
+                Ok(Some(report)) => ("ok", format!("upload ch{chapter}: {}", report.summary())),
+                Ok(None) => ("info", format!("upload ch{chapter}: already on the server")),
+                Err(e) => ("error", format!("upload ch{chapter} failed: {e:#}")),
+            };
+        st.lock().await.push_event(level, text);
+    });
 }
 
 /// Store the takes a completion report ships, before the row turns Done.

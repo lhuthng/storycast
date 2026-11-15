@@ -29,6 +29,7 @@ impl Inner {
             unreadable_tasks: Vec::new(),
             exclusive: Vec::new(),
             intents: Vec::new(),
+            upload_pending: Vec::new(),
         }
     }
 

@@ -100,6 +100,9 @@ pub struct UploadSettings {
     pub token: String,
     /// Environment variable holding the token. Read before `token`.
     pub token_env: String,
+    /// Push a chapter as soon as its merge lands, instead of waiting for
+    /// `:upload`. Off by default: a book's merge queue can be long.
+    pub on_merge: bool,
 }
 
 /// The variable `:upload` reads when a workspace has not named another.
@@ -111,6 +114,7 @@ impl Default for UploadSettings {
             url: String::new(),
             token: String::new(),
             token_env: DEFAULT_UPLOAD_TOKEN_ENV.into(),
+            on_merge: false,
         }
     }
 }
