@@ -233,6 +233,8 @@ fn command_line_maps_keys_and_words() {
     }
     assert_eq!(command_key("rerender"), Some(Command::Rerender));
     assert_eq!(command_key("remerge"), Some(Command::Remerge));
+    assert_eq!(command_key("upload"), Some(Command::Upload));
+    assert_eq!(command_key("upload-dry"), Some(Command::UploadDry));
     // Merge names the pair: first survives, the rest are absorbed. Quotes
     assert_eq!(
         command_key("merge \"Huyền Vũ\" \"Huyền Vũ lão tổ\""),

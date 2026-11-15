@@ -85,6 +85,8 @@ pub(crate) enum Command {
     /// Push finished chapters to the author API (`:upload`): its manifest is
     /// the diff, so only the chapters whose sha256 differs are sent.
     Upload,
+    /// What `:upload` would send, without sending it (`:upload-dry`).
+    UploadDry,
     /// The manifest URL the push writes to (`:uploadurl`).
     UploadUrl,
     /// The bearer token the push sends (`:uploadkey`).
@@ -177,6 +179,7 @@ pub(crate) static WORDS: &[Word] = &[
     Word { key: None, names: &["sound", "sounds", "pools"], desc: Some("the three clip pools: add, edit, retune, remove"), cmd: Command::Sound },
     Word { key: None, names: &["remerge"], desc: Some("requeue every merge — finished mp3s deleted and rebuilt; asks first"), cmd: Command::Remerge },
     Word { key: None, names: &["upload", "publish"], desc: Some("push finished chapters to the author API — reads its manifest and sends only the ones whose sha256 differs; asks whether to wipe the cached takes after"), cmd: Command::Upload },
+    Word { key: None, names: &["upload-dry", "uploaddiff"], desc: Some("what :upload would send — reads the manifest and lists new/replace/unchanged per chapter in the log; sends nothing"), cmd: Command::UploadDry },
     Word { key: None, names: &["uploadurl"], desc: Some("the book API's manifest URL, e.g. `:uploadurl https://site/api/author/audiobooks/id/1` — a chapter is written to `<url>/chapters/<n>`"), cmd: Command::UploadUrl },
     Word { key: None, names: &["uploadkey"], desc: Some("the API bearer token — saved in this workspace's `.bm/settings.json`; `STORYCAST_UPLOAD_TOKEN` wins when exported"), cmd: Command::UploadKey },
     Word { key: None, names: &["rerender"], desc: Some("requeue every render + merge — full re-speak, asks first"), cmd: Command::Rerender },

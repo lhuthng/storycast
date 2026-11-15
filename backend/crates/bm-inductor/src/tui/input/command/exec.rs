@@ -286,6 +286,17 @@ pub(crate) fn do_command(
                 },
             );
         }
+        Command::UploadDry => {
+            dispatch_op(
+                app,
+                job_tx,
+                http,
+                OpRequest {
+                    op: Op::UploadDry,
+                    ..Default::default()
+                },
+            );
+        }
         Command::UploadUrl => {
             let cur = bm_core::config::Settings::load(&app.layout.settings())
                 .upload

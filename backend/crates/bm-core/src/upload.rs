@@ -53,10 +53,28 @@ pub enum Action {
     Unchanged,
 }
 
+impl Action {
+    /// The verb a dry run prints for this chapter.
+    pub fn label(self) -> &'static str {
+        match self {
+            Action::Create => "new",
+            Action::Replace => "replace",
+            Action::Unchanged => "unchanged",
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Planned {
     pub local: Local,
     pub action: Action,
+}
+
+impl Planned {
+    /// One chapter, one word: `ch17 replace`.
+    pub fn describe(&self) -> String {
+        format!("ch{} {}", self.local.number, self.action.label())
+    }
 }
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -69,6 +87,19 @@ pub struct Report {
 }
 
 impl Report {
+    /// The counts a plan implies, without sending it.
+    pub fn of(planned: &[Planned]) -> Report {
+        let mut report = Report::default();
+        for planned in planned {
+            match planned.action {
+                Action::Create => report.created += 1,
+                Action::Replace => report.replaced += 1,
+                Action::Unchanged => report.unchanged += 1,
+            }
+        }
+        report
+    }
+
     pub fn summary(&self) -> String {
         if self.created + self.replaced == 0 {
             return format!(
@@ -177,22 +208,25 @@ pub fn plan(local: &[Local], manifest: &Manifest) -> Vec<Planned> {
         .collect()
 }
 
-/// Read the manifest, diff by hash, and PUT only what differs.
-pub async fn run(
-    settings: &UploadSettings,
-    http: &reqwest::Client,
-    layout: &crate::Layout,
-) -> Result<Report> {
+/// The manifest URL with no trailing slash; empty is not a target.
+fn base_url(settings: &UploadSettings) -> Result<&str> {
     let base = settings.url.trim().trim_end_matches('/');
     if base.is_empty() {
         bail!("no upload target — set it with `:uploadurl <manifest url>`");
     }
-    let token = settings.token().with_context(|| {
+    Ok(base)
+}
+
+fn token(settings: &UploadSettings) -> Result<String> {
+    settings.token().with_context(|| {
         format!(
             "no upload token — set it with `:uploadkey`, or export {}",
             settings.token_env_name()
         )
-    })?;
+    })
+}
+
+fn local_chapters(layout: &crate::Layout) -> Result<Vec<Local>> {
     let local = chapters(layout)?;
     if local.is_empty() {
         bail!(
@@ -200,6 +234,32 @@ pub async fn run(
             layout.output().display()
         );
     }
+    Ok(local)
+}
+
+/// The diff a push would write, without sending anything: the manifest read
+/// and the hash compare, and not one PUT.
+pub async fn dry(
+    settings: &UploadSettings,
+    http: &reqwest::Client,
+    layout: &crate::Layout,
+) -> Result<Vec<Planned>> {
+    let base = base_url(settings)?;
+    let token = token(settings)?;
+    let local = local_chapters(layout)?;
+    let manifest = fetch_manifest(http, base, &token).await?;
+    Ok(plan(&local, &manifest))
+}
+
+/// Read the manifest, diff by hash, and PUT only what differs.
+pub async fn run(
+    settings: &UploadSettings,
+    http: &reqwest::Client,
+    layout: &crate::Layout,
+) -> Result<Report> {
+    let base = base_url(settings)?;
+    let token = token(settings)?;
+    let local = local_chapters(layout)?;
     let manifest = fetch_manifest(http, base, &token).await?;
     let mut report = Report::default();
     for planned in plan(&local, &manifest) {

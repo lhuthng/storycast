@@ -354,16 +354,40 @@ pub(crate) async fn op(State(st): State<Shared>, Json(req): Json<OpRequest>) -> 
                 let inner = st.lock().await;
                 (inner.layout.clone(), inner.settings.upload.clone())
             };
-            let http = match reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(1800))
-                .build()
-            {
+            let http = match upload_client() {
                 Ok(http) => http,
                 Err(e) => return Json(OpResult::fail(format!("upload failed: {e}"))),
             };
             match bm_core::upload::run(&upload, &http, &layout).await {
                 Ok(report) => Json(OpResult::ok(report.summary())),
                 Err(e) => Json(OpResult::fail(format!("upload failed: {e:#}"))),
+            }
+        }
+        bm_proto::Op::UploadDry => {
+            let (layout, upload) = {
+                let inner = st.lock().await;
+                (inner.layout.clone(), inner.settings.upload.clone())
+            };
+            let http = match upload_client() {
+                Ok(http) => http,
+                Err(e) => return Json(OpResult::fail(format!("upload-dry failed: {e}"))),
+            };
+            match bm_core::upload::dry(&upload, &http, &layout).await {
+                Ok(planned) => {
+                    let report = bm_core::upload::Report::of(&planned);
+                    // One event per line of eight, so a book's diff reads in
+                    // the log instead of one paragraph on the status line.
+                    let mut inner = st.lock().await;
+                    for chunk in planned.chunks(8) {
+                        let line: Vec<String> = chunk.iter().map(|p| p.describe()).collect();
+                        inner.push_event("info", format!("upload-dry: {}", line.join(" · ")));
+                    }
+                    Json(OpResult::ok(format!(
+                        "upload-dry: {} new, {} replace, {} unchanged — nothing sent",
+                        report.created, report.replaced, report.unchanged
+                    )))
+                }
+                Err(e) => Json(OpResult::fail(format!("upload-dry failed: {e:#}"))),
             }
         }
         bm_proto::Op::WipeSegments => {
@@ -437,6 +461,14 @@ pub(crate) async fn op(State(st): State<Shared>, Json(req): Json<OpRequest>) -> 
             }
         }
     }
+}
+
+/// The client a push uses: a whole book's chapter PUTs outlive any op-sized
+/// budget, and both `upload` and `upload-dry` read the manifest through it.
+fn upload_client() -> reqwest::Result<reqwest::Client> {
+    reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(1800))
+        .build()
 }
 
 /// Fold duplicates: deterministic canon-key folds over the bible AND the cast

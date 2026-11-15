@@ -1574,6 +1574,9 @@ pub enum Op {
     /// read its manifest, then PUT only the chapters whose sha256 differs.
     /// Nothing local is touched, so it is safe to run at any time.
     Upload,
+    /// What `Upload` would send, without sending it: read the manifest, compare
+    /// every finished chapter's sha256, and report new/replace/unchanged.
+    UploadDry,
     /// Delete every cached render take; the finished mp3+cues pairs stay.
     /// `:upload` offers this once its push is done, because the takes are what
     /// a wipe reclaims and the published pairs are what `output/` still serves.
@@ -1627,6 +1630,7 @@ impl Op {
             Op::Rerender => "rerender",
             Op::Remerge => "remerge",
             Op::Upload => "upload",
+            Op::UploadDry => "upload-dry",
             Op::WipeSegments => "wipe-segments",
             Op::ShutdownWorkers => "shutdown-workers",
             Op::ShutdownWhenIdle => "shutdown-when-idle",
@@ -1660,6 +1664,7 @@ impl Op {
             Op::Rerender,
             Op::Remerge,
             Op::Upload,
+            Op::UploadDry,
             Op::WipeSegments,
             Op::ShutdownWorkers,
             Op::ShutdownWhenIdle,

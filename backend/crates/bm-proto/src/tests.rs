@@ -211,6 +211,7 @@ fn ops_roundtrip_through_kebab_case() {
         Op::Rerender,
         Op::Remerge,
         Op::Upload,
+        Op::UploadDry,
         Op::WipeSegments,
     ] {
         assert_eq!(Op::parse(op.as_str()), Some(op));

@@ -39,6 +39,22 @@ fn the_manifest_diff_is_the_hash() {
 }
 
 #[test]
+fn a_dry_run_counts_and_names_every_chapter() {
+    let mine = vec![local(1, "aa"), local(2, "bb"), local(3, "cc")];
+    let theirs = Manifest {
+        chapters: vec![remote(2, "zz")],
+    };
+    let planned = plan(&mine, &theirs);
+    let report = Report::of(&planned);
+    assert_eq!(
+        (report.created, report.replaced, report.unchanged),
+        (2, 1, 0)
+    );
+    let lines: Vec<String> = planned.iter().map(|p| p.describe()).collect();
+    assert_eq!(lines, ["ch1 new", "ch2 replace", "ch3 new"]);
+}
+
+#[test]
 fn an_empty_manifest_creates_every_chapter() {
     let mine = vec![local(1, "aa")];
     let plan = plan(&mine, &Manifest::default());
