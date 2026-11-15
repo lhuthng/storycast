@@ -11,6 +11,7 @@ use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 #[cfg(test)]
 mod tests;
@@ -305,33 +306,57 @@ async fn put(
     chapter: &Local,
     bytes: Vec<u8>,
 ) -> Result<()> {
-    let mut req = http
-        .put(format!("{base}/chapters/{}", chapter.number))
-        .bearer_auth(token)
-        .header("Content-Type", "audio/mpeg")
-        .header("X-Content-SHA256", &chapter.sha256)
-        .query(&[("title", chapter.title.as_str())]);
-    if let Some(d) = chapter.duration_s {
-        req = req.query(&[("duration_seconds", d.to_string())]);
-    }
-    let resp = req
-        .body(bytes)
-        .send()
-        .await
-        .with_context(|| format!("sending chapter {}", chapter.number))?;
-    let status = resp.status();
-    match status.as_u16() {
-        200 | 201 => Ok(()),
-        422 => {
-            let body = resp.text().await.unwrap_or_default();
-            bail!(
-                "chapter {} refused (422): the server's hash check disagreed — {body}",
-                chapter.number
-            )
+    // A transient 500 on one chapter must not end a thousand-chapter push, and
+    // the write is idempotent: the same bytes can go again.
+    let mut attempt = 0;
+    loop {
+        attempt += 1;
+        let mut req = http
+            .put(format!("{base}/chapters/{}", chapter.number))
+            .bearer_auth(token)
+            .header("Content-Type", "audio/mpeg")
+            .header("X-Content-SHA256", &chapter.sha256)
+            .query(&[("title", chapter.title.as_str())]);
+        if let Some(d) = chapter.duration_s {
+            req = req.query(&[("duration_seconds", d.to_string())]);
         }
-        other => {
-            let body = resp.text().await.unwrap_or_default();
-            bail!("chapter {} answered {other}: {body}", chapter.number)
+        let pause = Duration::from_secs(2 * u64::from(attempt));
+        match req.body(bytes.clone()).send().await {
+            Ok(resp) => match resp.status().as_u16() {
+                200 | 201 => return Ok(()),
+                422 => {
+                    let body = resp.text().await.unwrap_or_default();
+                    bail!(
+                        "chapter {} refused (422): the server's hash check disagreed — {body}",
+                        chapter.number
+                    )
+                }
+                code if code == 429 || (500..=599).contains(&code) => {
+                    let body = resp.text().await.unwrap_or_default();
+                    if attempt >= PUT_ATTEMPTS {
+                        bail!(
+                            "chapter {} answered {code} after {attempt} attempts: {body}",
+                            chapter.number
+                        )
+                    }
+                    tokio::time::sleep(pause).await;
+                }
+                other => {
+                    let body = resp.text().await.unwrap_or_default();
+                    bail!("chapter {} answered {other}: {body}", chapter.number)
+                }
+            },
+            Err(e) => {
+                if attempt >= PUT_ATTEMPTS {
+                    return Err(e).with_context(|| {
+                        format!("sending chapter {} ({attempt} attempts)", chapter.number)
+                    });
+                }
+                tokio::time::sleep(pause).await;
+            }
         }
     }
 }
+
+/// How many times one chapter PUT is tried before the push gives up on it.
+const PUT_ATTEMPTS: u32 = 4;
