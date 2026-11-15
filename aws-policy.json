@@ -9,7 +9,17 @@
         "ec2:DescribeImages",
         "ec2:DescribeSubnets",
         "ec2:DescribeSecurityGroups",
-        "ec2:DescribeKeyPairs"
+        "ec2:DescribeKeyPairs",
+        "ec2:DescribeInstanceTypes"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "ReadTheVcpuQuota",
+      "Effect": "Allow",
+      "Action": [
+        "service-quotas:GetServiceQuota",
+        "service-quotas:ListServiceQuotas"
       ],
       "Resource": "*"
     },

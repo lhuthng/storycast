@@ -23,7 +23,7 @@
   "_note_max_workers": "Hard cap on concurrently registered cloud boxes. A launch that would exceed it is refused rather than left to the caller's arithmetic.",
   "max_workers": 8,
   "_note_ttl_hours": "Default lifetime. A box that outlives its work is the whole cost of a cloud pool.",
-  "ttl_hours": 6,
+  "ttl_hours": 7,
   "_note_tag_key": "Every box this tool starts carries this tag, so `ls` and `down` can never touch anything else in the account. Its value is the profile hash the box was launched for.",
   "tag_key": "storycast-worker"
 }
