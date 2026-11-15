@@ -378,6 +378,67 @@ pub(crate) async fn op(State(st): State<Shared>, Json(req): Json<OpRequest>) -> 
                     // One event per line of eight, so a book's diff reads in
                     // the log instead of one paragraph on the status line.
                     let mut inner = st.lock().await;
+                    // The manifest is ground truth: a chapter it already holds
+                    // is delivered, whatever the local folder says.
+                    let mut known = 0usize;
+                    for p in &planned {
+                        if p.action == bm_core::upload::Action::Unchanged {
+                            inner.delivered.insert(
+                                p.local.number,
+                                crate::state::Delivery {
+                                    sha256: p.local.sha256.clone(),
+                                    at: bm_proto::now_secs(),
+                                },
+                            );
+                            known += 1;
+                        }
+                    }
+                    if known > 0 {
+                        inner.save();
+                        inner.push_event(
+                            "info",
+                            format!(
+                                "upload-dry: {known} chapter(s) the server already holds marked delivered — they need no merge or local file"
+                            ),
+                        );
+                    }
+                    // The other direction: a chapter the ledger says is merged,
+                    // present on the server, and gone locally was delivered too.
+                    if let Ok(manifest) = bm_core::upload::manifest(&upload, &http).await {
+                        let mut backfilled = 0usize;
+                        for rc in &manifest.chapters {
+                            if rc.sha256.is_empty() || inner.delivered.contains_key(&rc.number) {
+                                continue;
+                            }
+                            let merged = inner
+                                .tasks
+                                .get(&format!("merge:{}", rc.number))
+                                .is_some_and(|t| t.state == bm_proto::TaskState::Done);
+                            let local = bm_core::upload::chapter(&layout, rc.number)
+                                .ok()
+                                .flatten()
+                                .is_some();
+                            if merged && !local {
+                                inner.delivered.insert(
+                                    rc.number,
+                                    crate::state::Delivery {
+                                        sha256: rc.sha256.clone(),
+                                        at: bm_proto::now_secs(),
+                                    },
+                                );
+                                backfilled += 1;
+                            }
+                        }
+                        if backfilled > 0 {
+                            inner.save();
+                            inner.push_event(
+                                "info",
+                                format!(
+                                    "upload-dry: {backfilled} merged chapter(s) on the server with no local file marked delivered — reconcile will not rebuild them"
+                                ),
+                            );
+                        }
+                    }
                     for chunk in planned.chunks(8) {
                         let line: Vec<String> = chunk.iter().map(|p| p.describe()).collect();
                         inner.push_event("info", format!("upload-dry: {}", line.join(" · ")));

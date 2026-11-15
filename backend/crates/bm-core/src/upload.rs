@@ -328,14 +328,20 @@ pub async fn run(
     Ok(report)
 }
 
-/// Push one chapter, for the on-merge mode. `Ok(None)` means the server already
-/// holds those exact bytes, so nothing crossed the wire.
+/// What one chapter's push did: the hash actually delivered, and the counts.
+/// A report of zero sends means the server already held those bytes.
+pub struct Pushed {
+    pub sha256: String,
+    pub report: Report,
+}
+
+/// Push one chapter, for the on-merge mode.
 pub async fn push_chapter(
     settings: &UploadSettings,
     http: &reqwest::Client,
     layout: &crate::Layout,
     number: u32,
-) -> Result<Option<Report>> {
+) -> Result<Pushed> {
     let base = base_url(settings)?;
     let token = token(settings)?;
     let Some(local) = chapter(layout, number)? else {
@@ -347,19 +353,33 @@ pub async fn push_chapter(
     let manifest = fetch_manifest(http, base, &token).await?;
     let planned = plan(&[local], &manifest);
     let planned = &planned[0];
+    let sha256 = planned.local.sha256.clone();
     if planned.action == Action::Unchanged {
-        return Ok(None);
+        return Ok(Pushed {
+            sha256,
+            report: Report::default(),
+        });
     }
     let bytes = std::fs::read(&planned.local.path)
         .with_context(|| format!("reading {}", planned.local.path.display()))?;
     let size = bytes.len() as u64;
     put(http, base, &token, &planned.local, bytes).await?;
-    Ok(Some(Report {
-        created: usize::from(planned.action == Action::Create),
-        replaced: usize::from(planned.action == Action::Replace),
-        unchanged: 0,
-        bytes: size,
-    }))
+    Ok(Pushed {
+        sha256,
+        report: Report {
+            created: usize::from(planned.action == Action::Create),
+            replaced: usize::from(planned.action == Action::Replace),
+            unchanged: 0,
+            bytes: size,
+        },
+    })
+}
+
+/// The server's manifest, for callers that need ground truth without a plan.
+pub async fn manifest(settings: &UploadSettings, http: &reqwest::Client) -> Result<Manifest> {
+    let base = base_url(settings)?;
+    let token = token(settings)?;
+    fetch_manifest(http, base, &token).await
 }
 
 async fn fetch_manifest(http: &reqwest::Client, base: &str, token: &str) -> Result<Manifest> {

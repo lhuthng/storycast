@@ -118,6 +118,35 @@ pub(crate) fn spawn_chapter_upload(st: Shared, chapter: u32) {
         if upload.url.trim().is_empty() {
             return;
         }
+        // No file and a confirmed delivery is the healthy steady state of the
+        // output-off mode: nothing to send, and certainly nothing to rebuild.
+        match bm_core::upload::chapter(&layout, chapter) {
+            Ok(Some(_)) => {}
+            Ok(None) => {
+                let mut inner = st.lock().await;
+                if inner.delivered.contains_key(&chapter) {
+                    inner.push_event(
+                        "info",
+                        format!("upload ch{chapter}: already delivered, nothing on disk to send"),
+                    );
+                } else {
+                    inner.push_event(
+                        "error",
+                        format!(
+                            "upload ch{chapter}: no finished mp3 in {} — the chapter needs a merge first",
+                            layout.output().display()
+                        ),
+                    );
+                }
+                return;
+            }
+            Err(e) => {
+                st.lock()
+                    .await
+                    .push_event("error", format!("upload ch{chapter}: {e:#}"));
+                return;
+            }
+        }
         let http = match reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(1800))
             .build()
@@ -130,13 +159,39 @@ pub(crate) fn spawn_chapter_upload(st: Shared, chapter: u32) {
                 return;
             }
         };
-        let (level, text) =
-            match bm_core::upload::push_chapter(&upload, &http, &layout, chapter).await {
-                Ok(Some(report)) => ("ok", format!("upload ch{chapter}: {}", report.summary())),
-                Ok(None) => ("info", format!("upload ch{chapter}: already on the server")),
-                Err(e) => ("error", format!("upload ch{chapter} failed: {e:#}")),
-            };
-        st.lock().await.push_event(level, text);
+        let pushed = match bm_core::upload::push_chapter(&upload, &http, &layout, chapter).await {
+            Ok(pushed) => pushed,
+            Err(e) => {
+                st.lock()
+                    .await
+                    .push_event("error", format!("upload ch{chapter} failed: {e:#}"));
+                return;
+            }
+        };
+        let sent = pushed.report.created + pushed.report.replaced;
+        let mut inner = st.lock().await;
+        inner.delivered.insert(
+            chapter,
+            crate::state::Delivery {
+                sha256: pushed.sha256,
+                at: bm_proto::now_secs(),
+            },
+        );
+        let text = if sent == 0 {
+            format!("upload ch{chapter}: already on the server")
+        } else {
+            format!(
+                "upload ch{chapter}: {} created, {} replaced ({:.1} MB)",
+                pushed.report.created,
+                pushed.report.replaced,
+                pushed.report.bytes as f64 / (1024.0 * 1024.0)
+            )
+        };
+        inner.push_event(if sent == 0 { "info" } else { "ok" }, text);
+        if !inner.settings.retain.output {
+            inner.layout.drop_chapter_outputs(chapter, &[]);
+        }
+        inner.save();
     });
 }
 

@@ -30,6 +30,7 @@ impl Inner {
             exclusive: Vec::new(),
             intents: Vec::new(),
             upload_pending: Vec::new(),
+            delivered: std::collections::BTreeMap::new(),
         }
     }
 
@@ -228,7 +229,8 @@ impl Inner {
                          "dropped": self.dropped,
                          "profile": self.ledger_profile,
                          "exclusive": self.exclusive,
-                         "delete_intents": self.intents});
+                         "delete_intents": self.intents,
+                         "delivered": self.delivered});
         let _ = bm_core::write_json(&self.ledger_path(), &doc);
     }
 
@@ -330,6 +332,10 @@ impl Inner {
         }
         self.intents = doc
             .get("delete_intents")
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .unwrap_or_default();
+        self.delivered = doc
+            .get("delivered")
             .and_then(|v| serde_json::from_value(v.clone()).ok())
             .unwrap_or_default();
         self.dropped = doc

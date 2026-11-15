@@ -35,8 +35,10 @@ impl Inner {
             let has_txt = txt.is_file();
             let has_script = script.is_file();
             let has_mp3 = mp3.is_file();
+            // A confirmed delivery outlives the files when output is not kept.
+            let delivered = self.delivered.contains_key(&n);
             // The mp3 alone is not a merged chapter: the captions have to be
-            let merge_ok = has_mp3 && cues_current(&mp3);
+            let merge_ok = delivered || (has_mp3 && cues_current(&mp3));
             // Ground truth upgrades pending stages; assignments are verified below.
             for (stage, done) in [
                 (Stage::Crawl, has_txt),
@@ -66,7 +68,7 @@ impl Inner {
                 }
             }
             // The render ledger: one row per take, `Done` exactly where the
-            if has_script {
+            if has_script && !merge_ok {
                 self.materialize_render_takes(n);
             }
             // Assignments from a dead run: verify artifacts; unverified keeps

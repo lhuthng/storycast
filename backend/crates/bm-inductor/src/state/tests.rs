@@ -762,6 +762,56 @@ fn a_finished_merge_is_queued_for_the_push_when_auto_mode_is_on() {
 }
 
 #[test]
+fn a_delivered_chapter_is_not_rebuilt_when_its_files_are_gone() {
+    let (_d, mut inner) = fixture();
+    let ch = 3u32;
+    let mut t = Task::new(ch, Stage::Merge);
+    t.state = TaskState::Done;
+    inner.tasks.insert(format!("merge:{ch}"), t);
+
+    // No files, no delivery record: reconcile asks for the merge again.
+    inner.reconcile(ch, 1);
+    assert_eq!(inner.tasks[&format!("merge:{ch}")].state, TaskState::Pending);
+
+    let mut t = Task::new(ch, Stage::Merge);
+    t.state = TaskState::Done;
+    inner.tasks.insert(format!("merge:{ch}"), t);
+    inner.delivered.insert(
+        ch,
+        Delivery {
+            sha256: "00".into(),
+            at: 1,
+        },
+    );
+    inner.reconcile(ch, 1);
+    assert_eq!(
+        inner.tasks[&format!("merge:{ch}")].state,
+        TaskState::Done,
+        "delivered: nothing left to build"
+    );
+}
+
+#[test]
+fn cache_off_drops_the_takes_after_the_merge() {
+    let (_d, mut inner) = fixture();
+    let layout = inner.layout.clone();
+    inner.settings.retain.segments = false;
+    let dir = layout.seg_dir(&inner.settings.engine, 8);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("0000_take.wav"), vec![0u8; 2000]).unwrap();
+
+    let mut t = Task::new(8, Stage::Merge);
+    t.state = TaskState::Running;
+    t.assigned_to = Some("w1".into());
+    inner.tasks.insert("merge:8".into(), t);
+    std::fs::create_dir_all(layout.final_mp3(8).parent().unwrap()).unwrap();
+    std::fs::write(layout.final_mp3(8), vec![0u8; 2000]).unwrap();
+
+    inner.complete(&completion("w1", "merge:8", true, "merge ch8 -> out.mp3"));
+    assert!(!dir.exists(), "takes are dropped once the chapter is merged");
+}
+
+#[test]
 fn render_offer_requires_the_upload_capability() {
     // Staged rollout: an agent without `render-segments` keeps every
     let (_d, mut inner) = fixture();

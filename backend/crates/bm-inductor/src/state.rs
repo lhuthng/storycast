@@ -107,6 +107,17 @@ pub struct Inner {
     /// author API (`upload.on_merge`). In memory only: a restart uploads
     /// nothing, and `:upload` still catches whatever this lost.
     pub(crate) upload_pending: Vec<u32>,
+    /// Chapters the server has confirmed, by number. Persisted: with
+    /// `retain.output` off the files are gone, so this is the only proof a
+    /// chapter was merged and delivered, and reconcile must not rebuild it.
+    pub(crate) delivered: std::collections::BTreeMap<u32, Delivery>,
+}
+
+/// One confirmed delivery: the bytes the server now holds, and when.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Delivery {
+    pub sha256: String,
+    pub at: u64,
 }
 
 /// Delete this id on this provider, until the provider agrees it is gone.

@@ -86,6 +86,29 @@ pub struct Settings {
     /// Where finished chapters are pushed (`:upload`). See [`UploadSettings`].
     #[serde(default)]
     pub upload: UploadSettings,
+    /// What stays on disk after a chapter is finished. See [`RetainSettings`].
+    #[serde(default)]
+    pub retain: RetainSettings,
+}
+
+/// What outlives a finished chapter. Both default on: disk is cheaper than
+/// re-synthesizing, and the merged pair is what a later push reads.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RetainSettings {
+    /// Keep render takes after the merge. Off re-synthesizes on a re-render.
+    pub segments: bool,
+    /// Keep the mp3 + cue after the push confirms delivery.
+    pub output: bool,
+}
+
+impl Default for RetainSettings {
+    fn default() -> Self {
+        RetainSettings {
+            segments: true,
+            output: true,
+        }
+    }
 }
 
 /// The author API `:upload` writes to. The URL is the book's manifest, and a
@@ -320,6 +343,7 @@ impl Default for Settings {
             title_mode: default_title_mode(),
             output_dir: String::new(),
             segments_dir: String::new(),
+            retain: RetainSettings::default(),
             upload: UploadSettings::default(),
         }
     }

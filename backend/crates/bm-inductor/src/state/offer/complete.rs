@@ -261,6 +261,12 @@ impl Inner {
                     {
                         self.upload_pending.push(chapter);
                     }
+                    // Cache off: the takes are read once, by the merge, and a
+                    // re-render would re-synthesize them anyway.
+                    if !self.settings.retain.segments {
+                        let dir = self.layout.seg_dir(&self.settings.engine, chapter);
+                        let _ = std::fs::remove_dir_all(&dir);
+                    }
                 }
                 // The design this mp3 was mixed under, read *before* the borrow
                 let design = if stage == Stage::Merge {
